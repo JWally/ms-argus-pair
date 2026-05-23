@@ -1,0 +1,9 @@
+node_modules
+dist
+cdk.out
+cdk.context.json
+.env
+.env.local
+*.tsbuildinfo
+.DS_Store
+.vite

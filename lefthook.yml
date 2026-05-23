@@ -1,0 +1,18 @@
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      glob: '*.{ts,tsx,json,md,yml,yaml,css,html}'
+      run: npx prettier --check {staged_files}
+    lint:
+      glob: '*.{ts,tsx}'
+      run: npx eslint {staged_files} --max-warnings 0
+    typecheck:
+      glob: '*.{ts,tsx}'
+      run: npx tsc --noEmit
+
+pre-push:
+  parallel: true
+  commands:
+    build:
+      run: npm run build
