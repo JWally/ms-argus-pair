@@ -37,7 +37,7 @@ export function DeviceComparisonCard({ annotations }: DeviceComparisonCardProps)
 
   const rows: Row[] = [
     {
-      label: 'Integrity score',
+      label: 'Threat score',
       render: (side) => {
         const n = num(get(`${side}_score`));
         if (n === null) return { display: '—', tone: 'neutral' };
