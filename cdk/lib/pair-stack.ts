@@ -63,6 +63,7 @@ export class PairStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         HMAC_SECRET_ARN: hmacSecret.secretArn,
+        // Set after WS API is created (see addEnvironment below).
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: { minify: true, sourceMap: false, target: 'node22' },
@@ -91,6 +92,13 @@ export class PairStack extends cdk.Stack {
       autoDeploy: true,
       throttle: { burstLimit: 50, rateLimit: 20 },
     });
+    // The Lambda calls postToConnection via the raw API endpoint regardless
+    // of which domain the client connected through, so the IAM permission
+    // and the URL stay consistent.
+    signalingFn.addEnvironment(
+      'MANAGEMENT_API_ENDPOINT',
+      `https://${wsApi.apiId}.execute-api.${this.region}.amazonaws.com/${wsStage.stageName}`
+    );
 
     // Lambda needs to call back to clients via the management API.
     signalingFn.addToRolePolicy(

@@ -31,6 +31,13 @@ import {
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 const SECRET_ARN = process.env.HMAC_SECRET_ARN!;
+// Always call back via the raw APIGW endpoint, not the request's domainName.
+// When the client connects through a custom domain (e.g. signal-dev-jw.argus.pw)
+// the request context still carries that domain — using it as the management
+// endpoint produces an extra stage segment (https://signal-dev-jw.argus.pw/prod/...)
+// that AWS rejects with AccessDenied because the ARN doesn't match the IAM
+// permission. The raw apiId.execute-api endpoint always works.
+const MANAGEMENT_API_ENDPOINT = process.env.MANAGEMENT_API_ENDPOINT!;
 const TOKEN_TTL_SECONDS = 300; // 5 minutes — generous for a pairing session
 const MAX_PAYLOAD_BYTES = 16 * 1024;
 
@@ -88,9 +95,9 @@ async function verifyToken(token: string): Promise<string | null> {
   }
 }
 
-function client(domain: string, stage: string): ApiGatewayManagementApiClient {
+function client(): ApiGatewayManagementApiClient {
   return new ApiGatewayManagementApiClient({
-    endpoint: `https://${domain}/${stage}`,
+    endpoint: MANAGEMENT_API_ENDPOINT,
   });
 }
 
@@ -117,15 +124,13 @@ interface WsEvent {
   requestContext: {
     routeKey: string;
     connectionId: string;
-    domainName: string;
-    stage: string;
   };
   body?: string;
 }
 
 export const handler = async (event: WsEvent) => {
-  const { routeKey, connectionId, domainName, stage } = event.requestContext;
-  const api = client(domainName, stage);
+  const { routeKey, connectionId } = event.requestContext;
+  const api = client();
 
   // Hard cap on inbound message size to keep abuse off the table.
   if (event.body && event.body.length > MAX_PAYLOAD_BYTES) {
