@@ -1,7 +1,7 @@
 {
   "name": "ms-argus-pair",
   "version": "0.0.1",
-  "description": "Argus phone-pair captcha demo — WebRTC peer pairing between desktop and phone",
+  "description": "Argus phone-pair captcha demo — dual-scan co-attestation between desktop and phone",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,8 +19,8 @@
     "deploy": "npm run build && npx cdk deploy --all --require-approval never"
   },
   "dependencies": {
-    "@aws-sdk/client-apigatewaymanagementapi": "^3.658.0",
-    "@aws-sdk/client-secrets-manager": "^3.658.0",
+    "@aws-sdk/client-dynamodb": "^3.658.0",
+    "@aws-sdk/lib-dynamodb": "^3.658.0",
     "aws-cdk-lib": "2.190.0",
     "constructs": "^10.4.2",
     "react": "^19.2.3",

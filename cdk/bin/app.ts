@@ -10,7 +10,6 @@ new PairStack(app, 'ms-argus-pair-dev-jw', {
   stackName: 'ms-argus-pair-dev-jw',
   rootDomain: 'argus.pw',
   subdomain: 'captcha-dev-jw',
-  signalSubdomain: 'signal-dev-jw',
   synthesizer: new CliCredentialsStackSynthesizer(),
 });
 
