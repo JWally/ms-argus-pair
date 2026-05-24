@@ -16,6 +16,7 @@ new PairStack(app, 'ms-argus-pair-dev-jw', {
   stackName: 'ms-argus-pair-dev-jw',
   rootDomain: 'argus.pw',
   subdomain: 'captcha-dev-jw',
+  additionalAliases: [{ rootDomain: 'arcades.click', subdomain: 'qr' }],
   merchantApiUrl,
   merchantApiCredential,
   merchantCpi,

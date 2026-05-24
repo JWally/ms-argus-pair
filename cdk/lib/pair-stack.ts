@@ -30,9 +30,23 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+interface AliasDomain {
+  /** Hosted-zone apex, e.g. `arcades.click`. */
+  rootDomain: string;
+  /** Subdomain label, e.g. `qr`. */
+  subdomain: string;
+}
+
 interface PairStackProps extends cdk.StackProps {
   rootDomain: string;
   subdomain: string;
+  /**
+   * Additional fully-qualified aliases that should also serve the same
+   * site. Each gets a SAN on the ACM cert, a CloudFront alias entry,
+   * and an A-record in its own hosted zone. CORS / ALLOWED_ORIGINS
+   * include them too.
+   */
+  additionalAliases?: AliasDomain[];
   /** Base URL for ms-argus-api (e.g. https://merchant-dev-jw.argus.pw). */
   merchantApiUrl?: string;
   /** Dual-key credential from ms-argus-platform: `<keyId>.<base64-claims>.<base64-sig>`. */
@@ -45,11 +59,30 @@ export class PairStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PairStackProps) {
     super(scope, id, props);
 
-    const { rootDomain, subdomain, merchantApiUrl, merchantApiCredential, merchantCpi } =
-      props;
+    const {
+      rootDomain,
+      subdomain,
+      additionalAliases = [],
+      merchantApiUrl,
+      merchantApiCredential,
+      merchantCpi,
+    } = props;
     const domainName = `${subdomain}.${rootDomain}`;
 
     const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
+
+    // Build out the alias domain list: each entry has its own hosted
+    // zone lookup so we can emit a DNS-validation record + alias A-record
+    // there. Index suffixes keep construct IDs unique.
+    const aliases = additionalAliases.map((a, i) => {
+      const fqdn = `${a.subdomain}.${a.rootDomain}`;
+      const aliasZone = HostedZone.fromLookup(this, `AliasZone${i}`, {
+        domainName: a.rootDomain,
+      });
+      return { fqdn, zone: aliasZone, idx: i };
+    });
+    const allDomains = [domainName, ...aliases.map((a) => a.fqdn)];
+    const allOrigins = allDomains.map((d) => `https://${d}`);
 
     // ── Device-trust HMAC secret ──────────────────────────────────────
     // 64-byte auto-generated secret, stored in Secrets Manager so it
@@ -79,7 +112,7 @@ export class PairStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         TABLE_NAME: table.tableName,
-        ALLOWED_ORIGINS: `https://${domainName}`,
+        ALLOWED_ORIGINS: allOrigins.join(','),
         DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
         // Merchant-API access for the verdict-time scan lookup. When these
         // are absent the verdict logic degrades to "skipped" rather than
@@ -99,7 +132,7 @@ export class PairStack extends cdk.Stack {
     // ── HTTP API ───────────────────────────────────────────────────────
     const api = new apigatewayv2.HttpApi(this, 'PairApi', {
       corsPreflight: {
-        allowOrigins: [`https://${domainName}`],
+        allowOrigins: allOrigins,
         allowMethods: [apigatewayv2.CorsHttpMethod.GET, apigatewayv2.CorsHttpMethod.POST],
         allowHeaders: ['content-type'],
       },
@@ -166,9 +199,17 @@ export class PairStack extends cdk.Stack {
       })
     );
 
+    // Single cert with SANs covering every alias. DNS validation needs the
+    // record placed in the correct hosted zone per name — fromDnsMultiZone
+    // takes a {fqdn -> zone} map.
+    const zoneMap: Record<string, ReturnType<typeof HostedZone.fromLookup>> = {
+      [domainName]: zone,
+    };
+    for (const a of aliases) zoneMap[a.fqdn] = a.zone;
     const siteCert = new Certificate(this, 'SiteCertificate', {
       domainName,
-      validation: CertificateValidation.fromDns(zone),
+      subjectAlternativeNames: aliases.map((a) => a.fqdn),
+      validation: CertificateValidation.fromDnsMultiZone(zoneMap),
     });
 
     const s3Origin = new S3Origin(bucket, { originAccessIdentity: oai });
@@ -199,7 +240,7 @@ export class PairStack extends cdk.Stack {
           ])
         ),
       },
-      domainNames: [domainName],
+      domainNames: allDomains,
       certificate: siteCert,
       minimumProtocolVersion: SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: HttpVersion.HTTP2,
@@ -229,6 +270,13 @@ export class PairStack extends cdk.Stack {
       recordName: domainName,
       target: RecordTarget.fromAlias(new CloudFrontTarget(distribution)),
     });
+    for (const a of aliases) {
+      new ARecord(this, `AliasRecord${a.idx}`, {
+        zone: a.zone,
+        recordName: a.fqdn,
+        target: RecordTarget.fromAlias(new CloudFrontTarget(distribution)),
+      });
+    }
 
     const distPath = path.join(__dirname, '../../dist');
     new BucketDeployment(this, 'DeploySite', {
