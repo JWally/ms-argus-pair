@@ -45,15 +45,32 @@ import {
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { verifyRegistrationResponse } from '@simplewebauthn/server';
+import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+
+const MERCHANT_API_URL = process.env.MERCHANT_API_URL || '';
+const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
+const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
 const CLOCK_SKEW_SECONDS = 30;
 const EXPECTED_PURPOSE = 'argus-pair-v1';
 const MAX_BODY_BYTES = 16 * 1024;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+// Verdict thresholds (per spec). Individual = max(automation, device_tampering,
+// network_tampering) for one side. Total = sum of the two sides' individual
+// scores.
+const INDIVIDUAL_SCORE_LIMIT = 30;
+const TOTAL_SCORE_LIMIT = 50;
+
+// WebAuthn RP identifier. Must match the rpId the phone passes to
+// startRegistration on the client (window.location.hostname).
+const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
+const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -240,6 +257,263 @@ function validateAttestInput(body: Record<string, unknown>): AttestationInput | 
   };
 }
 
+// ── Verdict pipeline ───────────────────────────────────────────────────────
+
+interface MerchantProjection {
+  automation?: number;
+  device_tampering?: number;
+  network_tampering?: number;
+  verdict?: string;
+  identification?: {
+    browserDetails?: {
+      device?: string | null;
+      os?: string | null;
+    };
+  };
+  tags?: string[];
+  // Apple Private Access Token — present on Safari/iOS when issuer succeeds.
+  // Exact field name in the projection varies; we look in both `pat_*` and
+  // tag form. See ms-argus-api `project_argus_pat.md` memory.
+  pat_attested?: boolean;
+}
+
+interface ClassifiedScan {
+  individualScore: number; // max of three tampering axes (0-100)
+  isPhone: boolean;
+  isDatacenter: boolean;
+  isProxy: boolean;
+  patAttested: boolean;
+  ok: boolean; // basic projection-level verdict pass
+  raw?: MerchantProjection; // for debug
+}
+
+function splitCredential(credential: string): { keyId: string; token: string } {
+  const idx = credential.indexOf('.');
+  if (idx <= 0) throw new Error('credential malformed: missing keyId.token separator');
+  return { keyId: credential.slice(0, idx), token: credential.slice(idx + 1) };
+}
+
+/**
+ * Fetch the merchant-safe projection for an argusSessionId. Returns null
+ * if the lookup is impossible (missing config) so the verdict pipeline
+ * can degrade to "skipped" rather than block on Argus availability.
+ */
+async function fetchProjection(argusSessionId: string): Promise<MerchantProjection | null> {
+  if (!MERCHANT_API_URL || !MERCHANT_API_CREDENTIAL || !MERCHANT_CPI) {
+    console.warn('[pair] fetchProjection: merchant config missing');
+    return null;
+  }
+  try {
+    const { keyId, token } = splitCredential(MERCHANT_API_CREDENTIAL);
+    const url = `${MERCHANT_API_URL}/v1/session/${encodeURIComponent(MERCHANT_CPI)}/${encodeURIComponent(argusSessionId)}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'x-api-key': keyId, 'x-argus-token': token },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn(
+        `[pair] fetchProjection: ${res.status} for argusSessionId=${argusSessionId} body=${body.slice(0, 200)}`
+      );
+      return null;
+    }
+    return (await res.json().catch(() => null)) as MerchantProjection | null;
+  } catch (e) {
+    console.warn(`[pair] fetchProjection: threw ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/** Lowercased tag check, defensive against missing/empty tags array. */
+function hasTagLike(tags: string[] | undefined, ...patterns: string[]): boolean {
+  if (!Array.isArray(tags) || tags.length === 0) return false;
+  const lc = tags.map((t) => String(t).toLowerCase());
+  return patterns.some((p) => {
+    const needle = p.toLowerCase();
+    return lc.some((t) => t.includes(needle));
+  });
+}
+
+function classifyScan(p: MerchantProjection | null, side: string): ClassifiedScan | null {
+  if (!p) return null;
+  const individualScore = Math.max(
+    p.automation ?? 0,
+    p.device_tampering ?? 0,
+    p.network_tampering ?? 0
+  );
+
+  // Argus's projection fields drift across pipeline versions, so look in
+  // every plausible spot for the mobile/desktop signal. Cast through
+  // Record<string, unknown> to read fields not in our narrow TS type.
+  const projAny = p as unknown as Record<string, unknown>;
+  const bd = (projAny.identification as Record<string, unknown> | undefined)?.browserDetails as
+    | Record<string, unknown>
+    | undefined;
+  const deviceLabel = String(bd?.device ?? '').toLowerCase();
+  const deviceType = String(bd?.deviceType ?? '').toLowerCase();
+  const platform = String(bd?.platform ?? '').toLowerCase();
+  const os = String(bd?.os ?? '').toLowerCase();
+  const ua = String(bd?.userAgent ?? '');
+
+  // Treat as phone if ANY of:
+  //   - device or deviceType is "mobile" or "tablet"
+  //   - platform/os matches a phone OS (iOS, Android, iPadOS)
+  //   - userAgent contains the canonical mobile markers
+  const phoneSignals = [deviceLabel, deviceType, platform, os].some(
+    (v) => v === 'mobile' || v === 'tablet' || v === 'phone'
+  );
+  const phoneOsRe = /\b(ios|ipados|android|iphone|ipod)\b/i;
+  const isPhone =
+    phoneSignals ||
+    phoneOsRe.test(os) ||
+    phoneOsRe.test(platform) ||
+    /Mobile|Android|iPhone|iPad|iPod/.test(ua);
+
+  const isProxy = hasTagLike(p.tags, 'proxy');
+  const isDatacenter = hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn');
+  // Argus emits `apple_attested` as a top-level tag when
+  // integrity.pat.attested === true (see ms-argus-api merchant-
+  // projection buildTags rule). Match exactly that — earlier spellings
+  // (pat_attested / apple_pat) never existed in the projection schema.
+  const patAttested = p.pat_attested === true || hasTagLike(p.tags, 'apple_attested');
+  const ok = (p.verdict ?? 'PASS').toUpperCase() === 'PASS';
+
+  console.log(
+    `[pair] classifyScan side=${side} score=${individualScore} isPhone=${isPhone} isProxy=${isProxy} isDC=${isDatacenter} pat=${patAttested} verdict=${p.verdict} ` +
+      `device=${JSON.stringify({ deviceLabel, deviceType, platform, os, ua: ua.slice(0, 80) })} tags=${JSON.stringify(p.tags ?? null)}`
+  );
+
+  return { individualScore, isPhone, isDatacenter, isProxy, patAttested, ok };
+}
+
+interface VerdictResult {
+  verdict: Verdict;
+  reason: string;
+  annotations: Record<string, unknown>;
+}
+
+/**
+ * Apply the rules from the spec:
+ *   Hard deny — any of:
+ *     1. either side on a proxy
+ *     2. either side individual score >= 30
+ *     3. sum of scores >= 50
+ *     4. both sides classified as desktop/laptop
+ *   Golden ticket: PAT on a side overrides score + DC checks for that side only.
+ *   Soft rules: DC OK on desktop, NOT OK on phone (unless PAT).
+ *   Allow-with-annotation: both sides classified as phone.
+ *   VPN: no penalty either way (already absent from rules above).
+ */
+function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): VerdictResult {
+  const annotations: Record<string, unknown> = {
+    desktop_score: desktop.individualScore,
+    phone_score: phone.individualScore,
+    total_score: desktop.individualScore + phone.individualScore,
+    pat_used_desktop: desktop.patAttested,
+    pat_used_phone: phone.patAttested,
+    desktop_is_phone: desktop.isPhone,
+    phone_is_phone: phone.isPhone,
+    desktop_dc_asn: desktop.isDatacenter,
+    phone_dc_asn: phone.isDatacenter,
+    phone_to_phone: desktop.isPhone && phone.isPhone,
+  };
+
+  // Hard #1 — proxy on either side. No golden ticket overrides this.
+  if (desktop.isProxy) return { verdict: 'failed', reason: 'desktop_on_proxy', annotations };
+  if (phone.isProxy) return { verdict: 'failed', reason: 'phone_on_proxy', annotations };
+
+  // PAT overrides individual score + DC checks for that side only.
+  const desktopScoreOk = desktop.patAttested || desktop.individualScore < INDIVIDUAL_SCORE_LIMIT;
+  const phoneScoreOk = phone.patAttested || phone.individualScore < INDIVIDUAL_SCORE_LIMIT;
+  if (!desktopScoreOk) {
+    return { verdict: 'failed', reason: 'desktop_score_high', annotations };
+  }
+  if (!phoneScoreOk) {
+    return { verdict: 'failed', reason: 'phone_score_high', annotations };
+  }
+
+  const totalScore = desktop.individualScore + phone.individualScore;
+  // PAT on both sides: skip total check (both already golden-ticketed).
+  if (!(desktop.patAttested && phone.patAttested) && totalScore >= TOTAL_SCORE_LIMIT) {
+    return { verdict: 'failed', reason: 'total_score_high', annotations };
+  }
+
+  // Phone-on-datacenter — not OK unless PAT covered.
+  if (phone.isDatacenter && !phone.patAttested) {
+    return { verdict: 'failed', reason: 'phone_on_datacenter', annotations };
+  }
+
+  // Both-desktop is the only "shape" deny. Both-phone is allowed (annotated).
+  if (!desktop.isPhone && !phone.isPhone) {
+    return { verdict: 'failed', reason: 'both_sides_desktop', annotations };
+  }
+
+  return {
+    verdict: 'paired',
+    reason: annotations.phone_to_phone ? 'paired_phone_to_phone' : 'paired_desktop_and_phone',
+    annotations,
+  };
+}
+
+// ── WebAuthn proof-of-life verification ────────────────────────────────────
+
+interface WebAuthnAnnotations {
+  phone_webauthn_attested: boolean;
+  phone_webauthn_aaguid?: string;
+  phone_webauthn_format?: string;
+  phone_webauthn_credential_backed_up?: boolean;
+  phone_webauthn_user_verified?: boolean;
+  phone_webauthn_error?: string;
+}
+
+/**
+ * Verify the phone's WebAuthn proof-of-life registration. Uses the
+ * session nonce as expectedChallenge — the same nonce the phone signed
+ * over in the Argus envelope, so a single binding ties together the
+ * Argus scan, the device key, and the TEE attestation.
+ *
+ * Credentials are non-resident (residentKey:'discouraged' on the
+ * client) and we don't persist the credentialId server-side, so the
+ * credential is truly ephemeral — nothing to clean up.
+ */
+async function verifyWebAuthn(
+  webauthn: unknown,
+  expectedNonce: string
+): Promise<WebAuthnAnnotations> {
+  if (!webauthn || typeof webauthn !== 'object') {
+    return { phone_webauthn_attested: false, phone_webauthn_error: 'missing' };
+  }
+  const w = webauthn as Record<string, unknown>;
+  if (typeof w.error === 'string') {
+    return { phone_webauthn_attested: false, phone_webauthn_error: w.error };
+  }
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: webauthn as RegistrationResponseJSON,
+      expectedChallenge: expectedNonce,
+      expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+      expectedRPID: WEBAUTHN_RP_ID,
+      requireUserVerification: true,
+    });
+    if (!verification.verified || !verification.registrationInfo) {
+      return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
+    }
+    const info = verification.registrationInfo;
+    return {
+      phone_webauthn_attested: true,
+      phone_webauthn_aaguid: info.aaguid,
+      phone_webauthn_format: info.fmt,
+      phone_webauthn_credential_backed_up: info.credentialBackedUp,
+      phone_webauthn_user_verified: info.userVerified,
+    };
+  } catch (e) {
+    return {
+      phone_webauthn_attested: false,
+      phone_webauthn_error: (e as Error).message,
+    };
+  }
+}
+
 async function loadSession(sessionId: string): Promise<SessionItem | null> {
   const res = await ddb.send(
     new GetCommand({ TableName: TABLE, Key: { PK: `SESSION#${sessionId}`, SK: 'META' } })
@@ -345,6 +619,11 @@ export const handler = async (event: {
     case 'POST /api/session/{id}/phone-attest': {
       const argusSessionId = body.argusSessionId as string | undefined;
       const att = validateAttestInput(body);
+      // WebAuthn now arrives as a sibling field (not inside the Argus
+      // envelope payload) so the client can run WebAuthn + Argus scan in
+      // parallel. Both still bind to the session nonce, verified
+      // independently below.
+      const webauthnInput = body.webauthn;
       if (!argusSessionId || !att) {
         return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
       }
@@ -393,32 +672,79 @@ export const handler = async (event: {
         receivedAt: Math.floor(Date.now() / 1000),
         envelopeDecoded: v.decoded,
       };
-      // v0.1 verdict: both attestations signature-valid + same session/nonce
-      // → paired. Future versions cross-reference Argus scan telemetry
-      // (network, ASN, geo) before deciding, but for the demo this gates on
-      // "real SDK ran on two devices, bound to the same session".
-      const verdict: Verdict = 'paired';
+      // Both attestations are signature-valid + bound to the same
+      // session/nonce + cross-bound (phone signed over the desktop's keyId
+      // and argusSessionId). Now fetch the Argus scan projections and
+      // verify the WebAuthn proof-of-life in parallel.
+      const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
+        fetchProjection(s.desktopAttestation.argusSessionId),
+        fetchProjection(argusSessionId),
+        verifyWebAuthn(webauthnInput, s.nonce),
+      ]);
+      const desktopClass = classifyScan(desktopProj, 'desktop');
+      const phoneClass = classifyScan(phoneProj, 'phone');
+
+      let verdict: Verdict;
+      let reason: string;
+      let annotations: Record<string, unknown>;
+      if (!desktopClass || !phoneClass) {
+        // Projection lookup unavailable — either creds aren't configured or
+        // Argus didn't have the records yet. Pass through with an annotation
+        // so callers (and CW logs) know the scan-side checks were skipped;
+        // signature/binding checks all passed.
+        verdict = 'paired';
+        reason = 'lookup_unavailable_skipped';
+        annotations = {
+          score_lookup_skipped: true,
+          desktop_projection_present: !!desktopProj,
+          phone_projection_present: !!phoneProj,
+          ...webauthnResult,
+        };
+      } else {
+        const computed = computeVerdict(desktopClass, phoneClass);
+        verdict = computed.verdict;
+        reason = computed.reason;
+        annotations = { ...computed.annotations, ...webauthnResult };
+      }
+
       await ddb.send(
         new UpdateCommand({
           TableName: TABLE,
           Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-          UpdateExpression: 'SET phoneAttestation = :p, verdict = :v, verdictReason = :r',
+          UpdateExpression:
+            'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
           ConditionExpression:
             'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
           ExpressionAttributeValues: {
             ':p': stored,
             ':v': verdict,
-            ':r': 'both_attestations_verified',
+            ':r': reason,
+            ':a': annotations,
           },
         })
       );
-      return jsonResp(200, { verdict, reason: 'both_attestations_verified' });
+      return jsonResp(200, { verdict, reason, annotations });
     }
 
     case 'GET /api/session/{id}/result': {
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(200, { verdict: 'failed', reason: 'expired_or_missing' });
-      return jsonResp(200, { verdict: s.verdict, reason: s.verdictReason ?? null });
+      // 204 No Content while still pending — saves polling clients a few
+      // bytes per tick and is semantically correct. Real verdicts return
+      // 200 + JSON. Client checks status === 204 to decide whether to
+      // keep polling.
+      if (s.verdict === 'pending') {
+        return {
+          statusCode: 204,
+          headers: { 'Cache-Control': 'no-store' },
+          body: '',
+        };
+      }
+      return jsonResp(200, {
+        verdict: s.verdict,
+        reason: s.verdictReason ?? null,
+        annotations: (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
+      });
     }
 
     default:

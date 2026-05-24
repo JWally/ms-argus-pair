@@ -32,13 +32,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 interface PairStackProps extends cdk.StackProps {
   rootDomain: string;
   subdomain: string;
+  /** Base URL for ms-argus-api (e.g. https://merchant-dev-jw.argus.pw). */
+  merchantApiUrl?: string;
+  /** Dual-key credential from ms-argus-platform: `<keyId>.<base64-claims>.<base64-sig>`. */
+  merchantApiCredential?: string;
+  /** Public CPI used to partition integrity records (e.g. argus_cpi_test_…). */
+  merchantCpi?: string;
 }
 
 export class PairStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PairStackProps) {
     super(scope, id, props);
 
-    const { rootDomain, subdomain } = props;
+    const { rootDomain, subdomain, merchantApiUrl, merchantApiCredential, merchantCpi } =
+      props;
     const domainName = `${subdomain}.${rootDomain}`;
 
     const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
@@ -63,6 +70,14 @@ export class PairStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: `https://${domainName}`,
+        // Merchant-API access for the verdict-time scan lookup. When these
+        // are absent the verdict logic degrades to "skipped" rather than
+        // blocking on Argus availability.
+        ...(merchantApiUrl ? { MERCHANT_API_URL: merchantApiUrl } : {}),
+        ...(merchantApiCredential
+          ? { MERCHANT_API_CREDENTIAL: merchantApiCredential }
+          : {}),
+        ...(merchantCpi ? { MERCHANT_CPI: merchantCpi } : {}),
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: { minify: true, sourceMap: false, target: 'node22' },

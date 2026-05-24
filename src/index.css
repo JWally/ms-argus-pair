@@ -9,19 +9,139 @@
     height: 100%;
     min-height: 100dvh;
   }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -20%, rgba(77, 25, 121, 0.18), transparent 60%),
+      radial-gradient(800px 400px at 90% 110%, rgba(77, 25, 121, 0.1), transparent 60%),
+      #060608;
+    color: rgb(243, 244, 246);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
 }
 
 @layer components {
-  .panel {
-    @apply rounded-lg border border-edge bg-panel p-6;
+  .card {
+    @apply rounded-2xl border border-edge/60 bg-panel/60 backdrop-blur-sm;
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.02) inset,
+      0 20px 60px -20px rgba(0, 0, 0, 0.6);
+  }
+  .card-accent {
+    background:
+      linear-gradient(180deg, rgba(77, 25, 121, 0.12) 0%, rgba(20, 20, 20, 0.6) 60%),
+      rgba(20, 20, 20, 0.6);
+    border-color: rgba(77, 25, 121, 0.35);
   }
   .btn {
-    @apply inline-flex items-center justify-center rounded-md border border-edge bg-panel px-4 py-2 text-sm font-medium hover:border-accent disabled:opacity-50 disabled:cursor-not-allowed transition;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-edge/80 bg-white/[0.04] px-5 py-3 text-sm font-medium text-white/90 transition;
+    @apply hover:border-accent/60 hover:bg-white/[0.07] disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary {
-    @apply bg-accent border-accent hover:bg-purple-700;
+    background: linear-gradient(180deg, #5a1d8c 0%, #3f1466 100%);
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow:
+      0 10px 30px -10px rgba(77, 25, 121, 0.7),
+      0 0 0 1px rgba(77, 25, 121, 0.4);
+  }
+  .btn-primary:hover {
+    background: linear-gradient(180deg, #6b25a3 0%, #4d1979 100%);
+    box-shadow:
+      0 18px 40px -12px rgba(77, 25, 121, 0.9),
+      0 0 0 1px rgba(110, 46, 170, 0.6);
   }
   .pill {
-    @apply inline-flex items-center gap-2 rounded-full border border-edge bg-panel px-3 py-1 text-xs uppercase tracking-wider text-muted;
+    @apply inline-flex items-center gap-2 rounded-full border border-edge/60 bg-white/[0.03] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-muted;
   }
+  .label {
+    @apply text-[10px] uppercase tracking-[0.18em] text-muted;
+  }
+  .step {
+    @apply flex items-center gap-3 text-sm;
+  }
+  .step-dot {
+    @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-edge/60 bg-white/[0.03] text-[11px] font-medium text-muted;
+  }
+  .step-dot.active {
+    @apply border-accent/70 bg-accent/15 text-white;
+    box-shadow: 0 0 0 4px rgba(77, 25, 121, 0.18);
+  }
+  .step-dot.done {
+    @apply border-green-500/60 bg-green-500/15 text-green-300;
+  }
+
+  .qr-frame {
+    @apply relative rounded-2xl border border-edge/60 bg-black/50 p-4;
+    background-image:
+      linear-gradient(135deg, rgba(77, 25, 121, 0.18), transparent 40%),
+      linear-gradient(315deg, rgba(77, 25, 121, 0.12), transparent 40%);
+  }
+  .qr-frame::before,
+  .qr-frame::after {
+    content: '';
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-style: solid;
+    border-color: rgb(168 85 247 / 0.5);
+  }
+  .qr-frame::before {
+    top: -1px;
+    left: -1px;
+    border-width: 2px 0 0 2px;
+    border-top-left-radius: 12px;
+  }
+  .qr-frame::after {
+    bottom: -1px;
+    right: -1px;
+    border-width: 0 2px 2px 0;
+    border-bottom-right-radius: 12px;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.18);
+    border-top-color: rgb(168 85 247);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  .glow-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4ade80;
+    box-shadow: 0 0 0 4px rgba(74, 222, 128, 0.18);
+  }
+  .glow-dot.red {
+    background: #f87171;
+    box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.18);
+  }
+  .glow-dot.amber {
+    background: #facc15;
+    box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.18);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-fade {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.pulse-fade {
+  animation: pulse-fade 1.8s ease-in-out infinite;
 }

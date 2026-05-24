@@ -41,6 +41,8 @@ export default [
         RTCSessionDescriptionInit: 'readonly',
         RequestInit: 'readonly',
         WebSocket: 'readonly',
+        AbortSignal: 'readonly',
+        queueMicrotask: 'readonly',
       },
     },
     plugins: {

@@ -1,41 +1,44 @@
 /**
  * Client-side dual-scan co-attestation flow.
  *
- * Replaces the previous WebRTC pairing logic. Each side runs a full Argus
- * integrity scan and signs an envelope binding (sessionId, nonce, role,
- * peer-info) with the SDK's persistent device key. Server verifies both
- * envelopes + cross-references the Argus scan tokens.
- *
  *   Desktop                                  Server                            Phone
  *   ─────────                                ──────                            ─────
  *   POST /api/session/start ──────────────►
  *      ◄────────────────  {sessionId, nonce, expiresAt}
- *   argus.run({attest: {purpose, payload}}) → {argusSessionId, attestation}
- *   POST /api/session/{id}/desktop-attest ──►
- *   poll  /api/session/{id}/result ────────►
+ *   ─── QR rendered immediately ───
  *
- *   (QR with /pair/{sessionId})                                                scans
+ *   (background) argus.run({attest}) → POST /desktop-attest
+ *
+ *   ─── poll /api/session/{id}/result ───
+ *
+ *   (QR scanned)                                                                ─►
  *                                            GET /api/session/{id}/info ◄──────
- *                                              {nonce, expiresAt,
- *                                               desktopReady}
- *                                            argus.run({attest: {...
- *                                              desktopArgusSessionId,
- *                                              desktopKeyId}}) →
- *                                              {argusSessionId, attestation}
- *                                            POST /api/session/{id}/phone-attest ◄──
- *      ◄────────────────  poll result      {verdict, reason}
+ *                                              {nonce, desktopReady,
+ *                                               desktopArgusSessionId,
+ *                                               desktopKeyId}
+ *                                            (poll if !desktopReady)
  *
- * The phone's payload binds itself to the host's argusSessionId + keyId so a
- * third party who snooped the QR can't swap in their own desktop scan.
+ *                                            user taps "Proof of Life"
+ *                                            Promise.all([
+ *                                              navigator.credentials.create(...),
+ *                                              argus.run({attest: {nonce, ...}}),
+ *                                            ])
+ *                                            POST /api/session/{id}/phone-attest
+ *      ◄────────────────  poll result      { argusSessionId, attestation, webauthn }
+ *                                          → {verdict, reason, annotations}
+ *
+ * WebAuthn rides as a sibling field in the phone-attest POST body (not
+ * inside the Argus envelope payload), so the WebAuthn ceremony and the
+ * Argus scan can run concurrently. Both bind to the same server-issued
+ * nonce so the proofs stay tied to this specific session.
  */
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
 const ATTEST_TTL_SECONDS = 120;
-// Public CPI for the captcha demo. Baked into the bundle — CPIs are public-safe
-// (they're the merchant identifier on the integrity-collect request). Bumped
-// to the test CPI from CLAUDE.md memory; swap for prod when ready.
-const ARGUS_CPI = 'argus_cpi_test_b9UX4lEWFto8KHIeYlw5L4';
+const ARGUS_CPI =
+  (import.meta.env.VITE_MERCHANT_CPI as string | undefined) ??
+  'argus_cpi_test_UEeqk7Bk7uetxKKDxNmIdB';
 
 interface ArgusAttestation {
   envelope: string;
@@ -109,8 +112,11 @@ export interface DesktopSession {
   pairUrl: string;
   expiresAt: number;
   stop: () => void;
-  /** Resolves to the final verdict once the phone completes pairing. */
-  result: Promise<{ verdict: string; reason: string | null }>;
+  result: Promise<{
+    verdict: string;
+    reason: string | null;
+    annotations?: Record<string, unknown>;
+  }>;
 }
 
 const RESULT_POLL_MS = 1000;
@@ -123,46 +129,66 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     expiresAt: number;
   }>(`${API}/session/start`, { method: 'POST' });
 
-  events.onStatus?.('running argus scan');
-  const argus = getArgus();
-  const run = await argus.run({
-    cpi: ARGUS_CPI,
-    timeoutMs: 30_000,
-    attest: {
-      purpose: ATTEST_PURPOSE,
-      ttlSeconds: ATTEST_TTL_SECONDS,
-      payload: {
-        sessionId: session.sessionId,
-        nonce: session.nonce,
-        role: 'desktop',
-      },
-    },
-  });
-  if (!run.attestation) {
-    throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
-  }
-
-  events.onStatus?.('submitting attestation');
-  await jsonFetch(`${API}/session/${session.sessionId}/desktop-attest`, {
-    method: 'POST',
-    body: JSON.stringify({
-      argusSessionId: run.argusSessionId,
-      attestation: run.attestation,
-    }),
-  });
-
-  events.onStatus?.('waiting for phone');
   const pairUrl = `${window.location.origin}/pair/${session.sessionId}`;
+  events.onStatus?.('waiting for phone');
 
+  // Scan + desktop-attest run in the BACKGROUND so the QR can render
+  // immediately. The phone polls /info until desktopReady, so a phone
+  // that arrives before the desktop scan finishes just waits.
   let cancelled = false;
-  const result = new Promise<{ verdict: string; reason: string | null }>((resolve, reject) => {
+  let scanError: Error | null = null;
+  (async () => {
+    try {
+      const argus = getArgus();
+      const run = await argus.run({
+        cpi: ARGUS_CPI,
+        timeoutMs: 30_000,
+        attest: {
+          purpose: ATTEST_PURPOSE,
+          ttlSeconds: ATTEST_TTL_SECONDS,
+          payload: {
+            sessionId: session.sessionId,
+            nonce: session.nonce,
+            role: 'desktop',
+          },
+        },
+      });
+      if (!run.attestation) {
+        throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
+      }
+      if (cancelled) return;
+      await jsonFetch(`${API}/session/${session.sessionId}/desktop-attest`, {
+        method: 'POST',
+        body: JSON.stringify({
+          argusSessionId: run.argusSessionId,
+          attestation: run.attestation,
+        }),
+      });
+    } catch (e) {
+      scanError = e as Error;
+      events.onError?.(e);
+    }
+  })();
+
+  const result = new Promise<{
+    verdict: string;
+    reason: string | null;
+    annotations?: Record<string, unknown>;
+  }>((resolve, reject) => {
     const tick = async () => {
       if (cancelled) return;
+      if (scanError) {
+        reject(scanError);
+        return;
+      }
       try {
-        const r = await jsonFetch<{ verdict: string; reason: string | null }>(
-          `${API}/session/${session.sessionId}/result`
-        );
-        if (r.verdict === 'pending') {
+        // 204 = still pending; 200+JSON = real verdict.
+        const url = `${API}/session/${session.sessionId}/result?_=${Date.now()}`;
+        const res = await fetch(url, {
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
+        if (res.status === 204) {
           if (Date.now() / 1000 > session.expiresAt) {
             reject(new Error('session expired'));
             return;
@@ -170,7 +196,21 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
           window.setTimeout(tick, RESULT_POLL_MS);
           return;
         }
-        resolve(r);
+        if (!res.ok) {
+          throw new Error(`poll → ${res.status}`);
+        }
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          const snip = (await res.text()).slice(0, 80);
+          throw new Error(`poll → non-JSON: ${snip}`);
+        }
+        resolve(
+          (await res.json()) as {
+            verdict: string;
+            reason: string | null;
+            annotations?: Record<string, unknown>;
+          }
+        );
       } catch (e) {
         events.onError?.(e);
         reject(e);
@@ -192,67 +232,142 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
 
 // ── CLIENT (phone) ───────────────────────────────────────────────────────
 
-export async function completePhoneSession(
+export interface PhoneSessionInfo {
+  nonce: string;
+  expiresAt: number;
+  desktopArgusSessionId: string;
+  desktopKeyId: string;
+}
+
+/**
+ * Poll /info until desktopReady (with timeout). Called on mount so by the
+ * time the user taps "Proof of Life" the data is already in hand and we
+ * can start WebAuthn + the Argus scan immediately in parallel.
+ */
+export async function awaitDesktopReady(
   sessionId: string,
-  events: PairEvents = {}
-): Promise<{ verdict: string; reason: string | null }> {
-  events.onStatus?.('looking up session');
-  const info = await jsonFetch<{
-    nonce?: string;
-    expiresAt?: number;
-    desktopReady?: boolean;
-    verdict?: string;
-    expired?: boolean;
-    desktopArgusSessionId?: string;
-    desktopKeyId?: string;
-  }>(`${API}/session/${sessionId}/info`);
-
-  if (info.expired) throw new Error('session expired');
-  if (!info.desktopReady || !info.desktopArgusSessionId || !info.desktopKeyId) {
-    throw new Error("desktop hasn't completed its scan yet — retry shortly");
-  }
-  if (info.verdict && info.verdict !== 'pending') {
-    return { verdict: info.verdict, reason: 'already_decided' };
-  }
-
-  events.onStatus?.('running argus scan');
-  const argus = getArgus();
-  const run = await argus.run({
-    cpi: ARGUS_CPI,
-    timeoutMs: 30_000,
-    attest: {
-      purpose: ATTEST_PURPOSE,
-      ttlSeconds: ATTEST_TTL_SECONDS,
-      payload: {
-        sessionId,
+  signal?: AbortSignal
+): Promise<PhoneSessionInfo> {
+  const POLL_MS = 500;
+  const HARD_TIMEOUT_MS = 60_000;
+  const startedAt = Date.now();
+  while (true) {
+    if (signal?.aborted) throw new Error('aborted');
+    const info = await jsonFetch<{
+      nonce?: string;
+      expiresAt?: number;
+      desktopReady?: boolean;
+      desktopArgusSessionId?: string;
+      desktopKeyId?: string;
+      expired?: boolean;
+    }>(`${API}/session/${sessionId}/info`);
+    if (info.expired) throw new Error('session expired');
+    if (info.desktopReady && info.desktopArgusSessionId && info.desktopKeyId && info.nonce) {
+      return {
         nonce: info.nonce,
-        role: 'phone',
-        // Binding the phone's signed envelope to the desktop's identity is
-        // what stops someone snooping the QR from swapping in their own
-        // desktop scan: phone signs over desktopArgusSessionId + keyId, so
-        // the server can verify those match what the host actually posted.
-        // The phone learned these via /info — server-anchored, phone can't
-        // forge them.
+        expiresAt: info.expiresAt ?? 0,
         desktopArgusSessionId: info.desktopArgusSessionId,
         desktopKeyId: info.desktopKeyId,
+      };
+    }
+    if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
+      throw new Error("desktop didn't finish scanning in time");
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+}
+
+async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: string }> {
+  try {
+    const { startRegistration } = await import('@simplewebauthn/browser');
+    const rpId = window.location.hostname;
+    const result = await startRegistration({
+      optionsJSON: {
+        challenge: nonceB64Url,
+        rp: { id: rpId, name: 'Argus Pair' },
+        user: {
+          id: nonceB64Url,
+          name: 'ephemeral',
+          displayName: 'Argus Proof of Life',
+        },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },
+          { type: 'public-key', alg: -257 },
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          residentKey: 'discouraged',
+          requireResidentKey: false,
+          userVerification: 'required',
+        },
+        attestation: 'direct',
+        timeout: 60_000,
       },
-    },
-  });
+    });
+    return result;
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+}
+
+/**
+ * Run WebAuthn + Argus scan concurrently, then submit both. Caller has
+ * already awaited desktop-ready (via awaitDesktopReady) so we have the
+ * binding fields up front.
+ */
+export async function submitPhoneAttestation(
+  sessionId: string,
+  info: PhoneSessionInfo,
+  events: PairEvents = {}
+): Promise<{ verdict: string; reason: string | null; annotations?: Record<string, unknown> }> {
+  events.onStatus?.('proof of life + integrity scan');
+  const argus = getArgus();
+  // Both run in parallel. WebAuthn waits on the user; Argus runs the full
+  // scan. allSettled — if WebAuthn fails (declined / unsupported) the
+  // Argus scan still completes and we submit with {webauthn:{error}}.
+  const [webauthnSettled, runSettled] = await Promise.allSettled([
+    runProofOfLife(info.nonce),
+    argus.run({
+      cpi: ARGUS_CPI,
+      timeoutMs: 30_000,
+      attest: {
+        purpose: ATTEST_PURPOSE,
+        ttlSeconds: ATTEST_TTL_SECONDS,
+        payload: {
+          sessionId,
+          nonce: info.nonce,
+          role: 'phone',
+          // Phone binds itself to the desktop's identity — server checks
+          // these match what the desktop posted.
+          desktopArgusSessionId: info.desktopArgusSessionId,
+          desktopKeyId: info.desktopKeyId,
+        },
+      },
+    }),
+  ]);
+
+  if (runSettled.status !== 'fulfilled') {
+    throw runSettled.reason;
+  }
+  const run = runSettled.value;
   if (!run.attestation) {
     throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
   }
+  const webauthn =
+    webauthnSettled.status === 'fulfilled'
+      ? webauthnSettled.value
+      : { error: (webauthnSettled.reason as Error).message };
 
-  events.onStatus?.('submitting attestation');
-  const verdict = await jsonFetch<{ verdict: string; reason: string | null }>(
+  events.onStatus?.('submitting');
+  return jsonFetch<{ verdict: string; reason: string | null; annotations?: Record<string, unknown> }>(
     `${API}/session/${sessionId}/phone-attest`,
     {
       method: 'POST',
       body: JSON.stringify({
         argusSessionId: run.argusSessionId,
         attestation: run.attestation,
+        webauthn,
       }),
     }
   );
-
-  return verdict;
 }
