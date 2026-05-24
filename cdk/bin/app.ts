@@ -1,5 +1,7 @@
 #!/usr/bin/env npx tsx
 import { App, CliCredentialsStackSynthesizer } from 'aws-cdk-lib';
+// @ts-expect-error JS module sourced for parity with print-pair-host.mjs
+import { config as pairConfig } from './pair-config.mjs';
 import { PairStack } from '../lib/pair-stack';
 
 const app = new App();
@@ -14,9 +16,9 @@ const merchantCpi = app.node.tryGetContext('merchantCpi') as string | undefined;
 new PairStack(app, 'ms-argus-pair-dev-jw', {
   env: { account, region: 'us-east-1' },
   stackName: 'ms-argus-pair-dev-jw',
-  rootDomain: 'argus.pw',
-  subdomain: 'captcha-dev-jw',
-  additionalAliases: [{ rootDomain: 'arcades.click', subdomain: 'qr' }],
+  rootDomain: pairConfig.rootDomain,
+  subdomain: pairConfig.subdomain,
+  additionalAliases: pairConfig.additionalAliases,
   merchantApiUrl,
   merchantApiCredential,
   merchantCpi,

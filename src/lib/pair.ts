@@ -177,7 +177,14 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     expiresAt: number;
   }>(`${API}/session/start`, { method: 'POST' });
 
-  const pairUrl = `${window.location.origin}/pair/${session.sessionId}`;
+  // QR always points to the canonical argus host (env-pinned at build
+  // time via VITE_PAIR_URL_BASE). This keeps the phone's WebAuthn rpId
+  // stable across alias domains — a credential created at the argus
+  // host can be redeemed regardless of which alias the desktop loaded
+  // from. Falls back to window.location.origin for local dev.
+  const pairOrigin =
+    (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
+  const pairUrl = `${pairOrigin}/pair/${session.sessionId}`;
   events.onStatus?.('waiting for phone');
 
   // Scan + desktop-attest run in the BACKGROUND so the QR can render
