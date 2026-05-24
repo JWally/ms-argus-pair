@@ -5,7 +5,10 @@ import { joinRoom } from '../lib/pairing';
 type Phase = 'idle' | 'joining' | 'connected' | 'error';
 
 export function Pair() {
-  const { roomId } = useParams<{ roomId: string }>();
+  // The path param is the URL-encoded roomToken (HMAC-signed handle the
+  // signaling server uses to route messages to the host).
+  const { roomId: rawToken } = useParams<{ roomId: string }>();
+  const roomToken = rawToken ? decodeURIComponent(rawToken) : '';
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -19,16 +22,16 @@ export function Pair() {
   );
 
   async function start() {
-    if (!roomId) {
+    if (!roomToken) {
       setPhase('error');
-      setErrorMsg('Missing room id');
+      setErrorMsg('Missing room token');
       return;
     }
     setPhase('joining');
     setStatus('initializing');
     setErrorMsg(null);
     try {
-      const session = await joinRoom(roomId, {
+      const session = await joinRoom(roomToken, {
         onStatus: setStatus,
         onConnected: (dc) => {
           try {
@@ -59,7 +62,7 @@ export function Pair() {
       <section className="panel space-y-4">
         <h2 className="text-lg font-semibold">Pair this phone with the desktop</h2>
         <p className="text-sm text-muted break-all">
-          room: <span className="text-white">{roomId}</span>
+          token: <span className="text-white">{roomToken.slice(0, 24)}…</span>
         </p>
         {phase === 'idle' && (
           <button className="btn btn-primary" onClick={start}>

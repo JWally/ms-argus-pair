@@ -36,7 +36,9 @@ export function Demo() {
         },
       });
       stopRef.current = session.stop;
-      const url = `${window.location.origin}/pair/${session.roomId}`;
+      // The QR carries the HMAC-signed roomToken — the phone uses it as
+      // the destination address when relaying through the signaling server.
+      const url = `${window.location.origin}/pair/${encodeURIComponent(session.roomToken)}`;
       setPairUrl(url);
       setQrDataUrl(
         await QRCode.toDataURL(url, {

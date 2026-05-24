@@ -16,12 +16,11 @@
     "typecheck": "tsc --noEmit",
     "cdk:synth": "npx cdk synth",
     "cdk:diff": "npx cdk diff",
-    "deploy": "npm run build && npx cdk deploy --all --require-approval never",
-    "dev:signaling": "node scripts/dev-signaling.mjs"
+    "deploy": "npm run build && npx cdk deploy --all --require-approval never"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.658.0",
-    "@aws-sdk/lib-dynamodb": "^3.658.0",
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.658.0",
+    "@aws-sdk/client-secrets-manager": "^3.658.0",
     "aws-cdk-lib": "2.190.0",
     "constructs": "^10.4.2",
     "react": "^19.2.3",

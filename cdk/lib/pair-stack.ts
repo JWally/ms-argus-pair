@@ -9,128 +9,120 @@ import {
   SecurityPolicyProtocol,
   HttpVersion,
   PriceClass,
-  AllowedMethods,
   CachePolicy,
   OriginAccessIdentity,
-  OriginRequestPolicy,
 } from 'aws-cdk-lib/aws-cloudfront';
-import { S3Origin, HttpOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
-import { PolicyStatement, CanonicalUserPrincipal } from 'aws-cdk-lib/aws-iam';
+import { S3Origin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { PolicyStatement, CanonicalUserPrincipal, Effect } from 'aws-cdk-lib/aws-iam';
 import { BucketDeployment, Source, CacheControl } from 'aws-cdk-lib/aws-s3-deployment';
 import { HostedZone, ARecord, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
 import { Certificate, CertificateValidation } from 'aws-cdk-lib/aws-certificatemanager';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaRuntime from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface PairStackProps extends cdk.StackProps {
   rootDomain: string;
   subdomain: string;
+  /** Subdomain for the WebSocket signaling endpoint (wss://). */
+  signalSubdomain: string;
 }
 
 export class PairStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PairStackProps) {
     super(scope, id, props);
 
-    const { rootDomain, subdomain } = props;
+    const { rootDomain, subdomain, signalSubdomain } = props;
     const domainName = `${subdomain}.${rootDomain}`;
+    const signalDomain = `${signalSubdomain}.${rootDomain}`;
 
-    // ── DynamoDB for signaling state (TTL-managed) ─────────────────────
-    const table = new dynamodb.Table(this, 'Signaling', {
-      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      timeToLiveAttribute: 'ttl',
+    const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
+
+    // ── HMAC secret for stateless pairing tokens ───────────────────────
+    const hmacSecret = new secretsmanager.Secret(this, 'HmacSecret', {
+      description: 'HMAC secret for ms-argus-pair WebSocket token signing',
+      generateSecretString: {
+        passwordLength: 64,
+        excludePunctuation: true,
+      },
     });
 
-    // ── Signaling Lambda ───────────────────────────────────────────────
+    // ── WebSocket signaling Lambda ─────────────────────────────────────
     const signalingFn = new lambda.NodejsFunction(this, 'SignalingFn', {
-      entry: path.join(__dirname, 'signaling.ts'),
+      entry: path.join(__dirname, 'signaling-ws.ts'),
       handler: 'handler',
       runtime: lambdaRuntime.Runtime.NODEJS_22_X,
       architecture: lambdaRuntime.Architecture.ARM_64,
       memorySize: 256,
       timeout: cdk.Duration.seconds(10),
       environment: {
-        TABLE_NAME: table.tableName,
-        ALLOWED_ORIGINS: `https://${domainName}`,
+        HMAC_SECRET_ARN: hmacSecret.secretArn,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: { minify: true, sourceMap: false, target: 'node22' },
     });
-    table.grantReadWriteData(signalingFn);
+    hmacSecret.grantRead(signalingFn);
 
-    // ── API Gateway ────────────────────────────────────────────────────
-    const api = new apigatewayv2.HttpApi(this, 'PairApi', {
-      // CORS is belt-and-suspenders; primary path is same-origin via CloudFront.
-      corsPreflight: {
-        allowOrigins: [`https://${domainName}`],
-        allowMethods: [
-          apigatewayv2.CorsHttpMethod.GET,
-          apigatewayv2.CorsHttpMethod.POST,
-          apigatewayv2.CorsHttpMethod.PUT,
+    // ── WebSocket API ──────────────────────────────────────────────────
+    const wsIntegration = new integrations.WebSocketLambdaIntegration('SigWsInt', signalingFn);
+    const wsApi = new apigatewayv2.WebSocketApi(this, 'PairWsApi', {
+      connectRouteOptions: { integration: wsIntegration },
+      disconnectRouteOptions: { integration: wsIntegration },
+      defaultRouteOptions: { integration: wsIntegration },
+    });
+    const wsStage = new apigatewayv2.WebSocketStage(this, 'PairWsStage', {
+      webSocketApi: wsApi,
+      stageName: 'prod',
+      autoDeploy: true,
+      throttle: { burstLimit: 50, rateLimit: 20 },
+    });
+
+    // Lambda needs to call back to clients via the management API.
+    signalingFn.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ['execute-api:ManageConnections'],
+        resources: [
+          this.formatArn({
+            service: 'execute-api',
+            resource: `${wsApi.apiId}/${wsStage.stageName}/POST/@connections/*`,
+          }),
         ],
-        allowHeaders: ['content-type'],
-      },
-      // Hard throttle at the API level. Lambda still validates per-request.
-      defaultDomainMapping: undefined,
-    });
-    const integration = new integrations.HttpLambdaIntegration('SigInt', signalingFn);
+      })
+    );
 
-    // Routes carry the /api prefix so CloudFront's pass-through (`/api/*`)
-    // resolves to a real APIGW route. Without the prefix, APIGW returns 403
-    // and CloudFront's errorResponses rewrites it to the SPA index.html.
-    api.addRoutes({ path: '/api/rooms', methods: [apigatewayv2.HttpMethod.POST], integration });
-    api.addRoutes({
-      path: '/api/rooms/{id}/join',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/rooms/{id}/peers',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/rooms/{id}/signal',
-      methods: [apigatewayv2.HttpMethod.PUT],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/rooms/{id}/signal/{peerId}',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/rooms/{id}/end',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    // Catchall — any unmatched /api/* path routes to Lambda, which returns
-    // 200 + {error:...}. Without this, APIGW returns 404 → CloudFront's
-    // errorResponses[404] rewrites to the SPA index.html and any client
-    // that misconstructs a URL gets unparseable HTML back.
-    api.addRoutes({
-      path: '/api/{proxy+}',
-      methods: [apigatewayv2.HttpMethod.ANY],
-      integration,
+    // ── WSS custom domain ──────────────────────────────────────────────
+    const wsCert = new Certificate(this, 'WsCertificate', {
+      domainName: signalDomain,
+      validation: CertificateValidation.fromDns(zone),
     });
 
-    // ── Throttling — keep blast radius small for the demo ──────────────
-    const defaultStage = api.defaultStage?.node.defaultChild as apigatewayv2.CfnStage | undefined;
-    if (defaultStage) {
-      defaultStage.defaultRouteSettings = {
-        throttlingBurstLimit: 50,
-        throttlingRateLimit: 20,
-      };
-    }
+    const wsDomain = new apigatewayv2.DomainName(this, 'WsDomain', {
+      domainName: signalDomain,
+      certificate: wsCert,
+    });
+    new apigatewayv2.ApiMapping(this, 'WsApiMapping', {
+      api: wsApi,
+      domainName: wsDomain,
+      stage: wsStage,
+    });
+
+    new ARecord(this, 'WsAliasRecord', {
+      zone,
+      recordName: signalDomain,
+      target: RecordTarget.fromAlias({
+        bind: () => ({
+          dnsName: wsDomain.regionalDomainName,
+          hostedZoneId: wsDomain.regionalHostedZoneId,
+        }),
+      }),
+    });
 
     // ── S3 bucket for static site ──────────────────────────────────────
     const bucket = new Bucket(this, 'SiteBucket', {
@@ -152,54 +144,42 @@ export class PairStack extends cdk.Stack {
     );
 
     // ── DNS & Certificate ──────────────────────────────────────────────
-    const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
-    const certificate = new Certificate(this, 'SiteCertificate', {
+    const siteCert = new Certificate(this, 'SiteCertificate', {
       domainName,
       validation: CertificateValidation.fromDns(zone),
     });
 
-    // ── Cache policies ─────────────────────────────────────────────────
-    // Use AWS-managed policies (do not count toward per-account CachePolicy
-    // quota). CACHING_DISABLED for HTML so SPA changes are picked up; the
-    // managed CACHING_OPTIMIZED policy is fine for hashed static assets.
-    const staticCachePolicy = CachePolicy.CACHING_OPTIMIZED;
-    const htmlCachePolicy = CachePolicy.CACHING_DISABLED;
-
     // ── CloudFront ─────────────────────────────────────────────────────
+    // Static site only. Signaling lives on its own WSS subdomain — no
+    // CloudFront proxy = no /api/* behavior, no errorResponses trickery,
+    // no caching layer to misroute live API traffic.
     const s3Origin = new S3Origin(bucket, { originAccessIdentity: oai });
-    const apiOrigin = new HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`);
 
     const distribution = new Distribution(this, 'SiteDistribution', {
       defaultBehavior: {
         origin: s3Origin,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        cachePolicy: htmlCachePolicy,
+        cachePolicy: CachePolicy.CACHING_DISABLED,
       },
-      additionalBehaviors: {
-        '/api/*': {
-          origin: apiOrigin,
-          viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          allowedMethods: AllowedMethods.ALLOW_ALL,
-          cachePolicy: CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-        },
-        ...Object.fromEntries(
-          ['*.js', '*.css', '*.woff*', '*.png', '*.jpg', '*.svg'].map((pattern) => [
-            pattern,
-            {
-              origin: s3Origin,
-              cachePolicy: staticCachePolicy,
-              viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-            },
-          ])
-        ),
-      },
+      additionalBehaviors: Object.fromEntries(
+        ['*.js', '*.css', '*.woff*', '*.png', '*.jpg', '*.svg'].map((pattern) => [
+          pattern,
+          {
+            origin: s3Origin,
+            cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+            viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          },
+        ])
+      ),
       domainNames: [domainName],
-      certificate,
+      certificate: siteCert,
       minimumProtocolVersion: SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: HttpVersion.HTTP2,
       priceClass: PriceClass.PRICE_CLASS_100,
       defaultRootObject: 'index.html',
+      // SPA fallback: S3 returns 403 (OAI blocks listing) for unknown
+      // keys, CloudFront rewrites to index.html so client-side routes
+      // (/pair/<uuid>) resolve.
       errorResponses: [
         {
           httpStatus: 403,
@@ -233,6 +213,6 @@ export class PairStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'SiteURL', { value: `https://${domainName}` });
-    new cdk.CfnOutput(this, 'ApiUrl', { value: api.apiEndpoint });
+    new cdk.CfnOutput(this, 'SignalingURL', { value: `wss://${signalDomain}` });
   }
 }

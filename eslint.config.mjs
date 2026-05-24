@@ -40,6 +40,7 @@ export default [
         RTCIceCandidatePairStats: 'readonly',
         RTCSessionDescriptionInit: 'readonly',
         RequestInit: 'readonly',
+        WebSocket: 'readonly',
       },
     },
     plugins: {

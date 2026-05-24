@@ -1,20 +1,19 @@
 /**
- * WebRTC pairing client. Adapted from web-quaker for two-peer-only pairing
- * over same-origin /api signaling. Returns a Promise that resolves when the
- * DataChannel opens.
+ * WebSocket-based pairing client.
  *
- * Host (desktop): createRoom() → POST /api/rooms; poll for peers; on join,
- * create offer + DataChannel; poll for answer + ICE.
+ * Wire protocol matches cdk/lib/signaling-ws.ts. Each side opens its own
+ * WebSocket to the signaling server, exchanges a handful of messages, and
+ * builds a direct WebRTC DataChannel. The signaling WS closes as soon as
+ * the data channel is open.
  *
- * Client (phone): joinRoom(roomId) → POST /api/rooms/:id/join; poll for offer;
- * create answer + send ICE.
+ * Stateless on the server side: pairing info is carried in HMAC-signed
+ * tokens. Host gets a roomToken on create; phone receives it via the QR
+ * code, validates by sending {action:"join", roomToken}, and the server
+ * pushes each side a peerToken it can address the other with.
  */
 
-const API = '/api';
-const POLL_MS = 500;
-// Stop polling after this long if the channel never opens. Matches the
-// signaling-room TTL on the server — past this point the room is gone
-// anyway, and idle polls just bill Lambda invocations.
+const SIGNALING_URL = 'wss://signal-dev-jw.argus.pw';
+
 const PAIR_TIMEOUT_MS = 60_000;
 const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 
@@ -29,73 +28,64 @@ export interface PairEvents {
   onError?: (err: unknown) => void;
 }
 
-interface CreateRoomResponse {
-  roomId: string;
-  peerId: number;
-  ttlSeconds: number;
+interface ServerEvent {
+  event: string;
+  [k: string]: unknown;
 }
 
-interface JoinRoomResponse {
-  peerId: number;
-}
+class Signaler {
+  private ws: WebSocket;
+  private opened: Promise<void>;
+  private handlers = new Map<string, (msg: ServerEvent) => void>();
+  private closed = false;
 
-interface SignalsResponse {
-  offer: RTCSessionDescriptionInit | null;
-  answer: RTCSessionDescriptionInit | null;
-  iceToClient: RTCIceCandidateInit[];
-  iceToHost: RTCIceCandidateInit[];
-}
-
-async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
-  // Cache-bust every request so no browser / proxy / CDN can ever serve a
-  // stale response. CACHING_DISABLED on CloudFront already prevents CDN
-  // caching, but corporate proxies and some browser-level caches (Firefox
-  // in particular) have been observed to ignore Cache-Control: no-store.
-  // A unique URL is the only fully reliable bypass.
-  const sep = input.includes('?') ? '&' : '?';
-  const url = `${input}${sep}_=${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const res = await fetch(url, {
-    ...init,
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      Pragma: 'no-cache',
-      'Cache-Control': 'no-cache',
-      ...(init?.headers || {}),
-    },
-  });
-  const method = init?.method || 'GET';
-  const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('application/json')) {
-    const snippet = (await res.text()).slice(0, 80).replace(/\s+/g, ' ');
-    throw new Error(
-      `${method} ${input} → ${res.status} non-JSON (${contentType || 'no content-type'}): ${snippet}`
-    );
+  constructor(url: string) {
+    this.ws = new WebSocket(url);
+    this.opened = new Promise((resolve, reject) => {
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (e) => reject(new Error(`WebSocket error: ${String(e)}`));
+    });
+    this.ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '') as ServerEvent;
+        const h = this.handlers.get(msg.event);
+        if (h) h(msg);
+        else console.warn('[pair] unhandled signaling event', msg);
+      } catch (e) {
+        console.warn('[pair] bad signaling message', e, ev.data);
+      }
+    };
+    this.ws.onclose = () => {
+      this.closed = true;
+    };
   }
-  if (!res.ok) {
-    // Status is a real error code AND body is JSON; surface the error body.
-    const errBody = await res.text();
-    throw new Error(`${method} ${input} → ${res.status} ${errBody.slice(0, 200)}`);
+
+  ready(): Promise<void> {
+    return this.opened;
   }
-  return res.json() as Promise<T>;
+
+  on(event: string, handler: (msg: ServerEvent) => void): void {
+    this.handlers.set(event, handler);
+  }
+
+  send(payload: Record<string, unknown>): void {
+    if (this.closed) return;
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.ws.close();
+    } catch {
+      /* noop */
+    }
+  }
 }
 
-function putSignal(
-  roomId: string,
-  peerId: number,
-  type: 'offer' | 'answer' | 'ice-to-client' | 'ice-to-host',
-  payload: RTCSessionDescription | RTCIceCandidate
-): Promise<unknown> {
-  const body: Record<string, unknown> = { peerId, type };
-  if (type === 'offer' || type === 'answer') body.sdp = payload;
-  else body.candidate = payload;
-  return jsonFetch(`${API}/rooms/${roomId}/signal`, {
-    method: 'PUT',
-    body: JSON.stringify(body),
-  }).catch((e) => {
-    console.warn('[pair] signal PUT error', e);
-  });
+function buildPC(): RTCPeerConnection {
+  return new RTCPeerConnection({ iceServers: STUN_SERVERS });
 }
 
 async function selectedCandidatePair(
@@ -118,19 +108,19 @@ async function selectedCandidatePair(
 
 export async function createRoom(events: PairEvents = {}): Promise<{
   roomId: string;
+  roomToken: string;
   stop: () => void;
   ready: Promise<void>;
 }> {
-  events.onStatus?.('creating room');
-  const room = await jsonFetch<CreateRoomResponse>(`${API}/rooms`, { method: 'POST' });
-  const roomId = room.roomId;
+  events.onStatus?.('connecting to signaling');
+  const sig = new Signaler(SIGNALING_URL);
+  await sig.ready();
 
-  const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+  const pc = buildPC();
   const dc = pc.createDataChannel('argus-pair', { ordered: true });
-  let sentOffer = false;
-  let appliedAnswer = false;
-  let iceIdx = 0;
-  let pollTimer: number | null = null;
+  let peerToken: string | null = null;
+  let timer: number | null = null;
+
   let resolveReady: () => void = () => {};
   let rejectReady: (e: unknown) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => {
@@ -138,90 +128,17 @@ export async function createRoom(events: PairEvents = {}): Promise<{
     rejectReady = reject;
   });
 
-  pc.onicecandidate = (ev) => {
-    // Host sends candidates intended for the client (the joiner).
-    if (ev.candidate) putSignal(roomId, /* joiner */ 2, 'ice-to-client', ev.candidate);
-  };
-
-  dc.onopen = async () => {
-    events.onStatus?.('connected');
-    const pair = await selectedCandidatePair(pc);
-    events.onConnected?.(dc, { selectedCandidatePair: pair });
-    resolveReady();
-  };
-  dc.onmessage = (ev) => events.onMessage?.(ev.data);
-  dc.onerror = (e) => events.onError?.(e);
-
-  // Poll: discover joiner, then exchange offer/answer/ICE.
-  events.onStatus?.('waiting for phone');
-  let peerSeen = false;
-  const pollStartedAt = Date.now();
-  pollTimer = window.setInterval(async () => {
-    try {
-      if (Date.now() - pollStartedAt > PAIR_TIMEOUT_MS && dc.readyState !== 'open') {
-        if (pollTimer !== null) window.clearInterval(pollTimer);
-        pollTimer = null;
-        rejectReady(new Error('Pairing timed out'));
-        return;
-      }
-      if (!peerSeen) {
-        const list = await jsonFetch<{ peers: number[]; peerCount: number; expired?: boolean }>(
-          `${API}/rooms/${roomId}/peers`
-        );
-        if (list.expired) {
-          if (pollTimer !== null) window.clearInterval(pollTimer);
-          pollTimer = null;
-          rejectReady(new Error('Room expired'));
-          return;
-        }
-        if (list.peers.includes(2)) {
-          peerSeen = true;
-          events.onPeerJoined?.();
-          events.onStatus?.('phone joined; negotiating');
-          if (!sentOffer) {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            await putSignal(roomId, 2, 'offer', pc.localDescription!);
-            sentOffer = true;
-          }
-        }
-      }
-
-      if (peerSeen) {
-        // We polled the joiner's signaling slot (peerId=2) for answer + ICE.
-        const sigs = await jsonFetch<SignalsResponse>(`${API}/rooms/${roomId}/signal/2`);
-        if (sigs.answer && !appliedAnswer) {
-          await pc.setRemoteDescription(new RTCSessionDescription(sigs.answer));
-          appliedAnswer = true;
-        }
-        if (sigs.iceToHost.length > iceIdx) {
-          for (let i = iceIdx; i < sigs.iceToHost.length; i++) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(sigs.iceToHost[i]));
-            } catch (e) {
-              console.warn('[pair] addIceCandidate', e);
-            }
-          }
-          iceIdx = sigs.iceToHost.length;
-        }
-      }
-
-      if (dc.readyState === 'open' && pollTimer !== null) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-        jsonFetch(`${API}/rooms/${roomId}/end`, { method: 'POST' }).catch(() => {});
-      }
-    } catch (e) {
-      events.onError?.(e);
-      rejectReady(e);
-    }
-  }, POLL_MS);
+  let resolveCreated: (v: { roomId: string; roomToken: string }) => void = () => {};
+  const createdP = new Promise<{ roomId: string; roomToken: string }>((resolve) => {
+    resolveCreated = resolve;
+  });
 
   const stop = () => {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
     }
+    sig.close();
     try {
       dc.close();
     } catch {
@@ -230,26 +147,104 @@ export async function createRoom(events: PairEvents = {}): Promise<{
     pc.close();
   };
 
-  return { roomId, stop, ready };
+  timer = window.setTimeout(() => {
+    if (dc.readyState !== 'open') {
+      rejectReady(new Error('Pairing timed out'));
+      stop();
+    }
+  }, PAIR_TIMEOUT_MS);
+
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate && peerToken) {
+      sig.send({
+        action: 'relay',
+        to: peerToken,
+        payload: { kind: 'ice', candidate: ev.candidate },
+      });
+    }
+  };
+
+  dc.onopen = async () => {
+    events.onStatus?.('connected');
+    const pair = await selectedCandidatePair(pc);
+    events.onConnected?.(dc, { selectedCandidatePair: pair });
+    resolveReady();
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    sig.close();
+  };
+  dc.onmessage = (ev) => events.onMessage?.(ev.data);
+  dc.onerror = (e) => events.onError?.(e);
+
+  sig.on('room_created', (msg) => {
+    resolveCreated({ roomId: msg.roomId as string, roomToken: msg.roomToken as string });
+    events.onStatus?.('waiting for phone');
+  });
+
+  sig.on('peer_joined', async (msg) => {
+    peerToken = msg.peerToken as string;
+    events.onPeerJoined?.();
+    events.onStatus?.('phone joined; negotiating');
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sig.send({
+      action: 'relay',
+      to: peerToken,
+      payload: { kind: 'offer', sdp: pc.localDescription },
+    });
+  });
+
+  sig.on('relay', async (msg) => {
+    const payload = msg.payload as {
+      kind: string;
+      sdp?: RTCSessionDescriptionInit;
+      candidate?: RTCIceCandidateInit;
+    };
+    if (payload.kind === 'answer' && payload.sdp) {
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+    } else if (payload.kind === 'ice' && payload.candidate) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+      } catch (e) {
+        console.warn('[pair] addIceCandidate', e);
+      }
+    }
+  });
+
+  sig.on('peer_gone', () => {
+    events.onStatus?.('peer disconnected');
+    rejectReady(new Error('Peer disconnected'));
+    stop();
+  });
+
+  sig.on('error', (msg) => {
+    rejectReady(new Error((msg.message as string) || 'Signaling error'));
+    stop();
+  });
+
+  sig.send({ action: 'create' });
+  const { roomId, roomToken } = await createdP;
+
+  return { roomId, roomToken, stop, ready };
 }
 
 // ── CLIENT (phone) ───────────────────────────────────────────────────────
 
 export async function joinRoom(
-  roomId: string,
+  roomToken: string,
   events: PairEvents = {}
 ): Promise<{ stop: () => void; ready: Promise<void> }> {
-  events.onStatus?.('joining room');
-  const join = await jsonFetch<JoinRoomResponse>(`${API}/rooms/${roomId}/join`, {
-    method: 'POST',
-  });
-  const myPeerId = join.peerId;
+  events.onStatus?.('connecting to signaling');
+  const sig = new Signaler(SIGNALING_URL);
+  await sig.ready();
 
-  const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+  const pc = buildPC();
   let dc: RTCDataChannel | null = null;
-  let appliedOffer = false;
-  let iceIdx = 0;
-  let pollTimer: number | null = null;
+  let peerToken: string | null = null;
+  let timer: number | null = null;
+
   let resolveReady: () => void = () => {};
   let rejectReady: (e: unknown) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => {
@@ -257,8 +252,35 @@ export async function joinRoom(
     rejectReady = reject;
   });
 
+  const stop = () => {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    sig.close();
+    try {
+      dc?.close();
+    } catch {
+      /* noop */
+    }
+    pc.close();
+  };
+
+  timer = window.setTimeout(() => {
+    if (dc?.readyState !== 'open') {
+      rejectReady(new Error('Pairing timed out'));
+      stop();
+    }
+  }, PAIR_TIMEOUT_MS);
+
   pc.onicecandidate = (ev) => {
-    if (ev.candidate) putSignal(roomId, myPeerId, 'ice-to-host', ev.candidate);
+    if (ev.candidate && peerToken) {
+      sig.send({
+        action: 'relay',
+        to: peerToken,
+        payload: { kind: 'ice', candidate: ev.candidate },
+      });
+    }
   };
 
   pc.ondatachannel = (ev) => {
@@ -268,62 +290,59 @@ export async function joinRoom(
       const pair = await selectedCandidatePair(pc);
       events.onConnected?.(dc!, { selectedCandidatePair: pair });
       resolveReady();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      sig.close();
     };
     dc.onmessage = (e) => events.onMessage?.(e.data);
     dc.onerror = (e) => events.onError?.(e);
   };
 
-  events.onStatus?.('waiting for offer');
-  const pollStartedAt = Date.now();
-  pollTimer = window.setInterval(async () => {
-    try {
-      if (Date.now() - pollStartedAt > PAIR_TIMEOUT_MS && dc?.readyState !== 'open') {
-        if (pollTimer !== null) window.clearInterval(pollTimer);
-        pollTimer = null;
-        rejectReady(new Error('Pairing timed out'));
-        return;
-      }
-      const sigs = await jsonFetch<SignalsResponse>(`${API}/rooms/${roomId}/signal/${myPeerId}`);
-      if (sigs.offer && !appliedOffer) {
-        appliedOffer = true;
-        await pc.setRemoteDescription(new RTCSessionDescription(sigs.offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await putSignal(roomId, myPeerId, 'answer', pc.localDescription!);
-        events.onStatus?.('negotiating');
-      }
-      if (sigs.iceToClient.length > iceIdx) {
-        for (let i = iceIdx; i < sigs.iceToClient.length; i++) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(sigs.iceToClient[i]));
-          } catch (e) {
-            console.warn('[pair] addIceCandidate', e);
-          }
-        }
-        iceIdx = sigs.iceToClient.length;
-      }
-      if (dc && dc.readyState === 'open' && pollTimer !== null) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-      }
-    } catch (e) {
-      events.onError?.(e);
-      rejectReady(e);
-    }
-  }, POLL_MS);
+  sig.on('joined', (msg) => {
+    // Server echoes back the original roomToken — it's the address that
+    // routes to the host's connection.
+    peerToken = msg.peerToken as string;
+    events.onStatus?.('joined; waiting for offer');
+  });
 
-  const stop = () => {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
+  sig.on('relay', async (msg) => {
+    const payload = msg.payload as {
+      kind: string;
+      sdp?: RTCSessionDescriptionInit;
+      candidate?: RTCIceCandidateInit;
+    };
+    if (payload.kind === 'offer' && payload.sdp && peerToken) {
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sig.send({
+        action: 'relay',
+        to: peerToken,
+        payload: { kind: 'answer', sdp: pc.localDescription },
+      });
+      events.onStatus?.('negotiating');
+    } else if (payload.kind === 'ice' && payload.candidate) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+      } catch (e) {
+        console.warn('[pair] addIceCandidate', e);
+      }
     }
-    try {
-      dc?.close();
-    } catch {
-      /* noop */
-    }
-    pc.close();
-  };
+  });
+
+  sig.on('peer_gone', () => {
+    rejectReady(new Error('Peer disconnected'));
+    stop();
+  });
+
+  sig.on('error', (msg) => {
+    rejectReady(new Error((msg.message as string) || 'Signaling error'));
+    stop();
+  });
+
+  sig.send({ action: 'join', roomToken });
 
   return { stop, ready };
 }
