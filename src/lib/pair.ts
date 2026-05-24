@@ -310,18 +310,97 @@ async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: s
   }
 }
 
+interface AttestResponse {
+  verdict: string;
+  reason: string | null;
+  annotations?: Record<string, unknown>;
+  nextDeviceTrust?: string | null;
+}
+
 /**
- * Run WebAuthn + Argus scan concurrently, then submit both. Caller has
- * already awaited desktop-ready (via awaitDesktopReady) so we have the
- * binding fields up front.
+ * Run the phone's side of the attestation. Two paths:
+ *
+ *   - If a valid device-trust token is in IndexedDB, attempt the silent
+ *     path: Argus scan only, no WebAuthn ceremony. Server verifies the
+ *     token (strict IP-pin) and waves WebAuthn. Token rejection (any
+ *     reason — expired / IP changed / bad HMAC) → server returns 401,
+ *     we clear the token and fall through to fresh WebAuthn.
+ *
+ *   - Otherwise (or after a failed redeem): WebAuthn + Argus in
+ *     parallel, original Promise.allSettled flow. On success, server
+ *     returns nextDeviceTrust which we persist for the next visit.
  */
 export async function submitPhoneAttestation(
   sessionId: string,
   info: PhoneSessionInfo,
   events: PairEvents = {}
-): Promise<{ verdict: string; reason: string | null; annotations?: Record<string, unknown> }> {
-  events.onStatus?.('proof of life + integrity scan');
+): Promise<AttestResponse> {
   const argus = getArgus();
+
+  // ── Silent redeem path ─────────────────────────────────────────
+  const { loadTrustToken, saveTrustToken, clearTrustToken } = await import(
+    './device-trust'
+  );
+  const trustToken = await loadTrustToken();
+  if (trustToken) {
+    events.onStatus?.('welcome back — verifying');
+    try {
+      const run = await argus.run({
+        cpi: ARGUS_CPI,
+        timeoutMs: 30_000,
+        attest: {
+          purpose: ATTEST_PURPOSE,
+          ttlSeconds: ATTEST_TTL_SECONDS,
+          payload: {
+            sessionId,
+            nonce: info.nonce,
+            role: 'phone',
+            desktopArgusSessionId: info.desktopArgusSessionId,
+            desktopKeyId: info.desktopKeyId,
+          },
+        },
+      });
+      if (run.attestation) {
+        const url = `${API}/session/${sessionId}/phone-attest?_=${Date.now()}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            argusSessionId: run.argusSessionId,
+            attestation: run.attestation,
+            deviceTrustToken: trustToken,
+          }),
+        });
+        if (res.ok) {
+          const r = (await res.json()) as AttestResponse;
+          if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
+          return r;
+        }
+        if (res.status === 401) {
+          // Token rejected — strict IP pin or expiry or pubkey mismatch.
+          // Clear stale token and fall through to fresh WebAuthn.
+          await clearTrustToken();
+          events.onStatus?.('trust expired — re-verifying');
+        } else {
+          // Other error — fall through to fresh WebAuthn too, since trust
+          // path is meant to be best-effort.
+          await clearTrustToken();
+          events.onStatus?.('falling back to webauthn');
+        }
+      }
+    } catch (e) {
+      events.onError?.(e);
+      await clearTrustToken();
+      events.onStatus?.('falling back to webauthn');
+    }
+  }
+
+  // ── Fresh WebAuthn + Argus parallel path ───────────────────────
+  events.onStatus?.('proof of life + integrity scan');
   // Both run in parallel. WebAuthn waits on the user; Argus runs the full
   // scan. allSettled — if WebAuthn fails (declined / unsupported) the
   // Argus scan still completes and we submit with {webauthn:{error}}.
@@ -337,8 +416,6 @@ export async function submitPhoneAttestation(
           sessionId,
           nonce: info.nonce,
           role: 'phone',
-          // Phone binds itself to the desktop's identity — server checks
-          // these match what the desktop posted.
           desktopArgusSessionId: info.desktopArgusSessionId,
           desktopKeyId: info.desktopKeyId,
         },
@@ -359,15 +436,14 @@ export async function submitPhoneAttestation(
       : { error: (webauthnSettled.reason as Error).message };
 
   events.onStatus?.('submitting');
-  return jsonFetch<{ verdict: string; reason: string | null; annotations?: Record<string, unknown> }>(
-    `${API}/session/${sessionId}/phone-attest`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        argusSessionId: run.argusSessionId,
-        attestation: run.attestation,
-        webauthn,
-      }),
-    }
-  );
+  const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
+    method: 'POST',
+    body: JSON.stringify({
+      argusSessionId: run.argusSessionId,
+      attestation: run.attestation,
+      webauthn,
+    }),
+  });
+  if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
+  return r;
 }

@@ -37,7 +37,15 @@
  *   5. ECDSA-P256-SHA-256 verify(signature, raw envelope bytes, publicKey)
  *   6. then app-level: payload.sessionId === session id, payload.nonce === nonce
  */
-import { createHash, createPublicKey, createVerify, randomBytes, randomUUID } from 'crypto';
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  createVerify,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
@@ -45,6 +53,7 @@ import {
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 
@@ -71,6 +80,29 @@ const TOTAL_SCORE_LIMIT = 50;
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
+
+// Device-trust token. Once a phone passes WebAuthn we mint an HMAC-signed
+// blob containing (pubkey, ip, exp). On the NEXT visit within the TTL,
+// from the same IP, the phone presents the token instead of running the
+// biometric ceremony again. Strict IP-pin: any drift forces fresh
+// WebAuthn. The HMAC secret lives in Secrets Manager so it survives
+// Lambda redeploys (otherwise every deploy would invalidate every token).
+const DEVICE_TRUST_SECRET_ARN = process.env.DEVICE_TRUST_SECRET_ARN || '';
+const DEVICE_TRUST_TTL_SECONDS = 12 * 3600;
+const sm = new SecretsManagerClient({});
+let cachedTrustSecret: string | null = null;
+async function getTrustSecret(): Promise<string | null> {
+  if (cachedTrustSecret) return cachedTrustSecret;
+  if (!DEVICE_TRUST_SECRET_ARN) return null;
+  try {
+    const r = await sm.send(new GetSecretValueCommand({ SecretId: DEVICE_TRUST_SECRET_ARN }));
+    cachedTrustSecret = r.SecretString || null;
+    return cachedTrustSecret;
+  } catch (e) {
+    console.warn(`[pair] getTrustSecret failed: ${(e as Error).message}`);
+    return null;
+  }
+}
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -455,6 +487,110 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
   };
 }
 
+// ── Device-trust token (silent re-auth after first WebAuthn) ──────────────
+
+interface DeviceTrustPayload {
+  v: 1;
+  pubkey: string; // SPKI base64, matches the SDK device key
+  keyId: string;
+  ip: string; // strict — any drift forces re-WebAuthn
+  iat: number;
+  exp: number;
+}
+
+function b64urlEncodeBytes(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function mintDeviceTrust(
+  pubkey: string,
+  keyId: string,
+  ip: string
+): Promise<string | null> {
+  const secret = await getTrustSecret();
+  if (!secret || !ip) return null;
+  const iat = Math.floor(Date.now() / 1000);
+  const payload: DeviceTrustPayload = {
+    v: 1,
+    pubkey,
+    keyId,
+    ip,
+    iat,
+    exp: iat + DEVICE_TRUST_TTL_SECONDS,
+  };
+  const body = b64urlEncodeBytes(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const mac = createHmac('sha256', secret).update(body).digest('base64url');
+  return `${body}.${mac}`;
+}
+
+interface DeviceTrustVerifyResult {
+  ok: boolean;
+  reason?: string;
+  payload?: DeviceTrustPayload;
+}
+
+async function verifyDeviceTrust(
+  token: string,
+  requesterIp: string,
+  expectedPubKey: string
+): Promise<DeviceTrustVerifyResult> {
+  if (typeof token !== 'string' || !token.includes('.')) {
+    return { ok: false, reason: 'malformed' };
+  }
+  const [body, mac] = token.split('.', 2);
+  if (!body || !mac) return { ok: false, reason: 'malformed' };
+  const secret = await getTrustSecret();
+  if (!secret) return { ok: false, reason: 'no_secret' };
+  const expected = createHmac('sha256', secret).update(body).digest('base64url');
+  const a = Buffer.from(mac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return { ok: false, reason: 'hmac' };
+  }
+  let payload: DeviceTrustPayload;
+  try {
+    payload = JSON.parse(b64urlToBuf(body).toString('utf8')) as DeviceTrustPayload;
+  } catch {
+    return { ok: false, reason: 'not_json' };
+  }
+  if (payload.v !== 1) return { ok: false, reason: 'version' };
+  const now = Math.floor(Date.now() / 1000);
+  if (now > payload.exp) return { ok: false, reason: 'expired' };
+  if (!requesterIp) return { ok: false, reason: 'no_requester_ip' };
+  if (payload.ip !== requesterIp) return { ok: false, reason: 'ip_changed' };
+  if (payload.pubkey !== expectedPubKey) return { ok: false, reason: 'pubkey_mismatch' };
+  return { ok: true, payload };
+}
+
+/**
+ * Real client IP. APIGW HTTP v2's requestContext.http.sourceIp is CloudFront's
+ * edge — useless for device-trust binding. Read the real viewer IP from the
+ * CloudFront-Viewer-Address header (set by the same-origin /api/* behavior
+ * via the ALL_VIEWER_EXCEPT_HOST_HEADER origin request policy).
+ */
+function getViewerIp(event: {
+  headers?: Record<string, string | undefined>;
+  requestContext?: { http?: { sourceIp?: string }; identity?: { sourceIp?: string } };
+}): string {
+  const headers = event.headers || {};
+  const raw =
+    headers['cloudfront-viewer-address'] || headers['CloudFront-Viewer-Address'] || '';
+  if (raw) {
+    // IPv6: "[2001:db8::1]:12345"
+    if (raw.startsWith('[')) {
+      const close = raw.indexOf(']');
+      if (close > 0) return raw.slice(1, close);
+    }
+    // IPv4: "1.2.3.4:54321"
+    const lastColon = raw.lastIndexOf(':');
+    if (lastColon > 0) return raw.slice(0, lastColon);
+    return raw;
+  }
+  return (
+    event.requestContext?.http?.sourceIp ?? event.requestContext?.identity?.sourceIp ?? ''
+  );
+}
+
 // ── WebAuthn proof-of-life verification ────────────────────────────────────
 
 interface WebAuthnAnnotations {
@@ -624,6 +760,12 @@ export const handler = async (event: {
       // parallel. Both still bind to the session nonce, verified
       // independently below.
       const webauthnInput = body.webauthn;
+      // Device-trust token. Alternative to a fresh WebAuthn ceremony —
+      // proves "this device passed WebAuthn recently from this same IP".
+      // Strict IP-pin; any verify failure returns 401 so the client can
+      // clear the stale token and fall back to fresh WebAuthn.
+      const deviceTrustToken =
+        typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
       if (!argusSessionId || !att) {
         return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
       }
@@ -672,14 +814,40 @@ export const handler = async (event: {
         receivedAt: Math.floor(Date.now() / 1000),
         envelopeDecoded: v.decoded,
       };
+      // If the phone presented a device-trust token, verify it FIRST.
+      // Strict IP-pin: any failure → 401 + clear-token signal to client.
+      const requesterIp = getViewerIp(event);
+      let trustResult: DeviceTrustVerifyResult | null = null;
+      if (deviceTrustToken) {
+        trustResult = await verifyDeviceTrust(deviceTrustToken, requesterIp, att.publicKey);
+        if (!trustResult.ok) {
+          // 401 — client clears its cached token and retries with fresh
+          // WebAuthn. This is the "any failure forces re-WebAuthn" rule.
+          return jsonResp(401, {
+            error: 'device_trust_invalid',
+            reason: trustResult.reason,
+          });
+        }
+      }
+
       // Both attestations are signature-valid + bound to the same
       // session/nonce + cross-bound (phone signed over the desktop's keyId
       // and argusSessionId). Now fetch the Argus scan projections and
       // verify the WebAuthn proof-of-life in parallel.
+      //
+      // If device-trust was redeemed above, we skip WebAuthn verification
+      // (trust IS the proof of prior WebAuthn) and synthesize the
+      // attested-true annotations from the trust result.
       const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
         fetchProjection(s.desktopAttestation.argusSessionId),
         fetchProjection(argusSessionId),
-        verifyWebAuthn(webauthnInput, s.nonce),
+        trustResult?.ok
+          ? Promise.resolve<WebAuthnAnnotations>({
+              phone_webauthn_attested: true,
+              phone_webauthn_user_verified: true,
+              phone_webauthn_format: 'device_trust_redeem',
+            } as WebAuthnAnnotations)
+          : verifyWebAuthn(webauthnInput, s.nonce),
       ]);
       const desktopClass = classifyScan(desktopProj, 'desktop');
       const phoneClass = classifyScan(phoneProj, 'phone');
@@ -707,6 +875,21 @@ export const handler = async (event: {
         annotations = { ...computed.annotations, ...webauthnResult };
       }
 
+      // Mint a fresh device-trust token if this phone just passed fresh
+      // WebAuthn (not a redeem). The next pairing within 12h from the
+      // same IP can skip the biometric prompt.
+      let nextDeviceTrust: string | null = null;
+      if (
+        verdict === 'paired' &&
+        !trustResult?.ok &&
+        (webauthnResult as WebAuthnAnnotations).phone_webauthn_attested
+      ) {
+        nextDeviceTrust = await mintDeviceTrust(att.publicKey, att.keyId, requesterIp);
+      }
+      if (trustResult?.ok) {
+        annotations.phone_device_trust_redeemed = true;
+      }
+
       await ddb.send(
         new UpdateCommand({
           TableName: TABLE,
@@ -723,7 +906,7 @@ export const handler = async (event: {
           },
         })
       );
-      return jsonResp(200, { verdict, reason, annotations });
+      return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
     }
 
     case 'GET /api/session/{id}/result': {

@@ -43,6 +43,8 @@ export default [
         WebSocket: 'readonly',
         AbortSignal: 'readonly',
         queueMicrotask: 'readonly',
+        indexedDB: 'readonly',
+        IDBDatabase: 'readonly',
       },
     },
     plugins: {

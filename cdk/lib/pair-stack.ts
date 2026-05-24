@@ -26,6 +26,7 @@ import * as lambdaRuntime from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,15 @@ export class PairStack extends cdk.Stack {
 
     const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
 
+    // ── Device-trust HMAC secret ──────────────────────────────────────
+    // 64-byte auto-generated secret, stored in Secrets Manager so it
+    // survives Lambda redeploys (otherwise every deploy would invalidate
+    // every issued device-trust token).
+    const deviceTrustSecret = new secretsmanager.Secret(this, 'DeviceTrustSecret', {
+      description: 'HMAC secret for ms-argus-pair device-trust tokens',
+      generateSecretString: { passwordLength: 64, excludePunctuation: true },
+    });
+
     // ── DDB: pair session state (TTL-managed) ──────────────────────────
     const table = new dynamodb.Table(this, 'PairSessions', {
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
@@ -70,6 +80,7 @@ export class PairStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: `https://${domainName}`,
+        DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
         // Merchant-API access for the verdict-time scan lookup. When these
         // are absent the verdict logic degrades to "skipped" rather than
         // blocking on Argus availability.
@@ -83,6 +94,7 @@ export class PairStack extends cdk.Stack {
       bundling: { minify: true, sourceMap: false, target: 'node22' },
     });
     table.grantReadWriteData(pairFn);
+    deviceTrustSecret.grantRead(pairFn);
 
     // ── HTTP API ───────────────────────────────────────────────────────
     const api = new apigatewayv2.HttpApi(this, 'PairApi', {
