@@ -254,6 +254,9 @@ export const handler = async (event: {
     }
 
     default:
-      return json(404, { error: 'Not found' });
+      // 200 instead of 404 so CloudFront's errorResponses[404] (which
+      // rewrites 404 → SPA index.html) doesn't turn this into HTML.
+      // Clients inspect the `error` field on the body.
+      return json(200, { error: 'No matching route', routeKey });
   }
 };

@@ -113,6 +113,15 @@ export class PairStack extends cdk.Stack {
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });
+    // Catchall — any unmatched /api/* path routes to Lambda, which returns
+    // 200 + {error:...}. Without this, APIGW returns 404 → CloudFront's
+    // errorResponses[404] rewrites to the SPA index.html and any client
+    // that misconstructs a URL gets unparseable HTML back.
+    api.addRoutes({
+      path: '/api/{proxy+}',
+      methods: [apigatewayv2.HttpMethod.ANY],
+      integration,
+    });
 
     // ── Throttling — keep blast radius small for the demo ──────────────
     const defaultStage = api.defaultStage?.node.defaultChild as apigatewayv2.CfnStage | undefined;
