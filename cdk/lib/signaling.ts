@@ -27,7 +27,10 @@ function ttl(): number {
 function json(statusCode: number, body: unknown) {
   return {
     statusCode,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
     body: JSON.stringify(body),
   };
 }

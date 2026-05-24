@@ -49,9 +49,26 @@ interface SignalsResponse {
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...(init?.headers || {}),
+    },
   });
-  if (!res.ok) throw new Error(`${init?.method || 'GET'} ${input} → ${res.status}`);
+  const method = init?.method || 'GET';
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const snippet = (await res.text()).slice(0, 80).replace(/\s+/g, ' ');
+    throw new Error(
+      `${method} ${input} → ${res.status} non-JSON (${contentType || 'no content-type'}): ${snippet}`
+    );
+  }
+  if (!res.ok) {
+    // Status is a real error code AND body is JSON; surface the error body.
+    const errBody = await res.text();
+    throw new Error(`${method} ${input} → ${res.status} ${errBody.slice(0, 200)}`);
+  }
   return res.json() as Promise<T>;
 }
 
