@@ -12,6 +12,10 @@
 
 const API = '/api';
 const POLL_MS = 500;
+// Stop polling after this long if the channel never opens. Matches the
+// signaling-room TTL on the server — past this point the room is gone
+// anyway, and idle polls just bill Lambda invocations.
+const PAIR_TIMEOUT_MS = 60_000;
 const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 export interface PairEvents {
@@ -125,12 +129,25 @@ export async function createRoom(events: PairEvents = {}): Promise<{
   // Poll: discover joiner, then exchange offer/answer/ICE.
   events.onStatus?.('waiting for phone');
   let peerSeen = false;
+  const pollStartedAt = Date.now();
   pollTimer = window.setInterval(async () => {
     try {
+      if (Date.now() - pollStartedAt > PAIR_TIMEOUT_MS && dc.readyState !== 'open') {
+        if (pollTimer !== null) window.clearInterval(pollTimer);
+        pollTimer = null;
+        rejectReady(new Error('Pairing timed out'));
+        return;
+      }
       if (!peerSeen) {
-        const list = await jsonFetch<{ peers: number[]; peerCount: number }>(
+        const list = await jsonFetch<{ peers: number[]; peerCount: number; expired?: boolean }>(
           `${API}/rooms/${roomId}/peers`
         );
+        if (list.expired) {
+          if (pollTimer !== null) window.clearInterval(pollTimer);
+          pollTimer = null;
+          rejectReady(new Error('Room expired'));
+          return;
+        }
         if (list.peers.includes(2)) {
           peerSeen = true;
           events.onPeerJoined?.();
@@ -231,8 +248,15 @@ export async function joinRoom(
   };
 
   events.onStatus?.('waiting for offer');
+  const pollStartedAt = Date.now();
   pollTimer = window.setInterval(async () => {
     try {
+      if (Date.now() - pollStartedAt > PAIR_TIMEOUT_MS && dc?.readyState !== 'open') {
+        if (pollTimer !== null) window.clearInterval(pollTimer);
+        pollTimer = null;
+        rejectReady(new Error('Pairing timed out'));
+        return;
+      }
       const sigs = await jsonFetch<SignalsResponse>(`${API}/rooms/${roomId}/signal/${myPeerId}`);
       if (sigs.offer && !appliedOffer) {
         appliedOffer = true;

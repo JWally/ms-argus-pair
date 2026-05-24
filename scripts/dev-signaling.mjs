@@ -122,7 +122,9 @@ const server = http.createServer(async (req, res) => {
     const id = mm[1].toLowerCase();
     if (!UUID_RE.test(id)) return send(res, 400, { error: 'Invalid room id' });
     const r = getRoom(id);
-    if (!r) return send(res, 404, { error: 'Room not found' });
+    // 200 + expired:true so client behavior matches prod (CloudFront's
+    // errorResponses[404] would otherwise turn a real 404 into SPA HTML).
+    if (!r) return send(res, 200, { peers: [], peerCount: 0, expired: true });
     return send(res, 200, { peers: [...r.peers], peerCount: r.peerCount });
   }
 

@@ -139,7 +139,12 @@ export const handler = async (event: {
           })
         ),
       ]);
-      if (!meta.Item) return json(404, { error: 'Room not found' });
+      // Return 200 with expired:true rather than 404 so CloudFront's
+      // errorResponses[404] (which rewrites to the SPA index.html) doesn't
+      // turn a legitimate API response into HTML.
+      if (!meta.Item) {
+        return json(200, { peers: [], peerCount: 0, expired: true });
+      }
       return json(200, {
         peers: (peers.Items || []).map((i) => i.peerId as number),
         peerCount: meta.Item.peerCount,
