@@ -11,9 +11,6 @@ import {
   PriceClass,
   AllowedMethods,
   CachePolicy,
-  CacheHeaderBehavior,
-  CacheCookieBehavior,
-  CacheQueryStringBehavior,
   OriginAccessIdentity,
   OriginRequestPolicy,
 } from 'aws-cdk-lib/aws-cloudfront';
@@ -33,7 +30,6 @@ import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface PairStackProps extends cdk.StackProps {
-  stage: string;
   rootDomain: string;
   subdomain: string;
 }
@@ -42,7 +38,7 @@ export class PairStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PairStackProps) {
     super(scope, id, props);
 
-    const { stage, rootDomain, subdomain } = props;
+    const { rootDomain, subdomain } = props;
     const domainName = `${subdomain}.${rootDomain}`;
 
     // ── DynamoDB for signaling state (TTL-managed) ─────────────────────
@@ -151,29 +147,11 @@ export class PairStack extends cdk.Stack {
     });
 
     // ── Cache policies ─────────────────────────────────────────────────
-    const staticCachePolicy = new CachePolicy(this, 'StaticAssetsCachePolicy', {
-      cachePolicyName: `${stage}-pair-static-assets`,
-      defaultTtl: cdk.Duration.days(30),
-      maxTtl: cdk.Duration.days(365),
-      minTtl: cdk.Duration.seconds(0),
-      enableAcceptEncodingBrotli: true,
-      enableAcceptEncodingGzip: true,
-      headerBehavior: CacheHeaderBehavior.none(),
-      cookieBehavior: CacheCookieBehavior.none(),
-      queryStringBehavior: CacheQueryStringBehavior.none(),
-    });
-
-    const htmlCachePolicy = new CachePolicy(this, 'HtmlCachePolicy', {
-      cachePolicyName: `${stage}-pair-html-no-cache`,
-      defaultTtl: cdk.Duration.seconds(0),
-      maxTtl: cdk.Duration.seconds(86400),
-      minTtl: cdk.Duration.seconds(0),
-      enableAcceptEncodingBrotli: true,
-      enableAcceptEncodingGzip: true,
-      headerBehavior: CacheHeaderBehavior.none(),
-      cookieBehavior: CacheCookieBehavior.none(),
-      queryStringBehavior: CacheQueryStringBehavior.none(),
-    });
+    // Use AWS-managed policies (do not count toward per-account CachePolicy
+    // quota). CACHING_DISABLED for HTML so SPA changes are picked up; the
+    // managed CACHING_OPTIMIZED policy is fine for hashed static assets.
+    const staticCachePolicy = CachePolicy.CACHING_OPTIMIZED;
+    const htmlCachePolicy = CachePolicy.CACHING_DISABLED;
 
     // ── CloudFront ─────────────────────────────────────────────────────
     const s3Origin = new S3Origin(bucket, { originAccessIdentity: oai });

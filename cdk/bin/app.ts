@@ -8,7 +8,6 @@ const account = process.env.CDK_DEFAULT_ACCOUNT || process.env.AWS_ACCOUNT_ID ||
 new PairStack(app, 'ms-argus-pair-dev-jw', {
   env: { account, region: 'us-east-1' },
   stackName: 'ms-argus-pair-dev-jw',
-  stage: 'dev-jw',
   rootDomain: 'argus.pw',
   subdomain: 'captcha-dev-jw',
   synthesizer: new CliCredentialsStackSynthesizer(),
