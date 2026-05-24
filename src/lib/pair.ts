@@ -77,6 +77,18 @@ function getArgus(): ArgusGlobal {
   return window.argus;
 }
 
+/** Carries the HTTP status so callers can branch on specific codes. */
+class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly bodyText: string,
+    public readonly bodyJson: Record<string, unknown> | null,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const url = `${input}${input.includes('?') ? '&' : '?'}_=${Date.now()}`;
   const res = await fetch(url, {
@@ -91,18 +103,54 @@ async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const ct = res.headers.get('content-type') || '';
   if (!ct.includes('application/json')) {
     const snip = (await res.text()).slice(0, 80).replace(/\s+/g, ' ');
-    throw new Error(`${init?.method || 'GET'} ${input} → ${res.status} non-JSON: ${snip}`);
+    throw new HttpError(
+      res.status,
+      snip,
+      null,
+      `${init?.method || 'GET'} ${input} → ${res.status} non-JSON: ${snip}`
+    );
   }
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`${init?.method || 'GET'} ${input} → ${res.status} ${body.slice(0, 200)}`);
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      /* not JSON despite content-type — leave parsed null */
+    }
+    throw new HttpError(
+      res.status,
+      body,
+      parsed,
+      `${init?.method || 'GET'} ${input} → ${res.status} ${body.slice(0, 200)}`
+    );
   }
   return res.json() as Promise<T>;
+}
+
+export interface DesktopAttestedSummary {
+  clean: boolean;
+  summary: {
+    score?: number;
+    pat_attested?: boolean;
+    is_proxy?: boolean;
+    is_datacenter?: boolean;
+    is_vpn?: boolean;
+    is_mobile_network?: boolean;
+    browser_name?: string | null;
+    browser_version?: string | null;
+    os?: string | null;
+    ip?: string | null;
+    asn_name?: string | null;
+    city?: string | null;
+    country?: string | null;
+  } | null;
 }
 
 export interface PairEvents {
   onStatus?: (status: string) => void;
   onError?: (err: unknown) => void;
+  onDesktopAttested?: (info: DesktopAttestedSummary) => void;
 }
 
 // ── HOST (desktop) ───────────────────────────────────────────────────────
@@ -157,12 +205,20 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
         throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
       }
       if (cancelled) return;
-      await jsonFetch(`${API}/session/${session.sessionId}/desktop-attest`, {
+      const attResp = await jsonFetch<{
+        ok: boolean;
+        clean?: boolean;
+        summary?: DesktopAttestedSummary['summary'];
+      }>(`${API}/session/${session.sessionId}/desktop-attest`, {
         method: 'POST',
         body: JSON.stringify({
           argusSessionId: run.argusSessionId,
           attestation: run.attestation,
         }),
+      });
+      events.onDesktopAttested?.({
+        clean: !!attResp.clean,
+        summary: attResp.summary ?? null,
       });
     } catch (e) {
       scanError = e as Error;
@@ -361,35 +417,45 @@ export async function submitPhoneAttestation(
         },
       });
       if (run.attestation) {
-        const url = `${API}/session/${sessionId}/phone-attest?_=${Date.now()}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          cache: 'no-store',
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            argusSessionId: run.argusSessionId,
-            attestation: run.attestation,
-            deviceTrustToken: trustToken,
-          }),
-        });
-        if (res.ok) {
-          const r = (await res.json()) as AttestResponse;
+        try {
+          const r = await jsonFetch<AttestResponse>(
+            `${API}/session/${sessionId}/phone-attest`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                argusSessionId: run.argusSessionId,
+                attestation: run.attestation,
+                deviceTrustToken: trustToken,
+              }),
+            }
+          );
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
           return r;
-        }
-        if (res.status === 401) {
-          // Token rejected — strict IP pin or expiry or pubkey mismatch.
-          // Clear stale token and fall through to fresh WebAuthn.
-          await clearTrustToken();
-          events.onStatus?.('trust expired — re-verifying');
-        } else {
-          // Other error — fall through to fresh WebAuthn too, since trust
-          // path is meant to be best-effort.
-          await clearTrustToken();
-          events.onStatus?.('falling back to webauthn');
+        } catch (postErr) {
+          if (postErr instanceof HttpError) {
+            // 409 already_attested: this device already paired in this
+            // session (likely a retried request whose first response was
+            // lost). Treat as success — fetch the existing verdict.
+            if (
+              postErr.status === 409 &&
+              postErr.bodyJson?.error === 'already_attested'
+            ) {
+              const fallback = await jsonFetch<AttestResponse>(
+                `${API}/session/${sessionId}/result`,
+                { method: 'GET' }
+              );
+              return fallback;
+            }
+            if (postErr.status === 401) {
+              await clearTrustToken();
+              events.onStatus?.('trust expired — re-verifying');
+            } else {
+              await clearTrustToken();
+              events.onStatus?.('falling back to webauthn');
+            }
+          } else {
+            throw postErr;
+          }
         }
       }
     } catch (e) {
@@ -436,14 +502,35 @@ export async function submitPhoneAttestation(
       : { error: (webauthnSettled.reason as Error).message };
 
   events.onStatus?.('submitting');
-  const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
-    method: 'POST',
-    body: JSON.stringify({
-      argusSessionId: run.argusSessionId,
-      attestation: run.attestation,
-      webauthn,
-    }),
-  });
-  if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-  return r;
+  try {
+    const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
+      method: 'POST',
+      body: JSON.stringify({
+        argusSessionId: run.argusSessionId,
+        attestation: run.attestation,
+        webauthn,
+      }),
+    });
+    if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
+    return r;
+  } catch (e) {
+    // Session is already paired (a prior request from this device succeeded
+    // server-side even if the response was lost or retried). Treat as
+    // success: fetch the existing verdict from /result instead of bubbling
+    // the error up. Without this, transient network retries or double-fire
+    // touch events on mobile make the phone show "Something went wrong"
+    // even though the desktop sees the pairing succeed.
+    if (
+      e instanceof HttpError &&
+      e.status === 409 &&
+      e.bodyJson?.error === 'already_attested'
+    ) {
+      const fallback = await jsonFetch<AttestResponse>(
+        `${API}/session/${sessionId}/result`,
+        { method: 'GET' }
+      );
+      return fallback;
+    }
+    throw e;
+  }
 }

@@ -316,6 +316,16 @@ interface ClassifiedScan {
   isProxy: boolean;
   patAttested: boolean;
   ok: boolean; // basic projection-level verdict pass
+  // Display fields surfaced into the side-by-side comparison panel.
+  browserName: string | null;
+  browserVersion: string | null;
+  os: string | null;
+  ip: string | null;
+  asnName: string | null;
+  city: string | null;
+  country: string | null;
+  isMobileNetwork: boolean;
+  isVpn: boolean;
   raw?: MerchantProjection; // for debug
 }
 
@@ -401,8 +411,23 @@ function classifyScan(p: MerchantProjection | null, side: string): ClassifiedSca
     phoneOsRe.test(platform) ||
     /Mobile|Android|iPhone|iPad|iPod/.test(ua);
 
-  const isProxy = hasTagLike(p.tags, 'proxy');
-  const isDatacenter = hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn');
+  const ipInfo = projAny.ipInfo as
+    | {
+        asn?: { organization?: string | null };
+        datacenter?: { result?: boolean };
+        mobile?: { result?: boolean };
+        vpn?: { result?: boolean };
+        hosting?: { result?: boolean };
+      }
+    | undefined;
+  const ipLocation = projAny.ipLocation as
+    | { city?: string | null; country?: string | null }
+    | undefined;
+
+  const isProxy = hasTagLike(p.tags, 'proxy') || ipInfo?.hosting?.result === true;
+  const isDatacenter =
+    hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn') ||
+    ipInfo?.datacenter?.result === true;
   // Argus emits `apple_attested` as a top-level tag when
   // integrity.pat.attested === true (see ms-argus-api merchant-
   // projection buildTags rule). Match exactly that — earlier spellings
@@ -410,12 +435,38 @@ function classifyScan(p: MerchantProjection | null, side: string): ClassifiedSca
   const patAttested = p.pat_attested === true || hasTagLike(p.tags, 'apple_attested');
   const ok = (p.verdict ?? 'PASS').toUpperCase() === 'PASS';
 
+  const browserName = (bd?.browserName as string | null | undefined) ?? null;
+  const browserVersion = (bd?.browserVersion as string | null | undefined) ?? null;
+  const osLabel = (bd?.os as string | null | undefined) ?? null;
+  const ip = (projAny.ip as string | null | undefined) ?? null;
+  const asnName = ipInfo?.asn?.organization ?? null;
+  const city = ipLocation?.city ?? null;
+  const country = ipLocation?.country ?? null;
+  const isMobileNetwork = ipInfo?.mobile?.result === true;
+  const isVpn = ipInfo?.vpn?.result === true;
+
   console.log(
     `[pair] classifyScan side=${side} score=${individualScore} isPhone=${isPhone} isProxy=${isProxy} isDC=${isDatacenter} pat=${patAttested} verdict=${p.verdict} ` +
       `device=${JSON.stringify({ deviceLabel, deviceType, platform, os, ua: ua.slice(0, 80) })} tags=${JSON.stringify(p.tags ?? null)}`
   );
 
-  return { individualScore, isPhone, isDatacenter, isProxy, patAttested, ok };
+  return {
+    individualScore,
+    isPhone,
+    isDatacenter,
+    isProxy,
+    patAttested,
+    ok,
+    browserName,
+    browserVersion,
+    os: osLabel,
+    ip,
+    asnName,
+    city,
+    country,
+    isMobileNetwork,
+    isVpn,
+  };
 }
 
 interface VerdictResult {
@@ -448,6 +499,27 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
     desktop_dc_asn: desktop.isDatacenter,
     phone_dc_asn: phone.isDatacenter,
     phone_to_phone: desktop.isPhone && phone.isPhone,
+    // Per-side display fields for the side-by-side comparison panel.
+    desktop_browser_name: desktop.browserName,
+    desktop_browser_version: desktop.browserVersion,
+    desktop_os: desktop.os,
+    desktop_ip: desktop.ip,
+    desktop_asn_name: desktop.asnName,
+    desktop_city: desktop.city,
+    desktop_country: desktop.country,
+    desktop_is_mobile_network: desktop.isMobileNetwork,
+    desktop_is_proxy: desktop.isProxy,
+    desktop_is_vpn: desktop.isVpn,
+    phone_browser_name: phone.browserName,
+    phone_browser_version: phone.browserVersion,
+    phone_os: phone.os,
+    phone_ip: phone.ip,
+    phone_asn_name: phone.asnName,
+    phone_city: phone.city,
+    phone_country: phone.country,
+    phone_is_mobile_network: phone.isMobileNetwork,
+    phone_is_proxy: phone.isProxy,
+    phone_is_vpn: phone.isVpn,
   };
 
   // Hard #1 — proxy on either side. No golden ticket overrides this.
@@ -749,7 +821,43 @@ export const handler = async (event: {
           ExpressionAttributeValues: { ':d': stored },
         })
       );
-      return jsonResp(200, { ok: true });
+
+      // Optimistic desktop classification — purely for the "APPROVED, no QR
+      // needed in production" UX hint. Real verdict still runs in
+      // phone-attest after both sides arrive. Best-effort: if the
+      // projection isn't ready yet, the frontend just hides the banner.
+      let summary: Record<string, unknown> | null = null;
+      let clean = false;
+      try {
+        const proj = await fetchProjection(argusSessionId);
+        const c = classifyScan(proj, 'desktop');
+        if (c) {
+          clean =
+            c.patAttested &&
+            !c.isProxy &&
+            !c.isDatacenter &&
+            c.individualScore < INDIVIDUAL_SCORE_LIMIT;
+          summary = {
+            score: c.individualScore,
+            pat_attested: c.patAttested,
+            is_proxy: c.isProxy,
+            is_datacenter: c.isDatacenter,
+            is_vpn: c.isVpn,
+            is_mobile_network: c.isMobileNetwork,
+            browser_name: c.browserName,
+            browser_version: c.browserVersion,
+            os: c.os,
+            ip: c.ip,
+            asn_name: c.asnName,
+            city: c.city,
+            country: c.country,
+          };
+        }
+      } catch (e) {
+        console.warn(`[pair] desktop-attest optimistic classify failed: ${(e as Error).message}`);
+      }
+
+      return jsonResp(200, { ok: true, clean, summary });
     }
 
     case 'POST /api/session/{id}/phone-attest': {

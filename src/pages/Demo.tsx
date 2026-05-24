@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { startDesktopSession } from '../lib/pair';
+import { startDesktopSession, type DesktopAttestedSummary } from '../lib/pair';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
+import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
 import { IconCheck, IconX, IconPhone, IconQR, IconShield } from '../components/Icons';
 
 type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
@@ -57,6 +58,7 @@ export function Demo() {
   const [verdictReason, setVerdictReason] = useState<string | null>(null);
   const [annotations, setAnnotations] = useState<Record<string, unknown> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [desktopAttested, setDesktopAttested] = useState<DesktopAttestedSummary | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
 
@@ -74,8 +76,12 @@ export function Demo() {
     setVerdictReason(null);
     setAnnotations(null);
     setErrorMsg(null);
+    setDesktopAttested(null);
     try {
-      const session = await startDesktopSession({ onStatus: setStatus });
+      const session = await startDesktopSession({
+        onStatus: setStatus,
+        onDesktopAttested: setDesktopAttested,
+      });
       stopRef.current = session.stop;
       setPairUrl(session.pairUrl);
       setQrDataUrl(
@@ -107,6 +113,7 @@ export function Demo() {
     setVerdictReason(null);
     setAnnotations(null);
     setErrorMsg(null);
+    setDesktopAttested(null);
     startedRef.current = true;
     void startDemo();
   }
@@ -140,6 +147,33 @@ export function Demo() {
 
         <StepIndicator phase={phase} />
       </section>
+
+      {/* APPROVED banner — shown when desktop signals are all clean. In
+          production this user would not see the QR at all; we leave it
+          rendered so the demo communicates what was bypassed. */}
+      {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
+        <section className="card card-accent border-green-500/40 p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-green-500/15 text-green-300">
+              <IconCheck className="h-7 w-7" />
+            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="text-lg font-semibold tracking-tight text-green-200">
+                APPROVED
+              </div>
+              <p className="text-sm text-white/80">
+                Verified Apple device
+                {desktopAttested.summary?.browser_name
+                  ? ` (${desktopAttested.summary.browser_name}${
+                      desktopAttested.summary.os ? ` · ${desktopAttested.summary.os}` : ''
+                    })`
+                  : ''}
+                . Scan if you want, but in production this step would be skipped.
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* QR / status panel */}
       {(phase === 'scanning' || phase === 'waiting') && (
@@ -190,58 +224,74 @@ export function Demo() {
       {/* Paired */}
       {phase === 'paired' && (
         <section className="flex flex-col gap-6">
-          <div className="card card-accent flex items-center gap-4 p-6">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-green-500/15 text-green-300">
-              <IconCheck className="h-6 w-6" />
-            </span>
-            <div className="flex-1">
-              <div className="text-xl font-semibold">Verified</div>
-              <div className="text-sm text-muted">
-                {verdictReason ? verdictReason.replace(/_/g, ' ') : 'both attestations checked out'}
+          <div className="card card-accent p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-green-500/15 text-green-300">
+                <IconCheck className="h-6 w-6" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-xl font-semibold">Verified</div>
+                <div className="text-sm text-muted">
+                  {verdictReason ? verdictReason.replace(/_/g, ' ') : 'both attestations checked out'}
+                </div>
               </div>
+              <button className="btn w-full border-green-500/40 hover:border-green-400/60 sm:w-auto" onClick={reset}>
+                Run again
+              </button>
             </div>
-            <button className="btn" onClick={reset}>
-              Run again
-            </button>
           </div>
-          {annotations && <AnnotationsCard annotations={annotations} />}
+          {annotations && (
+            <>
+              <DeviceComparisonCard annotations={annotations} />
+              <AnnotationsCard annotations={annotations} />
+            </>
+          )}
         </section>
       )}
 
       {/* Failed */}
       {phase === 'failed' && (
         <section className="flex flex-col gap-6">
-          <div className="card flex items-center gap-4 border-red-500/40 p-6">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-red-500/15 text-red-300">
-              <IconX className="h-6 w-6" />
-            </span>
-            <div className="flex-1">
-              <div className="text-xl font-semibold">Verification denied</div>
-              <div className="text-sm text-muted">
-                {verdictReason ? verdictReason.replace(/_/g, ' ') : 'a rule rejected the pair'}
+          <div className="card border-red-500/40 p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-300">
+                <IconX className="h-6 w-6" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-xl font-semibold">Verification denied</div>
+                <div className="text-sm text-muted">
+                  {verdictReason ? verdictReason.replace(/_/g, ' ') : 'a rule rejected the pair'}
+                </div>
               </div>
+              <button className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto" onClick={reset}>
+                Try again
+              </button>
             </div>
-            <button className="btn" onClick={reset}>
-              Try again
-            </button>
           </div>
-          {annotations && <AnnotationsCard annotations={annotations} />}
+          {annotations && (
+            <>
+              <DeviceComparisonCard annotations={annotations} />
+              <AnnotationsCard annotations={annotations} />
+            </>
+          )}
         </section>
       )}
 
       {/* Error */}
       {phase === 'error' && (
-        <section className="card flex items-center gap-4 border-red-500/40 p-6">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-red-500/15 text-red-300">
-            <IconX className="h-6 w-6" />
-          </span>
-          <div className="flex-1">
-            <div className="text-xl font-semibold">Something went wrong</div>
-            <div className="break-all text-sm text-muted">{errorMsg}</div>
+        <section className="card border-red-500/40 p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-300">
+              <IconX className="h-6 w-6" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xl font-semibold">Something went wrong</div>
+              <div className="break-all text-sm text-muted">{errorMsg}</div>
+            </div>
+            <button className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto" onClick={reset}>
+              Retry
+            </button>
           </div>
-          <button className="btn" onClick={reset}>
-            Retry
-          </button>
         </section>
       )}
 

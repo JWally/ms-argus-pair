@@ -70,17 +70,11 @@ const LABELS: Record<string, string> = {
   phone_projection_present: 'Phone projection found',
 };
 
+// Cross-cutting signals only. Per-side fields (score, browser, IP, ASN,
+// location, booleans) live in DeviceComparisonCard.
 const ORDER = [
-  'desktop_score',
-  'phone_score',
   'total_score',
-  'desktop_is_phone',
-  'phone_is_phone',
   'phone_to_phone',
-  'desktop_dc_asn',
-  'phone_dc_asn',
-  'pat_used_desktop',
-  'pat_used_phone',
   'phone_webauthn_attested',
   'phone_webauthn_user_verified',
   'phone_webauthn_format',
@@ -91,6 +85,39 @@ const ORDER = [
   'desktop_projection_present',
   'phone_projection_present',
 ];
+
+// Per-side fields rendered by DeviceComparisonCard — never show them here
+// to avoid duplicating data.
+const PER_SIDE_SKIP = new Set([
+  'desktop_score',
+  'phone_score',
+  'desktop_is_phone',
+  'phone_is_phone',
+  'desktop_dc_asn',
+  'phone_dc_asn',
+  'pat_used_desktop',
+  'pat_used_phone',
+  'desktop_browser_name',
+  'desktop_browser_version',
+  'desktop_os',
+  'desktop_ip',
+  'desktop_asn_name',
+  'desktop_city',
+  'desktop_country',
+  'desktop_is_mobile_network',
+  'desktop_is_proxy',
+  'desktop_is_vpn',
+  'phone_browser_name',
+  'phone_browser_version',
+  'phone_os',
+  'phone_ip',
+  'phone_asn_name',
+  'phone_city',
+  'phone_country',
+  'phone_is_mobile_network',
+  'phone_is_proxy',
+  'phone_is_vpn',
+]);
 
 export function AnnotationsCard({ annotations }: AnnotationsCardProps) {
   const rows: Row[] = [];
@@ -107,7 +134,7 @@ export function AnnotationsCard({ annotations }: AnnotationsCardProps) {
     }
   }
   for (const k of Object.keys(annotations)) {
-    if (seen.has(k)) continue;
+    if (seen.has(k) || PER_SIDE_SKIP.has(k)) continue;
     rows.push({
       key: k,
       label: LABELS[k] ?? k,
