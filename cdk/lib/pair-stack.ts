@@ -70,11 +70,20 @@ export class PairStack extends cdk.Stack {
     hmacSecret.grantRead(signalingFn);
 
     // ── WebSocket API ──────────────────────────────────────────────────
-    const wsIntegration = new integrations.WebSocketLambdaIntegration('SigWsInt', signalingFn);
+    // Use separate integration instances per route — when the same
+    // WebSocketLambdaIntegration is reused across all three route options
+    // CDK only emits the Lambda invoke permission for one of them and
+    // APIGW silently returns "Internal server error" for the rest.
     const wsApi = new apigatewayv2.WebSocketApi(this, 'PairWsApi', {
-      connectRouteOptions: { integration: wsIntegration },
-      disconnectRouteOptions: { integration: wsIntegration },
-      defaultRouteOptions: { integration: wsIntegration },
+      connectRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('ConnectInt', signalingFn),
+      },
+      disconnectRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('DisconnectInt', signalingFn),
+      },
+      defaultRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('DefaultInt', signalingFn),
+      },
     });
     const wsStage = new apigatewayv2.WebSocketStage(this, 'PairWsStage', {
       webSocketApi: wsApi,
