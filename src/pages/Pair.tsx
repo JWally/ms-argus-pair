@@ -128,7 +128,7 @@ export function Pair() {
             </p>
           </div>
           <button onClick={pair} className="btn btn-primary w-full py-4 text-base">
-            {hasTrust ? '✓ Confirm' : '🫀 Proof of Life'}
+            {hasTrust ? 'Confirm' : 'Proof of Life'}
           </button>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted/70">
             {hasTrust ? 'Trusted device · same network' : 'Biometric · no account · no password'}

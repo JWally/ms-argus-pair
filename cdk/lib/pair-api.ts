@@ -998,22 +998,51 @@ export const handler = async (event: {
         annotations.phone_device_trust_redeemed = true;
       }
 
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-          UpdateExpression:
-            'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
-          ConditionExpression:
-            'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
-          ExpressionAttributeValues: {
-            ':p': stored,
-            ':v': verdict,
-            ':r': reason,
-            ':a': annotations,
-          },
-        })
-      );
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
+            UpdateExpression:
+              'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
+            ConditionExpression:
+              'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
+            ExpressionAttributeValues: {
+              ':p': stored,
+              ':v': verdict,
+              ':r': reason,
+              ':a': annotations,
+            },
+          })
+        );
+      } catch (writeErr: unknown) {
+        // Two concurrent phone-attest POSTs can race past the read-time
+        // `s.phoneAttestation` check (both read pre-write state, both
+        // proceed). The loser's conditional write throws
+        // ConditionalCheckFailedException. Make this endpoint idempotent
+        // by reading the winner's stored verdict and returning that —
+        // semantically the device DID pair, the only question is which
+        // of two identical attempts gets credit.
+        const isConflict =
+          (writeErr as { name?: string })?.name === 'ConditionalCheckFailedException';
+        if (!isConflict) throw writeErr;
+        const existing = await loadSession(sessionId!);
+        if (existing && existing.verdict && existing.verdict !== 'pending') {
+          return jsonResp(200, {
+            verdict: existing.verdict,
+            reason: existing.verdictReason ?? null,
+            annotations:
+              (existing as unknown as { annotations?: Record<string, unknown> })
+                .annotations ?? {},
+            nextDeviceTrust: null,
+            concurrent_loser: true,
+          });
+        }
+        // No verdict on the existing record either — the conflict was
+        // with desktopAttestation absence or something else. Surface as
+        // 409 so the client can decide; old behavior was 500 here.
+        return jsonResp(409, { error: 'write_conflict' });
+      }
       return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
     }
 
