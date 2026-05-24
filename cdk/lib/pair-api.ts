@@ -104,7 +104,15 @@ function jsonResp(statusCode: number, body: unknown) {
 function originAllowed(event: { headers?: Record<string, string | undefined> }): boolean {
   if (ALLOWED_ORIGINS.length === 0) return true; // dev
   const o = event.headers?.origin || event.headers?.Origin;
-  return !!o && ALLOWED_ORIGINS.includes(o);
+  // Same-origin GET requests in some browsers (Chrome) omit the Origin
+  // header entirely. Rejecting on missing Origin would block legitimate
+  // polling from the SPA, and CloudFront would then rewrite the 403 to
+  // the SPA HTML (errorResponses[403] needed for client-side routing) —
+  // which the JSON parser blows up on. So: allow if Origin is absent
+  // (browser couldn't have set it for a cross-origin call), reject only
+  // when it's explicitly wrong. CORS preflight handles the rest.
+  if (!o) return true;
+  return ALLOWED_ORIGINS.includes(o);
 }
 
 function b64urlToBuf(s: string): Buffer {
