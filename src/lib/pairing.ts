@@ -47,12 +47,21 @@ interface SignalsResponse {
 }
 
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(input, {
+  // Cache-bust every request so no browser / proxy / CDN can ever serve a
+  // stale response. CACHING_DISABLED on CloudFront already prevents CDN
+  // caching, but corporate proxies and some browser-level caches (Firefox
+  // in particular) have been observed to ignore Cache-Control: no-store.
+  // A unique URL is the only fully reliable bypass.
+  const sep = input.includes('?') ? '&' : '?';
+  const url = `${input}${sep}_=${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const res = await fetch(url, {
     ...init,
     cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      Pragma: 'no-cache',
+      'Cache-Control': 'no-cache',
       ...(init?.headers || {}),
     },
   });
