@@ -15,7 +15,35 @@
 const SIGNALING_URL = 'wss://signal-dev-jw.argus.pw';
 
 const PAIR_TIMEOUT_MS = 60_000;
-const STUN_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+// STUN gets us srflx candidates for the direct-P2P happy path. The TURN
+// entries are the fallback when host/srflx hole-punching fails (e.g.,
+// symmetric NAT on either side). openrelay.metered.ca is a free public
+// TURN service — fine for demo; swap to Cloudflare Calls or self-hosted
+// coturn for production. We try UDP, TCP-443, and TLS-443 so at least one
+// transport survives restrictive networks.
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turns:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
 
 export interface PairEvents {
   onStatus?: (status: string) => void;
@@ -85,7 +113,7 @@ class Signaler {
 }
 
 function buildPC(): RTCPeerConnection {
-  return new RTCPeerConnection({ iceServers: STUN_SERVERS });
+  return new RTCPeerConnection({ iceServers: ICE_SERVERS });
 }
 
 async function selectedCandidatePair(
