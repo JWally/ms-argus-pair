@@ -84,29 +84,32 @@ export class PairStack extends cdk.Stack {
     });
     const integration = new integrations.HttpLambdaIntegration('SigInt', signalingFn);
 
-    api.addRoutes({ path: '/rooms', methods: [apigatewayv2.HttpMethod.POST], integration });
+    // Routes carry the /api prefix so CloudFront's pass-through (`/api/*`)
+    // resolves to a real APIGW route. Without the prefix, APIGW returns 403
+    // and CloudFront's errorResponses rewrites it to the SPA index.html.
+    api.addRoutes({ path: '/api/rooms', methods: [apigatewayv2.HttpMethod.POST], integration });
     api.addRoutes({
-      path: '/rooms/{id}/join',
+      path: '/api/rooms/{id}/join',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });
     api.addRoutes({
-      path: '/rooms/{id}/peers',
+      path: '/api/rooms/{id}/peers',
       methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
     api.addRoutes({
-      path: '/rooms/{id}/signal',
+      path: '/api/rooms/{id}/signal',
       methods: [apigatewayv2.HttpMethod.PUT],
       integration,
     });
     api.addRoutes({
-      path: '/rooms/{id}/signal/{peerId}',
+      path: '/api/rooms/{id}/signal/{peerId}',
       methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
     api.addRoutes({
-      path: '/rooms/{id}/end',
+      path: '/api/rooms/{id}/end',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });

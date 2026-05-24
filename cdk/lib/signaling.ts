@@ -69,13 +69,14 @@ export const handler = async (event: {
   const body = parseBody(event.body);
   if (body === null) return json(400, { error: 'Invalid or oversized body' });
 
-  if (routeKey !== 'POST /rooms' && !isValidRoomId(roomId)) {
+  if (routeKey !== 'POST /api/rooms' && !isValidRoomId(roomId)) {
     return json(400, { error: 'Invalid room id' });
   }
 
   switch (routeKey) {
     // ── Create room ────────────────────────────────────────────────────
-    case 'POST /rooms': {
+    case 'POST /api/rooms': {
+      // ── Create room ────────────────────────────────────────────────────
       const newId = randomUUID();
       await ddb.send(
         new PutCommand({
@@ -95,7 +96,7 @@ export const handler = async (event: {
     }
 
     // ── Join room (phone after QR scan) ────────────────────────────────
-    case 'POST /rooms/{id}/join': {
+    case 'POST /api/rooms/{id}/join': {
       try {
         const updated = await ddb.send(
           new UpdateCommand({
@@ -127,7 +128,7 @@ export const handler = async (event: {
     }
 
     // ── List peers ─────────────────────────────────────────────────────
-    case 'GET /rooms/{id}/peers': {
+    case 'GET /api/rooms/{id}/peers': {
       const [meta, peers] = await Promise.all([
         ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: `ROOM#${roomId}`, SK: 'META' } })),
         ddb.send(
@@ -146,7 +147,7 @@ export const handler = async (event: {
     }
 
     // ── Write signal (offer, answer, ICE candidate) ────────────────────
-    case 'PUT /rooms/{id}/signal': {
+    case 'PUT /api/rooms/{id}/signal': {
       const { peerId, type, sdp, candidate } = body as {
         peerId?: number;
         type?: SignalType;
@@ -205,7 +206,7 @@ export const handler = async (event: {
     }
 
     // ── Read signals for a peer ────────────────────────────────────────
-    case 'GET /rooms/{id}/signal/{peerId}': {
+    case 'GET /api/rooms/{id}/signal/{peerId}': {
       const peerIdNum = peerIdParam ? parseInt(peerIdParam, 10) : NaN;
       if (!Number.isInteger(peerIdNum) || peerIdNum < 1 || peerIdNum > MAX_PEERS) {
         return json(400, { error: 'Invalid peerId' });
@@ -234,7 +235,7 @@ export const handler = async (event: {
     }
 
     // ── End room (destroy after successful pairing) ────────────────────
-    case 'POST /rooms/{id}/end': {
+    case 'POST /api/rooms/{id}/end': {
       // Delete META + any PEER#/SIG# rows. Single Query + batched deletes
       // would be more thorough; for the demo, deleting META is enough —
       // remaining items expire via DDB TTL within 60s.
