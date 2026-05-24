@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { awaitDesktopReady, submitPhoneAttestation, type PhoneSessionInfo } from '../lib/pair';
+import { loadTrustToken } from '../lib/device-trust';
 import { Wordmark } from '../components/Brand';
 import { IconCheck, IconX, IconShield } from '../components/Icons';
 
-type Phase = 'awaiting-desktop' | 'ready' | 'pairing' | 'paired' | 'failed' | 'error';
+type Phase = 'awaiting-desktop' | 'ready' | 'returning' | 'pairing' | 'paired' | 'failed' | 'error';
 
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
@@ -12,6 +13,7 @@ export function Pair() {
   const [status, setStatus] = useState('');
   const [verdict, setVerdict] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [hasTrust, setHasTrust] = useState(false);
   const infoRef = useRef<PhoneSessionInfo | null>(null);
   const inflightRef = useRef(false);
 
@@ -26,9 +28,13 @@ export function Pair() {
     }
     (async () => {
       try {
-        const info = await awaitDesktopReady(sessionId, ctl.signal);
+        const [info, trustToken] = await Promise.all([
+          awaitDesktopReady(sessionId, ctl.signal),
+          loadTrustToken(),
+        ]);
         if (ctl.signal.aborted) return;
         infoRef.current = info;
+        setHasTrust(!!trustToken);
         setPhase('ready');
       } catch (e) {
         if (ctl.signal.aborted) return;
@@ -42,7 +48,7 @@ export function Pair() {
   async function pair() {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     inflightRef.current = true;
-    setPhase('pairing');
+    setPhase(hasTrust ? 'returning' : 'pairing');
     setStatus('starting');
     setErrorMsg(null);
     try {
@@ -75,7 +81,7 @@ export function Pair() {
         <span className="pill">phone</span>
       </header>
 
-      {(phase === 'awaiting-desktop' || phase === 'pairing') && (
+      {(phase === 'awaiting-desktop' || phase === 'pairing' || phase === 'returning') && (
         <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
           <div className="relative">
             <div className="absolute inset-0 animate-ping rounded-full bg-accent/30" />
@@ -85,11 +91,22 @@ export function Pair() {
           </div>
           <div>
             <div className="text-lg font-semibold">
-              {phase === 'awaiting-desktop' ? 'Waiting for the desktop' : 'Verifying'}
+              {phase === 'awaiting-desktop'
+                ? 'Waiting for the desktop'
+                : phase === 'returning'
+                ? 'Welcome back'
+                : 'Verifying'}
             </div>
             <div className="mt-1 flex items-center justify-center gap-2 text-xs text-muted">
               <span className="spinner" />
-              <span className="pulse-fade">{status || (phase === 'awaiting-desktop' ? 'about a second' : 'working')}</span>
+              <span className="pulse-fade">
+                {status ||
+                  (phase === 'awaiting-desktop'
+                    ? 'about a second'
+                    : phase === 'returning'
+                    ? 'remembered this device'
+                    : 'working')}
+              </span>
             </div>
           </div>
         </div>
@@ -101,17 +118,20 @@ export function Pair() {
             <IconShield className="h-12 w-12" />
           </div>
           <div className="space-y-2">
-            <h1 className="text-2xl font-semibold tracking-tight">Prove you&apos;re real</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {hasTrust ? 'Welcome back' : 'Prove you’re real'}
+            </h1>
             <p className="text-sm leading-relaxed text-muted">
-              One tap. Your phone&apos;s Secure Enclave will confirm this is a real device, and
-              an integrity scan runs alongside it.
+              {hasTrust
+                ? 'We remember this device. One tap to confirm.'
+                : 'One tap. Your phone’s Secure Enclave will confirm this is a real device, and an integrity scan runs alongside it.'}
             </p>
           </div>
           <button onClick={pair} className="btn btn-primary w-full py-4 text-base">
-            🫀 Proof of Life
+            {hasTrust ? '✓ Confirm' : '🫀 Proof of Life'}
           </button>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted/70">
-            Biometric · no account · no password
+            {hasTrust ? 'Trusted device · same network' : 'Biometric · no account · no password'}
           </div>
         </div>
       )}
