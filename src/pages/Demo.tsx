@@ -295,6 +295,84 @@ export function Demo() {
         </section>
       )}
 
+      <section className="prose-body mt-4 space-y-6 border-t border-white/10 pt-10">
+        <h2 className="text-2xl font-semibold tracking-tight">A different take on reCAPTCHA</h2>
+        <p className="text-sm leading-relaxed text-white/80">
+          Google&apos;s reCAPTCHA — from the &ldquo;click all the bicycles&rdquo; puzzles of v2
+          to the invisible behavioral scoring of v3 and reCAPTCHA Enterprise — has two structural
+          problems beyond bot-catching effectiveness.
+        </p>
+        <p className="text-sm leading-relaxed text-white/80">
+          The behavioral signals exclude real people. v3 scores mouse movement, scroll cadence,
+          dwell time, focus changes. Visitors using assistive tech — screen readers, keyboard
+          navigation, switch controls — don&apos;t produce that telemetry, so they look bot-like.
+          Users on privacy-hardened browsers (Brave, Firefox in strict mode, Tor) strip the
+          signals reCAPTCHA depends on. Both groups fail the silent score and get bounced to
+          puzzles, which are themselves inaccessible by design. The audio fallback is degraded
+          and routinely defeated; the visual puzzles assume good eyesight, a steady hand, and a
+          fast device. Older phones, slow connections, and low-vision users all get stuck.
+        </p>
+
+        <h3 className="text-lg font-semibold tracking-tight">How this works</h3>
+        <p className="text-sm leading-relaxed text-white/80">
+          Three signals carry the verdict.
+        </p>
+        <ul className="list-disc space-y-3 pl-5 text-sm leading-relaxed text-white/80">
+          <li>
+            <strong className="text-white">Network integrity.</strong> Datacenter IPs, anonymizing
+            proxies, mobile-network re-origination, corporate TLS shields — independently
+            identifiable from TCP, JA4, and HTTP/2 fingerprints without trusting the client.
+            Cleanness here is most of the score.
+          </li>
+          <li>
+            <strong className="text-white">Browser integrity.</strong> A small SDK runs in the
+            browser and signs an envelope over what it sees: real Chrome vs. headless Chromium,
+            automation hooks, CDP timing tells, native-function tamper checks. The signature is
+            bound to a non-extractable ECDSA key in IndexedDB, so the signal can&apos;t be replayed
+            cross-origin.
+          </li>
+          <li>
+            <strong className="text-white">Cryptographic device proof.</strong> The phone runs a
+            WebAuthn ceremony against its platform authenticator — Secure Enclave on iOS,
+            StrongBox on Android, TPM on Windows Hello. The signed assertion proves real hardware,
+            not a virtualized environment.
+          </li>
+        </ul>
+        <p className="text-sm leading-relaxed text-white/80">
+          Apple devices that pass Private Access Token attestation skip straight through. Apple
+          has already vouched for the device and the network path is independently verified, so
+          there&apos;s nothing left to check — the QR shows up but you don&apos;t actually need
+          to scan it. That&apos;s the green &ldquo;APPROVED&rdquo; panel above.
+        </p>
+
+        <h3 className="text-lg font-semibold tracking-tight">Why it&apos;s more inclusive</h3>
+        <p className="text-sm leading-relaxed text-white/80">
+          Almost everyone has a phone. A user who can&apos;t use a mouse, can&apos;t see image
+          puzzles, or runs a privacy-hardened desktop browser can still complete the pair by
+          holding up their phone for a fingerprint or face prompt — the same gesture they use to
+          unlock the device. No puzzle, no audio, no behavioral profile. The phone-side
+          WebAuthn ceremony is the same accessibility-tested flow that signs people into their
+          bank.
+        </p>
+
+        <h3 className="text-lg font-semibold tracking-tight">What this isn&apos;t</h3>
+        <p className="text-sm leading-relaxed text-white/80">
+          Not a silver bullet. This catches the long tail of automated traffic — proxies,
+          headless browsers, instrumented devices, residential botnets — but a determined attacker
+          with a real consumer phone on a real residential IP is harder. Risk-shifting still
+          matters: payment screens, account-takeover-sensitive endpoints, and content moderation
+          queues need defense-in-depth. This is the front gate and the &ldquo;is this a person at
+          all&rdquo; check, not the only line.
+        </p>
+        <p className="text-sm leading-relaxed text-white/80">
+          Other patterns layer on top: device-bound credentials with longer-lived attestations
+          (the trust token issued here is a 12-hour version), risk scoring at the merchant API,
+          manual review for high-value transactions. But for the broad case of &ldquo;is this
+          session automated,&rdquo; most users complete the check in about ten seconds — including
+          the people reCAPTCHA quietly excludes today.
+        </p>
+      </section>
+
       <footer className="mt-auto pt-6 text-center text-[10px] uppercase tracking-[0.2em] text-muted/60">
         Two devices · one signed envelope · zero passwords
       </footer>
