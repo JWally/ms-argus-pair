@@ -5,7 +5,15 @@ import { loadTrustToken } from '../lib/device-trust';
 import { Wordmark } from '../components/Brand';
 import { IconCheck, IconX, IconShield } from '../components/Icons';
 
-type Phase = 'awaiting-desktop' | 'ready' | 'returning' | 'pairing' | 'paired' | 'failed' | 'error';
+type Phase =
+  | 'awaiting-desktop'
+  | 'ready'
+  | 'returning'
+  | 'pairing'
+  | 'paired'
+  | 'failed'
+  | 'taken'
+  | 'error';
 
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
@@ -67,8 +75,15 @@ export function Pair() {
         }, 1500);
       }
     } catch (e) {
-      setPhase('error');
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // Server distinguishes "QR is already paired with a different
+      // device" from generic errors. Show a calmer screen.
+      if (msg.includes('session_paired_with_other_device')) {
+        setPhase('taken');
+      } else {
+        setPhase('error');
+        setErrorMsg(msg);
+      }
     } finally {
       inflightRef.current = false;
     }
@@ -158,6 +173,20 @@ export function Pair() {
           <div className="space-y-2">
             <div className="text-xl font-semibold">Not verified</div>
             <p className="text-sm text-muted">{verdict}</p>
+          </div>
+        </div>
+      )}
+
+      {phase === 'taken' && (
+        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-accent/15 text-accent">
+            <IconShield className="h-10 w-10" />
+          </div>
+          <div className="space-y-2">
+            <div className="text-xl font-semibold">This code is already paired</div>
+            <p className="text-sm text-muted">
+              Another device beat you to it. Ask the desktop for a fresh QR code.
+            </p>
           </div>
         </div>
       )}

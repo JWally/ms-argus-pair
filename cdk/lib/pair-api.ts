@@ -882,7 +882,24 @@ export const handler = async (event: {
       if (!s.desktopAttestation) {
         return jsonResp(409, { error: 'desktop_not_attested_yet' });
       }
-      if (s.phoneAttestation) return jsonResp(409, { error: 'already_attested' });
+      // QR sessions are single-use. If a phoneAttestation already exists,
+      // distinguish two cases by pubkey:
+      //   - Same pubkey  → same device retrying (network blip, double-tap).
+      //                    Return idempotent success below in the catch.
+      //   - Different pubkey → a SECOND scanner. Tell them the session is
+      //                        spoken for so their UI doesn't falsely claim
+      //                        success. The desktop already saw the first
+      //                        phone's verdict; we won't replace it.
+      const earlyAtt = validateAttestInput(body);
+      if (s.phoneAttestation) {
+        if (earlyAtt && earlyAtt.publicKey === s.phoneAttestation.publicKey) {
+          return jsonResp(409, { error: 'already_attested' });
+        }
+        return jsonResp(409, {
+          error: 'session_paired_with_other_device',
+          reason: 'This QR code is already paired with a different device.',
+        });
+      }
       const v = verifyAttestation(att);
       if (!v.ok || !v.decoded) {
         return jsonResp(400, { error: 'attestation_invalid', reason: v.reason });
@@ -1027,7 +1044,18 @@ export const handler = async (event: {
           (writeErr as { name?: string })?.name === 'ConditionalCheckFailedException';
         if (!isConflict) throw writeErr;
         const existing = await loadSession(sessionId!);
-        if (existing && existing.verdict && existing.verdict !== 'pending') {
+        // Same-device retry (same pubkey) → idempotent success: return
+        // the winner's verdict. Different-device second scanner → tell
+        // them the session is paired with someone else so their UI
+        // doesn't falsely claim success.
+        const sameDevice =
+          existing?.phoneAttestation?.publicKey === att.publicKey;
+        if (
+          existing &&
+          sameDevice &&
+          existing.verdict &&
+          existing.verdict !== 'pending'
+        ) {
           return jsonResp(200, {
             verdict: existing.verdict,
             reason: existing.verdictReason ?? null,
@@ -1038,9 +1066,12 @@ export const handler = async (event: {
             concurrent_loser: true,
           });
         }
-        // No verdict on the existing record either — the conflict was
-        // with desktopAttestation absence or something else. Surface as
-        // 409 so the client can decide; old behavior was 500 here.
+        if (existing?.phoneAttestation && !sameDevice) {
+          return jsonResp(409, {
+            error: 'session_paired_with_other_device',
+            reason: 'This QR code is already paired with a different device.',
+          });
+        }
         return jsonResp(409, { error: 'write_conflict' });
       }
       return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });

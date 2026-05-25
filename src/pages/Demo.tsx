@@ -125,7 +125,7 @@ export function Demo() {
   }, []);
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-4xl flex-col gap-10 px-6 py-10 sm:py-16">
+    <div className="mx-auto flex min-h-dvh max-w-6xl flex-col gap-10 px-6 py-10 sm:py-16">
       <header className="flex items-center justify-between">
         <Wordmark />
         <span className="pill">
@@ -133,96 +133,99 @@ export function Demo() {
         </span>
       </header>
 
-      <section className="flex flex-col gap-6">
-        <div className="space-y-3">
-          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+      {/* Hero — text left, QR right (or result panel right after pairing) */}
+      <section className="grid items-start gap-10 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:gap-16">
+        <div className="flex flex-col justify-center">
+          <span className="pill w-fit">
+            <IconShield className="h-3 w-3" /> Real-time integrity
+          </span>
+          <h1 className="mt-5 text-3xl font-semibold leading-[1.1] tracking-tight sm:text-4xl lg:text-5xl">
             QR Captcha Demo
           </h1>
-          <ul className="space-y-1 text-sm text-white/80 sm:text-base">
+          <ul className="mt-5 space-y-1 text-base text-white/85">
             <li>— Nothing to install</li>
             <li>— Nothing to sign into</li>
             <li>— Nothing to worry about</li>
           </ul>
-          <p className="max-w-2xl text-sm text-muted sm:text-base">
+          <p className="mt-5 max-w-xl text-base leading-relaxed text-muted">
             Two devices, an integrity check, and you&apos;re good to go.
           </p>
+          <div className="mt-7">
+            <StepIndicator phase={phase} />
+          </div>
         </div>
 
-        <StepIndicator phase={phase} />
+        {/* Right column: QR + status (when waiting) or result panel (when done) */}
+        <div className="space-y-4 lg:pl-4">
+          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
+            <>
+              <div className="qr-frame mx-auto">
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="pairing QR code" className="h-72 w-72 rounded-lg" />
+                ) : (
+                  <div className="flex h-72 w-72 items-center justify-center text-muted">
+                    <IconQR className="h-12 w-12 opacity-40" />
+                  </div>
+                )}
+              </div>
+              <div className="card p-4">
+                <div className="label mb-2 flex items-center gap-2">
+                  <span className="spinner" />{' '}
+                  {status || (qrDataUrl ? 'waiting for phone' : 'starting')}
+                </div>
+                <div className="space-y-2 text-sm text-white/80">
+                  <div className="flex items-start gap-3">
+                    <IconPhone className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                    <span>Open your phone camera and point it at the code.</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <IconShield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                    <span>Your phone will ask for a biometric — tap through.</span>
+                  </div>
+                </div>
+              </div>
+              {pairUrl && (
+                <div className="text-center text-xs text-muted">
+                  Can&apos;t scan?{' '}
+                  <a
+                    className="break-all text-accent underline-offset-2 hover:underline"
+                    href={pairUrl}
+                  >
+                    Open on this device
+                  </a>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* When PAT is clean, replace the status card body with the
+              APPROVED panel — the QR stays visible so the demo still
+              communicates what was bypassed. */}
+          {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
+            <div className="card card-accent border-green-500/40 p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-500/15 text-green-300">
+                  <IconCheck className="h-6 w-6" />
+                </span>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="text-base font-semibold tracking-tight text-green-200">
+                    APPROVED
+                  </div>
+                  <p className="text-xs text-white/80">
+                    Verified Apple device
+                    {desktopAttested.summary?.browser_name
+                      ? ` (${desktopAttested.summary.browser_name}${
+                          desktopAttested.summary.os ? ` · ${desktopAttested.summary.os}` : ''
+                        })`
+                      : ''}
+                    . In production this step would be skipped.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
-
-      {/* APPROVED banner — shown when desktop signals are all clean. In
-          production this user would not see the QR at all; we leave it
-          rendered so the demo communicates what was bypassed. */}
-      {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
-        <section className="card card-accent border-green-500/40 p-5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-green-500/15 text-green-300">
-              <IconCheck className="h-7 w-7" />
-            </span>
-            <div className="min-w-0 flex-1 space-y-1">
-              <div className="text-lg font-semibold tracking-tight text-green-200">
-                APPROVED
-              </div>
-              <p className="text-sm text-white/80">
-                Verified Apple device
-                {desktopAttested.summary?.browser_name
-                  ? ` (${desktopAttested.summary.browser_name}${
-                      desktopAttested.summary.os ? ` · ${desktopAttested.summary.os}` : ''
-                    })`
-                  : ''}
-                . Scan if you want, but in production this step would be skipped.
-              </p>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* QR / status panel */}
-      {(phase === 'scanning' || phase === 'waiting') && (
-        <section className="grid items-center gap-6 sm:grid-cols-[auto_1fr]">
-          <div className="qr-frame mx-auto">
-            {qrDataUrl ? (
-              <img src={qrDataUrl} alt="pairing QR code" className="h-72 w-72 rounded-lg" />
-            ) : (
-              <div className="flex h-72 w-72 items-center justify-center text-muted">
-                <IconQR className="h-12 w-12 opacity-40" />
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-4">
-            <div className="card p-5">
-              <div className="label mb-2 flex items-center gap-2">
-                <span className="spinner" /> {status || (qrDataUrl ? 'waiting for phone' : 'starting')}
-              </div>
-              <div className="space-y-3 text-sm text-white/80">
-                <div className="flex items-start gap-3">
-                  <IconPhone className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                  <span>
-                    Open your phone camera and point it at the code on the left.
-                  </span>
-                </div>
-                <div className="flex items-start gap-3">
-                  <IconShield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                  <span>
-                    Your phone will ask for a biometric to prove it&apos;s a real device. Tap
-                    through.
-                  </span>
-                </div>
-              </div>
-            </div>
-            {pairUrl && (
-              <div className="text-xs text-muted">
-                Can&apos;t scan?{' '}
-                <a className="break-all text-accent underline-offset-2 hover:underline" href={pairUrl}>
-                  Open on this device
-                </a>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
 
       {/* Paired */}
       {phase === 'paired' && (
