@@ -363,7 +363,7 @@ export function Demo() {
         </div>
 
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">What I want from a check like this</h2>
+          <h2 className="text-3xl font-semibold tracking-tight">What I want</h2>
           <p className="text-lg leading-relaxed text-white/85">
             I don&apos;t like installing apps — most things work better as websites. I hate signing
             up for accounts I&apos;ll use once. But my phone is on me anyway. A check that uses
