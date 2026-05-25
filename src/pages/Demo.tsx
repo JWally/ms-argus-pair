@@ -134,14 +134,17 @@ export function Demo() {
       </header>
 
       <section className="flex flex-col gap-6">
-        <div className="space-y-2">
+        <div className="space-y-3">
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-            Pair your phone to continue
+            QR Captcha Demo
           </h1>
+          <ul className="space-y-1 text-sm text-white/80 sm:text-base">
+            <li>— Nothing to install</li>
+            <li>— Nothing to sign into</li>
+            <li>— Nothing to worry about</li>
+          </ul>
           <p className="max-w-2xl text-sm text-muted sm:text-base">
-            Two-device verification. Scan the code with your phone — both sides run an integrity
-            check, your phone confirms it&apos;s real hardware, and you&apos;re through. Usually
-            takes about 10 seconds.
+            Two devices, an integrity check, and you&apos;re good to go.
           </p>
         </div>
 
