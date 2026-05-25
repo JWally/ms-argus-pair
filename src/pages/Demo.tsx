@@ -153,26 +153,13 @@ export function Demo() {
           <div className="mt-7">
             <StepIndicator phase={phase} />
           </div>
-        </div>
 
-        {/* Right column: QR + status (when waiting) or result panel (when done) */}
-        <div className="space-y-4 lg:pl-4">
+          {/* Status card + fallback link live under the step indicator,
+              not under the QR — keeps the right column tight around the
+              code itself. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
             <>
-              <div className="qr-frame mx-auto">
-                {qrDataUrl ? (
-                  <img
-                    src={qrDataUrl}
-                    alt="pairing QR code"
-                    className="mx-auto block h-96 w-96 rounded-lg"
-                  />
-                ) : (
-                  <div className="mx-auto flex h-96 w-96 items-center justify-center text-muted">
-                    <IconQR className="h-12 w-12 opacity-40" />
-                  </div>
-                )}
-              </div>
-              <div className="card p-4">
+              <div className="card mt-6 p-4">
                 <div className="label mb-2 flex items-center gap-2">
                   <span className="spinner" />{' '}
                   {status || (qrDataUrl ? 'waiting for phone' : 'starting')}
@@ -189,7 +176,7 @@ export function Demo() {
                 </div>
               </div>
               {pairUrl && (
-                <div className="text-center text-xs text-muted">
+                <div className="mt-3 text-xs text-muted">
                   Can&apos;t scan?{' '}
                   <a
                     className="break-all text-accent underline-offset-2 hover:underline"
@@ -202,11 +189,8 @@ export function Demo() {
             </>
           )}
 
-          {/* When PAT is clean, replace the status card body with the
-              APPROVED panel — the QR stays visible so the demo still
-              communicates what was bypassed. */}
           {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
-            <div className="card card-accent border-green-500/40 p-4">
+            <div className="card card-accent mt-4 border-green-500/40 p-4">
               <div className="flex items-start gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-500/15 text-green-300">
                   <IconCheck className="h-6 w-6" />
@@ -226,6 +210,25 @@ export function Demo() {
                   </p>
                 </div>
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right column: just the QR. */}
+        <div className="lg:pl-4">
+          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
+            <div className="qr-frame mx-auto w-fit">
+              {qrDataUrl ? (
+                <img
+                  src={qrDataUrl}
+                  alt="pairing QR code"
+                  className="mx-auto block h-96 w-96 rounded-lg"
+                />
+              ) : (
+                <div className="mx-auto flex h-96 w-96 items-center justify-center text-muted">
+                  <IconQR className="h-12 w-12 opacity-40" />
+                </div>
+              )}
             </div>
           )}
         </div>
