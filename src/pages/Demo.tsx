@@ -310,10 +310,33 @@ export function Demo() {
 
       <section className="prose-body mt-4 space-y-8 border-t border-white/10 pt-10">
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">TL;DR</h2>
           <p className="text-lg leading-relaxed text-white/85">
-            There was a lot of commotion when Google shipped QR-code reCAPTCHA. I wanted to see
-            if the same idea worked without the parts that made people angry.<sup>*</sup>
+            Scan a QR code with the phone already in your pocket. Your phone does a local
+            integrity check, and the site gets a yes/no signal: &ldquo;this looks like a real
+            device operated by a real person.&rdquo;
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">That&apos;s the whole idea.</p>
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="text-3xl font-semibold tracking-tight">Why I made this</h2>
+          <p className="text-lg leading-relaxed text-white/85">
+            When Google shipped QR-code reCAPTCHA, a lot of people objected.<sup>*</sup> Not
+            because the idea of using a phone was bad, but because of what came with it.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">The usual complaints were:</p>
+          <ul className="list-disc space-y-1 pl-6 text-lg leading-relaxed text-white/85">
+            <li>you had to install or use Google&apos;s app;</li>
+            <li>you had to be signed into a Google account;</li>
+            <li>the check tied an unrelated website session back to Google identity;</li>
+            <li>it pushed more of the web through one identity provider.</li>
+          </ul>
+          <p className="text-lg leading-relaxed text-white/85">
+            But the underlying pattern is still interesting: most people already carry a device
+            with stronger anti-automation signals than a browser tab can provide.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            So I wanted to see what the same idea looks like without the Google account part.
           </p>
           <p className="text-base text-white/70">
             <sup>*</sup> Reading on what shipped and why people pushed back:
@@ -363,97 +386,98 @@ export function Demo() {
         </div>
 
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">What I want</h2>
-          <p className="text-lg leading-relaxed text-white/85">
-            I don&apos;t like installing apps — most things work better as websites. I hate signing
-            up for accounts I&apos;ll use once. But my phone is on me anyway. A check that uses
-            the phone I&apos;m already carrying, with no install and no account, is a fair trade.
-          </p>
-        </div>
-
-        <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">What Google shipped</h2>
-          <p className="text-lg leading-relaxed text-white/85">
-            A QR code on the desktop, scanned with the Google app on your phone. The app talks
-            to Google, confirms the device and your account, and the desktop gets a verdict back.
-            However:
-          </p>
-          <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
-            <li>The Google app has to be installed — the camera scanner won&apos;t do.</li>
-            <li>You have to be signed in to a Google account.</li>
-            <li>
-              It binds an unrelated site&apos;s session to your Google identity, on properties
-              people specifically use to stay outside that ecosystem.
-            </li>
-          </ul>
-          <p className="text-lg leading-relaxed text-white/85">
-            The complaint is about being forced into using or creating a Google account to
-            access sites that have nothing to do with Google.
-          </p>
-        </div>
-
-        <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">What&apos;s different here</h2>
-          <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
-            <li>
-              No apps to install. Scan with your native camera. Works with your phone&apos;s
-              browser.
-            </li>
-            <li>No account, anywhere.</li>
-            <li>
-              Data minimization in the spirit of hCaptcha. Only what&apos;s needed to make this
-              one decision is collected — nothing pooled across sites, nothing handed to
-              third parties.
-            </li>
-            <li>
-              Apple devices that pass Private Access Token attestation skip the scan entirely —
-              the device has already been independently vouched for.
-            </li>
+          <p className="text-lg leading-relaxed text-white/85">This version is deliberately small:</p>
+          <ul className="list-disc space-y-1 pl-6 text-lg leading-relaxed text-white/85">
+            <li>no app install;</li>
+            <li>no account;</li>
+            <li>no third-party identity provider;</li>
+            <li>no cross-site user profile;</li>
+            <li>native camera scan;</li>
+            <li>works with the phone&apos;s browser.</li>
           </ul>
+          <p className="text-lg leading-relaxed text-white/85">
+            The desktop shows a QR code. The phone scans it. The phone performs a device
+            integrity check. The server gets only what it needs to make this one decision.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            For Apple devices that can already produce a Private Access Token, the QR step can
+            be skipped entirely.
+          </p>
         </div>
 
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">How it works</h2>
-          <p className="text-lg leading-relaxed text-white/85">Three signals combine into the verdict:</p>
-          <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
-            <li>
-              <strong className="text-white">Network check.</strong> Look at where the request
-              is actually coming from. Cloud datacenter IPs, anonymizing proxies, residential
-              proxy networks, and corporate filters all leave fingerprints in the connection
-              itself — no need to take the browser&apos;s word for it.
-            </li>
-            <li>
-              <strong className="text-white">Browser check.</strong> A small piece of code runs
-              in the browser and looks for the obvious tells of automation: headless Chrome,
-              Selenium / Playwright / Puppeteer hooks, faked timing, faked navigator data. Real
-              browsers pass; automation rigs don&apos;t.
-            </li>
-            <li>
-              <strong className="text-white">Phone check.</strong> The phone proves it&apos;s
-              real hardware using the same chip that runs TouchID / FaceID — Secure Enclave on
-              iPhone, StrongBox on Android, TPM on Windows. A virtual machine or emulator
-              can&apos;t fake this.
-            </li>
-          </ul>
+          <p className="text-lg leading-relaxed text-white/85">
+            The verdict combines three signals.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            First, a <strong className="text-white">network check</strong>: where is the
+            request actually coming from? Cloud datacenter IPs, anonymizing proxies, residential
+            proxy networks, and corporate filters all leave different fingerprints.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            Second, a <strong className="text-white">browser check</strong>: a small script
+            looks for obvious automation tells. Playwright, Puppeteer hooks, fake timing,
+            navigator inconsistencies, and other browser-side signals.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            Third, a <strong className="text-white">phone check</strong>: the phone proves it
+            is real hardware using the platform&apos;s existing attestation path — Secure
+            Enclave on iPhone, StrongBox on Android, TPM on Windows. A VM or emulator should
+            not be able to fake that cleanly.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            None of these signals is perfect. Combined, they make cheap automation more
+            expensive.
+          </p>
         </div>
 
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">More inclusive</h2>
+          <h2 className="text-3xl font-semibold tracking-tight">Accessibility matters</h2>
           <p className="text-lg leading-relaxed text-white/85">
-            Almost everyone has a phone. Users on assistive tech, low-vision users, and people
-            running privacy-hardened browsers all fail current reCAPTCHA — silently, because the
-            behavioral score expects mouse movement and the puzzles assume good eyesight. Holding
-            up a phone for a fingerprint or face prompt works for all of them.
+            A lot of current CAPTCHA systems quietly punish people using assistive technology,
+            low-vision users, privacy-hardened browsers, or anyone who simply does not move a
+            mouse in the expected way.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            This approach should be less hostile. Holding up a phone for Face ID, Touch ID,
+            or a device prompt is already a familiar interaction for many people. It is not
+            perfect, but it avoids some of the worst assumptions baked into behavioral CAPTCHA
+            systems.
           </p>
         </div>
 
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">Not a silver bullet</h2>
+          <p className="text-lg leading-relaxed text-white/85">This does not stop every attacker.</p>
           <p className="text-lg leading-relaxed text-white/85">
-            This catches the long tail: proxies, headless browsers, instrumented devices,
-            residential botnets. A determined attacker with a real phone on a real residential
-            IP is harder. Payment screens and account-takeover endpoints still need
-            defense-in-depth. This is the front gate, not the only line.
+            It catches the long tail: headless browsers, scripted clients, disposable VMs,
+            basic bot traffic, and some residential-proxy abuse.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            A determined attacker with a real phone on a real residential IP is harder.
+            Payment fraud, account takeover, and high-value abuse still need defense in depth.
+            This is the front gate, not the whole security system.
+          </p>
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="text-3xl font-semibold tracking-tight">Why I think this is worth exploring</h2>
+          <p className="text-lg leading-relaxed text-white/85">
+            CAPTCHA has slowly turned into a tax on normal users. The harder it gets for bots,
+            the more annoying it becomes for everyone else.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            But phones already have hardware-backed integrity systems. Browsers already have
+            native camera support. Platforms already have biometric prompts. The pieces exist.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            The question is whether we can use them without turning every login, comment form,
+            or checkout page into another identity checkpoint.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            That is what this demo is testing.
           </p>
         </div>
       </section>
