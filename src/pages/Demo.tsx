@@ -148,7 +148,7 @@ export function Demo() {
             <li>— Nothing to worry about</li>
           </ul>
           <p className="mt-5 max-w-xl text-base leading-relaxed text-muted">
-            Two devices, an integrity check, and you&apos;re good to go.
+            Two devices, an integrity check, good to go.
           </p>
           <div className="mt-7">
             <StepIndicator phase={phase} />
