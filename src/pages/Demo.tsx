@@ -453,7 +453,7 @@ export function Demo() {
           <p className="text-lg leading-relaxed text-white/85">This does not stop every attacker.</p>
           <p className="text-lg leading-relaxed text-white/85">
             It catches the long tail: headless browsers, scripted clients, disposable VMs,
-            basic bot traffic, and some residential-proxy abuse.
+            basic bot traffic, and residential proxy abuse.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
             A determined attacker with a real phone on a real residential IP is harder.
@@ -465,12 +465,80 @@ export function Demo() {
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">Why I think this is worth exploring</h2>
           <p className="text-lg leading-relaxed text-white/85">
-            CAPTCHA has slowly turned into a tax on normal users. The harder it gets for bots,
-            the more annoying it becomes for everyone else.
+            Modern CAPTCHAs are losing to AI. GPT-class vision models solve image puzzles
+            with high accuracy. Commercial solver services advertise 99%+ success rates
+            against reCAPTCHA, hCaptcha, and FunCaptcha — often for a few dollars per
+            thousand calls. A free Chrome extension routes the audio fallback through
+            speech-to-text. And the enterprise-tier defenses sites pay six figures
+            for — Akamai Bot Manager, HUMAN Security (formerly PerimeterX) — have
+            bypass walkthroughs published on commercial scraping blogs.
           </p>
+          <ul className="list-disc space-y-1 pl-6 text-base leading-relaxed text-white/80">
+            <li>
+              <a
+                href="https://cheq.ai/blog/testing-ai-gpt-4v-against-captcha/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                CHEQ — testing GPT-4V against CAPTCHA (~80% solve rate on five puzzles)
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://www.capsolver.com/blog/All/best-captcha-solver"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                CapSolver — commercial solver pricing for reCAPTCHA / hCaptcha / FunCaptcha
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://github.com/dessant/buster"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Buster — free Chrome extension that solves reCAPTCHA audio with speech-to-text
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://scrapfly.io/blog/posts/how-to-bypass-akamai-anti-scraping"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Scrapfly — how to bypass Akamai Bot Manager
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://www.zenrows.com/blog/perimeterx-bypass"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                ZenRows — how to bypass HUMAN Security (PerimeterX)
+              </a>
+            </li>
+          </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            But phones already have hardware-backed integrity systems. Browsers already have
-            native camera support. Platforms already have biometric prompts. The pieces exist.
+            Meanwhile, phones already have hardware-backed integrity systems. Browsers already
+            have native camera support. Platforms already have biometric prompts. The pieces
+            exist — FIDO/WebAuthn even ships the cross-device pattern (desktop QR → phone
+            authenticates) for{' '}
+            <a
+              href="https://www.corbado.com/blog/webauthn-passkey-qr-code"
+              className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              passkey hybrid transport
+            </a>{' '}
+            sign-in flows.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
             The question is whether we can use them without turning every login, comment form,
