@@ -459,7 +459,6 @@ export function Demo() {
             basic bot traffic, and residential proxy abuse.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            A determined attacker with a real phone on a real residential IP is harder.
             Payment fraud, account takeover, and high-value abuse still need defense in depth.
             This is the front gate, not the whole security system.
           </p>
@@ -495,6 +494,17 @@ export function Demo() {
                 rel="noopener noreferrer"
               >
                 CapSolver — commercial solver pricing for reCAPTCHA / hCaptcha / FunCaptcha
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://anti-captcha.com/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Anti-Captcha — real people solving CAPTCHAs around the clock for about a dollar
+                per thousand
               </a>
             </li>
             <li>
