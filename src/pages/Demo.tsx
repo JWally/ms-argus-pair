@@ -311,9 +311,9 @@ export function Demo() {
       <section className="prose-body mt-4 space-y-8 border-t border-white/10 pt-10">
         <div className="space-y-3">
           <p className="text-lg leading-relaxed text-white/85">
-            Scan a QR code with the phone already in your pocket. Your phone does a local
-            integrity check, and the site gets a yes/no signal: &ldquo;this looks like a real
-            device operated by a real person.&rdquo;
+            Scan a QR code on your laptop with your phone. A quick integrity check of the
+            network and the devices, and the site gets a yes/no signal: &ldquo;this looks like
+            a real device operated by a real person.&rdquo;
           </p>
           <p className="text-lg leading-relaxed text-white/85">That&apos;s the whole idea.</p>
         </div>
