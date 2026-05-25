@@ -332,8 +332,11 @@ export function Demo() {
             <li>it pushed more of the web through one identity provider.</li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            But the underlying pattern is still interesting: most people already carry a device
-            with stronger anti-automation signals than a browser tab can provide.
+            But the underlying pattern is still interesting from a CAPTCHA perspective. To pass,
+            a bot has to fake clean fingerprints on two devices, route both through a clean
+            changing network, and coordinate the two in real time. Real people do that dozens
+            of times a day without thinking about it. The question is whether that gap is wide
+            enough to make a useful CAPTCHA.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
             So I wanted to see what the same idea looks like without the Google account part.
