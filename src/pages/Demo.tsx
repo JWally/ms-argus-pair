@@ -376,7 +376,7 @@ export function Demo() {
           <p className="text-lg leading-relaxed text-white/85">
             A QR code on the desktop, scanned with the Google app on your phone. The app talks
             to Google, confirms the device and your account, and the desktop gets a verdict back.
-            The mechanics work. The complaints were about everything around the mechanics:
+            However:
           </p>
           <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
             <li>The Google app has to be installed — the camera scanner won&apos;t do.</li>
@@ -387,21 +387,23 @@ export function Demo() {
             </li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            The complaint isn&apos;t about QR codes. It&apos;s about being routed through
-            Google&apos;s account system to use a site that has nothing to do with Google.
+            The complaint is about being forced into using or creating a Google account to
+            access sites that have nothing to do with Google.
           </p>
         </div>
 
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">What&apos;s different here</h2>
           <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
-            <li>Scan with any camera. No app to install.</li>
+            <li>
+              No apps to install. Scan with your native camera. Works with your phone&apos;s
+              browser.
+            </li>
             <li>No account, anywhere.</li>
             <li>
-              The check is between your two devices and the captcha service (this site —
-              argus). The site that embedded it just gets back &ldquo;yes, a real human&rdquo;
-              or &ldquo;no.&rdquo; There&apos;s no Google-account-style identity attached and
-              nothing follows you to the next site.
+              Data minimization in the spirit of hCaptcha. Only what&apos;s needed to make this
+              one decision is collected — nothing pooled across sites, nothing handed to
+              third parties.
             </li>
             <li>
               Apple devices that pass Private Access Token attestation skip the scan entirely —
