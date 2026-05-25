@@ -6,7 +6,7 @@ pre-commit:
       run: npx prettier --check {staged_files}
     lint:
       glob: '*.{ts,tsx}'
-      run: npx eslint {staged_files} --max-warnings 0
+      run: npx eslint {staged_files} --max-warnings 0 --no-warn-ignored
     typecheck:
       glob: '*.{ts,tsx}'
       run: npx tsc --noEmit

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import QRCode from 'qrcode';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import QRCode from 'qrcode-svg';
 import { startDesktopSession, type DesktopAttestedSummary } from '../lib/pair';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
@@ -8,43 +8,19 @@ import { IconCheck, IconX, IconPhone, IconQR, IconShield } from '../components/I
 
 type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
 
-function StepIndicator({ phase }: { phase: Phase }) {
-  const steps: Array<{ n: number; title: string; state: 'pending' | 'active' | 'done' }> = [
-    {
-      n: 1,
-      title: 'Prepare',
-      state:
-        phase === 'idle' || phase === 'scanning'
-          ? 'active'
-          : 'done',
-    },
-    {
-      n: 2,
-      title: 'Scan with phone',
-      state:
-        phase === 'waiting'
-          ? 'active'
-          : phase === 'paired' || phase === 'failed' || phase === 'error'
-            ? 'done'
-            : 'pending',
-    },
-    {
-      n: 3,
-      title: 'Verified',
-      state:
-        phase === 'paired' || phase === 'failed' || phase === 'error' ? 'done' : 'pending',
-    },
-  ];
+function QrPanel({ svg }: { svg: string | null }) {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-6">
-      {steps.map((s) => (
-        <div className="step" key={s.n}>
-          <span className={`step-dot ${s.state === 'active' ? 'active' : ''} ${s.state === 'done' ? 'done' : ''}`}>
-            {s.state === 'done' ? <IconCheck className="h-3 w-3" /> : s.n}
-          </span>
-          <span className={s.state === 'pending' ? 'text-muted' : 'text-white/90'}>{s.title}</span>
+    <div className="qr-frame mx-auto w-fit">
+      {svg ? (
+        <div
+          className="qr-svg mx-auto block h-80 w-80 sm:h-96 sm:w-96"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      ) : (
+        <div className="mx-auto flex h-80 w-80 items-center justify-center text-muted sm:h-96 sm:w-96">
+          <IconQR className="h-12 w-12 opacity-40" />
         </div>
-      ))}
+      )}
     </div>
   );
 }
@@ -53,7 +29,6 @@ export function Demo() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
   const [pairUrl, setPairUrl] = useState<string | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [, setVerdict] = useState<string | null>(null);
   const [verdictReason, setVerdictReason] = useState<string | null>(null);
   const [annotations, setAnnotations] = useState<Record<string, unknown> | null>(null);
@@ -61,6 +36,19 @@ export function Demo() {
   const [desktopAttested, setDesktopAttested] = useState<DesktopAttestedSummary | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
+
+  const qrSvg = useMemo(() => {
+    if (!pairUrl) return null;
+    return new QRCode({
+      content: pairUrl,
+      padding: 0,
+      color: '#ffffff',
+      background: 'transparent',
+      ecl: 'M',
+      container: 'svg-viewbox',
+      squareSizePercent: 0.8,
+    }).svg();
+  }, [pairUrl]);
 
   useEffect(
     () => () => {
@@ -84,13 +72,6 @@ export function Demo() {
       });
       stopRef.current = session.stop;
       setPairUrl(session.pairUrl);
-      setQrDataUrl(
-        await QRCode.toDataURL(session.pairUrl, {
-          width: 440,
-          margin: 1,
-          color: { dark: '#ffffff', light: '#0a0a0a00' },
-        })
-      );
       setPhase('waiting');
       const r = await session.result;
       setVerdict(r.verdict);
@@ -108,7 +89,6 @@ export function Demo() {
     stopRef.current = null;
     setPhase('idle');
     setPairUrl(null);
-    setQrDataUrl(null);
     setVerdict(null);
     setVerdictReason(null);
     setAnnotations(null);
@@ -142,51 +122,36 @@ export function Demo() {
           <h1 className="mt-5 text-3xl font-semibold leading-[1.1] tracking-tight sm:text-4xl lg:text-5xl">
             QR Captcha Demo
           </h1>
-          <ul className="mt-5 space-y-1 text-base text-white/85">
-            <li>— Nothing to install</li>
-            <li>— Nothing to sign into</li>
-            <li>— Nothing to worry about</li>
-          </ul>
-          <p className="mt-5 max-w-xl text-base leading-relaxed text-muted">
+          <p className="mt-5 text-base leading-relaxed text-white/85">
+            Nothing to install. Nothing to sign into. Nothing to worry about.
+          </p>
+          <p className="mt-3 max-w-xl text-base leading-relaxed text-muted">
             Two devices, an integrity check, good to go.
           </p>
-          <div className="mt-7">
-            <StepIndicator phase={phase} />
-          </div>
 
-          {/* Status card + fallback link live under the step indicator,
-              not under the QR — keeps the right column tight around the
-              code itself. */}
+          {/* Mobile-only inline QR — sits right under the intro line. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
-            <>
-              <div className="card mt-6 p-4">
-                <div className="label mb-2 flex items-center gap-2">
-                  <span className="spinner" />{' '}
-                  {status || (qrDataUrl ? 'waiting for phone' : 'starting')}
+            <div className="mt-6 lg:hidden">
+              <QrPanel svg={qrSvg} />
+            </div>
+          )}
+
+          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
+            <div className="card mt-6 p-4">
+              <div className="label mb-2 flex items-center gap-2">
+                <span className="spinner" /> {status || (qrSvg ? 'waiting for phone' : 'starting')}
+              </div>
+              <div className="space-y-2 text-sm text-white/80">
+                <div className="flex items-start gap-3">
+                  <IconPhone className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                  <span>Open your phone camera and point it at the code.</span>
                 </div>
-                <div className="space-y-2 text-sm text-white/80">
-                  <div className="flex items-start gap-3">
-                    <IconPhone className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                    <span>Open your phone camera and point it at the code.</span>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <IconShield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                    <span>Your phone will ask for a biometric — tap through.</span>
-                  </div>
+                <div className="flex items-start gap-3">
+                  <IconShield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+                  <span>Your phone will ask for a biometric — tap through.</span>
                 </div>
               </div>
-              {pairUrl && (
-                <div className="mt-3 text-center text-sm text-white/70">
-                  Can&apos;t scan?{' '}
-                  <a
-                    className="break-all font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
-                    href={pairUrl}
-                  >
-                    Open on this device
-                  </a>
-                </div>
-              )}
-            </>
+            </div>
           )}
 
           {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
@@ -214,22 +179,10 @@ export function Demo() {
           )}
         </div>
 
-        {/* Right column: just the QR. */}
-        <div className="lg:pl-4">
+        {/* Right column: desktop-only QR. */}
+        <div className="hidden lg:block lg:pl-4">
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
-            <div className="qr-frame mx-auto w-fit">
-              {qrDataUrl ? (
-                <img
-                  src={qrDataUrl}
-                  alt="pairing QR code"
-                  className="mx-auto block h-96 w-96 rounded-lg"
-                />
-              ) : (
-                <div className="mx-auto flex h-96 w-96 items-center justify-center text-muted">
-                  <IconQR className="h-12 w-12 opacity-40" />
-                </div>
-              )}
-            </div>
+            <QrPanel svg={qrSvg} />
           )}
         </div>
       </section>
@@ -245,10 +198,15 @@ export function Demo() {
               <div className="min-w-0 flex-1">
                 <div className="text-xl font-semibold">Verified</div>
                 <div className="text-sm text-muted">
-                  {verdictReason ? verdictReason.replace(/_/g, ' ') : 'both attestations checked out'}
+                  {verdictReason
+                    ? verdictReason.replace(/_/g, ' ')
+                    : 'both attestations checked out'}
                 </div>
               </div>
-              <button className="btn w-full border-green-500/40 hover:border-green-400/60 sm:w-auto" onClick={reset}>
+              <button
+                className="btn w-full border-green-500/40 hover:border-green-400/60 sm:w-auto"
+                onClick={reset}
+              >
                 Run again
               </button>
             </div>
@@ -276,7 +234,10 @@ export function Demo() {
                   {verdictReason ? verdictReason.replace(/_/g, ' ') : 'a rule rejected the pair'}
                 </div>
               </div>
-              <button className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto" onClick={reset}>
+              <button
+                className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto"
+                onClick={reset}
+              >
                 Try again
               </button>
             </div>
@@ -301,7 +262,10 @@ export function Demo() {
               <div className="text-xl font-semibold">Something went wrong</div>
               <div className="break-all text-sm text-muted">{errorMsg}</div>
             </div>
-            <button className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto" onClick={reset}>
+            <button
+              className="btn w-full border-red-500/40 hover:border-red-400/60 sm:w-auto"
+              onClick={reset}
+            >
               Retry
             </button>
           </div>
@@ -311,9 +275,9 @@ export function Demo() {
       <section className="prose-body mt-4 space-y-8 border-t border-white/10 pt-10">
         <div className="space-y-3">
           <p className="text-lg leading-relaxed text-white/85">
-            Scan a QR code on your laptop with your phone. A quick integrity check of the
-            network and the devices, and the site gets a yes/no signal: &ldquo;this looks like
-            a real device operated by a real person.&rdquo;
+            Scan a QR code on your laptop with your phone. A quick integrity check of the network
+            and the devices, and the site gets a yes/no signal: &ldquo;this looks like a real device
+            operated by a real person.&rdquo;
           </p>
           <p className="text-lg leading-relaxed text-white/85">That&apos;s the whole idea.</p>
         </div>
@@ -321,8 +285,8 @@ export function Demo() {
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">Why I made this</h2>
           <p className="text-lg leading-relaxed text-white/85">
-            When Google shipped QR-code reCAPTCHA, a lot of people objected.<sup>*</sup> Not
-            because the idea of using a phone was bad, but because of what came with it.
+            When Google shipped QR-code reCAPTCHA, a lot of people objected.<sup>*</sup> Not because
+            the idea of using a phone was bad, but because of what came with it.
           </p>
           <p className="text-lg leading-relaxed text-white/85">The usual complaints were:</p>
           <ul className="list-disc space-y-1 pl-6 text-lg leading-relaxed text-white/85">
@@ -332,11 +296,11 @@ export function Demo() {
             <li>it pushed more of the web through one identity provider.</li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            So the underlying pattern is still interesting from a CAPTCHA perspective. To pass,
-            a bot has to fake clean fingerprints on two devices, route both through a clean
-            changing network, and coordinate the two in real time. Real people do that dozens
-            of times a day without thinking about it. The question is whether that gap is wide
-            enough to make a useful CAPTCHA.
+            So the underlying pattern is still interesting from a CAPTCHA perspective. To pass, a
+            bot has to fake clean fingerprints on two devices, route both through a clean changing
+            network, and coordinate the two in real time. Real people do that dozens of times a day
+            without thinking about it. The question is whether that gap is wide enough to make a
+            useful CAPTCHA.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
             So I wanted to see what the same idea looks like without the Google account part.
@@ -390,7 +354,9 @@ export function Demo() {
 
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">What&apos;s different here</h2>
-          <p className="text-lg leading-relaxed text-white/85">This version is deliberately small:</p>
+          <p className="text-lg leading-relaxed text-white/85">
+            This version is deliberately small:
+          </p>
           <ul className="list-disc space-y-1 pl-6 text-lg leading-relaxed text-white/85">
             <li>no app install;</li>
             <li>no account;</li>
@@ -400,12 +366,12 @@ export function Demo() {
             <li>works with the phone&apos;s browser.</li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            The desktop shows a QR code. The phone scans it. The phone performs a device
-            integrity check. The server gets only what it needs to make this one decision.
+            The desktop shows a QR code. The phone scans it. The phone performs a device integrity
+            check. The server gets only what it needs to make this one decision.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            For Apple devices that can already produce a Private Access Token, the QR step can
-            be skipped entirely.
+            For Apple devices that can already produce a Private Access Token, the QR step can be
+            skipped entirely.
           </p>
         </div>
 
@@ -415,24 +381,23 @@ export function Demo() {
             The verdict combines three signals.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            First, a <strong className="text-white">network check</strong>: where is the
-            request actually coming from? Cloud datacenter IPs, anonymizing proxies, residential
-            proxy networks, and corporate filters all leave different fingerprints.
+            First, a <strong className="text-white">network check</strong>: where is the request
+            actually coming from? Cloud datacenter IPs, anonymizing proxies, residential proxy
+            networks, and corporate filters all leave different fingerprints.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            Second, a <strong className="text-white">browser check</strong>: a small script
-            looks for obvious automation tells. Playwright, Puppeteer hooks, fake timing,
-            navigator inconsistencies, and other browser-side signals.
+            Second, a <strong className="text-white">browser check</strong>: a small script looks
+            for obvious automation tells. Playwright, Puppeteer hooks, fake timing, navigator
+            inconsistencies, and other browser-side signals.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            Third, a <strong className="text-white">phone check</strong>: the phone proves it
-            is real hardware using the platform&apos;s existing attestation path — Secure
-            Enclave on iPhone, StrongBox on Android, TPM on Windows. A VM or emulator should
-            not be able to fake that cleanly.
+            Third, a <strong className="text-white">phone check</strong>: the phone proves it is
+            real hardware using the platform&apos;s existing attestation path — Secure Enclave on
+            iPhone, StrongBox on Android, TPM on Windows. A VM or emulator should not be able to
+            fake that cleanly.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            None of these signals is perfect. Combined, they make cheap automation more
-            expensive.
+            None of these signals is perfect. Combined, they make cheap automation more expensive.
           </p>
         </div>
 
@@ -440,40 +405,42 @@ export function Demo() {
           <h2 className="text-3xl font-semibold tracking-tight">Accessibility matters</h2>
           <p className="text-lg leading-relaxed text-white/85">
             A lot of current CAPTCHA systems quietly punish people using assistive technology,
-            low-vision users, privacy-hardened browsers, or anyone who simply does not move a
-            mouse in the expected way.
+            low-vision users, privacy-hardened browsers, or anyone who simply does not move a mouse
+            in the expected way.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            This approach should be less hostile. Holding up a phone for Face ID, Touch ID,
-            or a device prompt is already a familiar interaction for many people. It is not
-            perfect, but it avoids some of the worst assumptions baked into behavioral CAPTCHA
-            systems.
+            This approach should be less hostile. Holding up a phone for Face ID, Touch ID, or a
+            device prompt is already a familiar interaction for many people. It is not perfect, but
+            it avoids some of the worst assumptions baked into behavioral CAPTCHA systems.
           </p>
         </div>
 
         <div className="space-y-3">
           <h2 className="text-3xl font-semibold tracking-tight">Not a silver bullet</h2>
-          <p className="text-lg leading-relaxed text-white/85">This does not stop every attacker.</p>
           <p className="text-lg leading-relaxed text-white/85">
-            It catches the long tail: headless browsers, scripted clients, disposable VMs,
-            basic bot traffic, and residential proxy abuse.
+            This does not stop every attacker.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            Payment fraud, account takeover, and high-value abuse still need defense in depth.
-            This is the front gate, not the whole security system.
+            It catches the long tail: headless browsers, scripted clients, disposable VMs, basic bot
+            traffic, and residential proxy abuse.
+          </p>
+          <p className="text-lg leading-relaxed text-white/85">
+            Payment fraud, account takeover, and high-value abuse still need defense in depth. This
+            is the front gate, not the whole security system.
           </p>
         </div>
 
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">Why I think this is worth exploring</h2>
+          <h2 className="text-3xl font-semibold tracking-tight">
+            Why I think this is worth exploring
+          </h2>
           <p className="text-lg leading-relaxed text-white/85">
-            Modern CAPTCHAs are losing to AI. GPT-class vision models solve image puzzles
-            with high accuracy. Commercial solver services advertise 99%+ success rates
-            against reCAPTCHA, hCaptcha, and FunCaptcha — often for a few dollars per
-            thousand calls. A free Chrome extension routes the audio fallback through
-            speech-to-text. And the enterprise-tier defenses sites pay six figures
-            for — Akamai Bot Manager, HUMAN Security (formerly PerimeterX) — have
-            bypass walkthroughs published on commercial scraping blogs.
+            Modern CAPTCHAs are losing to AI. GPT-class vision models solve image puzzles with high
+            accuracy. Commercial solver services advertise 99%+ success rates against reCAPTCHA,
+            hCaptcha, and FunCaptcha — often for a few dollars per thousand calls. A free Chrome
+            extension routes the audio fallback through speech-to-text. And the enterprise-tier
+            defenses sites pay six figures for — Akamai Bot Manager, HUMAN Security (formerly
+            PerimeterX) — have bypass walkthroughs published on commercial scraping blogs.
           </p>
           <ul className="list-disc space-y-1 pl-6 text-base leading-relaxed text-white/80">
             <li>
@@ -503,8 +470,8 @@ export function Demo() {
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                Anti-Captcha — real people solving CAPTCHAs around the clock for about a dollar
-                per thousand
+                Anti-Captcha — real people solving CAPTCHAs around the clock for about a dollar per
+                thousand
               </a>
             </li>
             <li>
@@ -539,10 +506,9 @@ export function Demo() {
             </li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            Meanwhile, phones already have hardware-backed integrity systems. Browsers already
-            have native camera support. Platforms already have biometric prompts. The pieces
-            exist — FIDO/WebAuthn even ships the cross-device pattern (desktop QR → phone
-            authenticates) for{' '}
+            Meanwhile, phones already have hardware-backed integrity systems. Browsers already have
+            native camera support. Platforms already have biometric prompts. The pieces exist —
+            FIDO/WebAuthn even ships the cross-device pattern (desktop QR → phone authenticates) for{' '}
             <a
               href="https://www.corbado.com/blog/webauthn-passkey-qr-code"
               className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
@@ -554,8 +520,8 @@ export function Demo() {
             sign-in flows.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
-            The question is whether we can use them without turning every login, comment form,
-            or checkout page into another identity checkpoint.
+            The question is whether we can use them without turning every login, comment form, or
+            checkout page into another identity checkpoint.
           </p>
           <p className="text-lg leading-relaxed text-white/85">
             That is what this demo is testing.

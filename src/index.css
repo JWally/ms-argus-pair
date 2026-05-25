@@ -12,8 +12,7 @@
   body {
     background:
       radial-gradient(1200px 600px at 50% -20%, rgba(77, 25, 121, 0.18), transparent 60%),
-      radial-gradient(800px 400px at 90% 110%, rgba(77, 25, 121, 0.1), transparent 60%),
-      #060608;
+      radial-gradient(800px 400px at 90% 110%, rgba(77, 25, 121, 0.1), transparent 60%), #060608;
     color: rgb(243, 244, 246);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -96,6 +95,29 @@
     right: -1px;
     border-width: 0 2px 2px 0;
     border-bottom-right-radius: 12px;
+  }
+  .qr-svg svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  /* Modern rounded modules. The fork inlines `shape-rendering:crispEdges`
+     on every <rect>, which kills anti-aliasing on the rounded corners —
+     override here with !important. */
+  .qr-svg rect {
+    shape-rendering: geometricPrecision !important;
+  }
+  /* Data dots are drawn at 0.8× their cell with gaps → render as circles. */
+  .qr-svg .littleSquare {
+    rx: 50%;
+    ry: 50%;
+  }
+  /* Finder modules touch their neighbors, so rx only rounds the outer
+     perimeter of each finder eye (and its inner 3×3) — gives the Apple-y
+     rounded-square eye without breaking scannability. */
+  .qr-svg .bigSquare {
+    rx: 15%;
+    ry: 15%;
   }
 
   .spinner {
