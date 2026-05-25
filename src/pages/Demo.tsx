@@ -313,8 +313,53 @@ export function Demo() {
           <h2 className="text-3xl font-semibold tracking-tight">TL;DR</h2>
           <p className="text-lg leading-relaxed text-white/85">
             There was a lot of commotion when Google shipped QR-code reCAPTCHA. I wanted to see
-            if the same idea worked without the parts that made people angry.
+            if the same idea worked without the parts that made people angry.<sup>*</sup>
           </p>
+          <p className="text-base text-white/70">
+            <sup>*</sup> Reading on what shipped and why people pushed back:
+          </p>
+          <ul className="list-disc space-y-1 pl-6 text-base leading-relaxed text-white/80">
+            <li>
+              <a
+                href="https://cloud.google.com/blog/products/identity-security/introducing-google-cloud-fraud-defense-the-next-evolution-of-recaptcha/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Google&apos;s announcement — &ldquo;the next evolution of reCAPTCHA&rdquo;
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://cybernews.com/privacy/google-qr-code-recaptcha-requires-approved-phone/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Cybernews — locks out anyone without a vetted iPhone or Android
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://www.androidauthority.com/grapheneos-google-apple-approved-devices-web-warning-3665319/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                GrapheneOS — &ldquo;enormously anti-competitive&rdquo;
+              </a>
+            </li>
+            <li>
+              <a
+                href="https://privatecaptcha.com/blog/google-cloud-fraud-defence-wei/"
+                className="font-medium text-violet-300 underline underline-offset-4 hover:text-violet-200"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Private Captcha — Cloud Fraud Defence is just Web Environment Integrity repackaged
+              </a>
+            </li>
+          </ul>
         </div>
 
         <div className="space-y-3">
