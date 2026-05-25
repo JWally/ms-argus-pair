@@ -86,7 +86,7 @@ export function Demo() {
       setPairUrl(session.pairUrl);
       setQrDataUrl(
         await QRCode.toDataURL(session.pairUrl, {
-          width: 320,
+          width: 440,
           margin: 1,
           color: { dark: '#ffffff', light: '#0a0a0a00' },
         })
@@ -161,9 +161,13 @@ export function Demo() {
             <>
               <div className="qr-frame mx-auto">
                 {qrDataUrl ? (
-                  <img src={qrDataUrl} alt="pairing QR code" className="h-72 w-72 rounded-lg" />
+                  <img
+                    src={qrDataUrl}
+                    alt="pairing QR code"
+                    className="mx-auto block h-96 w-96 rounded-lg"
+                  />
                 ) : (
-                  <div className="flex h-72 w-72 items-center justify-center text-muted">
+                  <div className="mx-auto flex h-96 w-96 items-center justify-center text-muted">
                     <IconQR className="h-12 w-12 opacity-40" />
                   </div>
                 )}
