@@ -332,7 +332,7 @@ export function Demo() {
             <li>it pushed more of the web through one identity provider.</li>
           </ul>
           <p className="text-lg leading-relaxed text-white/85">
-            But the underlying pattern is still interesting from a CAPTCHA perspective. To pass,
+            So the underlying pattern is still interesting from a CAPTCHA perspective. To pass,
             a bot has to fake clean fingerprints on two devices, route both through a clean
             changing network, and coordinate the two in real time. Real people do that dozens
             of times a day without thinking about it. The question is whether that gap is wide
