@@ -353,8 +353,10 @@ export function Demo() {
             <li>Scan with any camera. No app to install.</li>
             <li>No account, anywhere.</li>
             <li>
-              Trust runs between your two devices and this site only. No third-party identity,
-              no cross-site link.
+              The check is between your two devices and the captcha service (this site —
+              argus). The site that embedded it just gets back &ldquo;yes, a real human&rdquo;
+              or &ldquo;no.&rdquo; There&apos;s no Google-account-style identity attached and
+              nothing follows you to the next site.
             </li>
             <li>
               Apple devices that pass Private Access Token attestation skip the scan entirely —
@@ -368,21 +370,22 @@ export function Demo() {
           <p className="text-lg leading-relaxed text-white/85">Three signals combine into the verdict:</p>
           <ul className="list-disc space-y-2 pl-6 text-lg leading-relaxed text-white/85">
             <li>
-              <strong className="text-white">Network integrity.</strong> Datacenter IPs, proxies,
-              mobile-network re-origination, TLS shields — identifiable from TCP, JA4, and HTTP/2
-              fingerprints without trusting the client.
+              <strong className="text-white">Network check.</strong> Look at where the request
+              is actually coming from. Cloud datacenter IPs, anonymizing proxies, residential
+              proxy networks, and corporate filters all leave fingerprints in the connection
+              itself — no need to take the browser&apos;s word for it.
             </li>
             <li>
-              <strong className="text-white">Browser integrity.</strong> A small SDK signs an
-              envelope over what it sees: real Chrome vs. headless Chromium, automation hooks,
-              CDP timing tells, native-function tampering. The key is non-extractable, so the
-              signal can&apos;t be replayed cross-origin.
+              <strong className="text-white">Browser check.</strong> A small piece of code runs
+              in the browser and looks for the obvious tells of automation: headless Chrome,
+              Selenium / Playwright / Puppeteer hooks, faked timing, faked navigator data. Real
+              browsers pass; automation rigs don&apos;t.
             </li>
             <li>
-              <strong className="text-white">Cryptographic device proof.</strong> The phone runs
-              WebAuthn against its platform authenticator — Secure Enclave on iOS, StrongBox on
-              Android, TPM on Windows. The signed assertion proves real hardware, not a
-              virtualized environment.
+              <strong className="text-white">Phone check.</strong> The phone proves it&apos;s
+              real hardware using the same chip that runs TouchID / FaceID — Secure Enclave on
+              iPhone, StrongBox on Android, TPM on Windows. A virtual machine or emulator
+              can&apos;t fake this.
             </li>
           </ul>
         </div>
