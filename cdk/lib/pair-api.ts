@@ -56,6 +56,8 @@ import {
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
+import middy from '@middy/core';
+import type { MiddlewareObj } from '@middy/core';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -574,11 +576,7 @@ function b64urlEncodeBytes(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function mintDeviceTrust(
-  pubkey: string,
-  keyId: string,
-  ip: string
-): Promise<string | null> {
+async function mintDeviceTrust(pubkey: string, keyId: string, ip: string): Promise<string | null> {
   const secret = await getTrustSecret();
   if (!secret || !ip) return null;
   const iat = Math.floor(Date.now() / 1000);
@@ -645,8 +643,7 @@ function getViewerIp(event: {
   requestContext?: { http?: { sourceIp?: string }; identity?: { sourceIp?: string } };
 }): string {
   const headers = event.headers || {};
-  const raw =
-    headers['cloudfront-viewer-address'] || headers['CloudFront-Viewer-Address'] || '';
+  const raw = headers['cloudfront-viewer-address'] || headers['CloudFront-Viewer-Address'] || '';
   if (raw) {
     // IPv6: "[2001:db8::1]:12345"
     if (raw.startsWith('[')) {
@@ -658,9 +655,7 @@ function getViewerIp(event: {
     if (lastColon > 0) return raw.slice(0, lastColon);
     return raw;
   }
-  return (
-    event.requestContext?.http?.sourceIp ?? event.requestContext?.identity?.sourceIp ?? ''
-  );
+  return event.requestContext?.http?.sourceIp ?? event.requestContext?.identity?.sourceIp ?? '';
 }
 
 // ── WebAuthn proof-of-life verification ────────────────────────────────────
@@ -707,6 +702,33 @@ async function verifyWebAuthn(
       return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
     }
     const info = verification.registrationInfo;
+    // Reject `none` attestation: it carries no signature on the
+    // attStmt, so @simplewebauthn/server returns verified=true after
+    // only structural checks (challenge / origin / rpIdHash / UV+UP).
+    // All of those are forgeable from a Node script with hand-rolled
+    // CBOR and a self-generated P-256 keypair — no real authenticator
+    // involvement at all. For a two-device captcha the WebAuthn
+    // ceremony is the proof-of-life; if the authenticator can't sign
+    // an attestation we don't trust the ceremony happened.
+    if (info.fmt === 'none') {
+      return {
+        phone_webauthn_attested: false,
+        phone_webauthn_error: 'attestation_format_none_rejected',
+        phone_webauthn_format: info.fmt,
+      };
+    }
+    // Belt-and-braces: a zero AAGUID alongside any verifiable fmt is
+    // either a misconfigured authenticator or another forgery shape.
+    // Real platform authenticators (Apple, Android, Windows Hello,
+    // Yubikey, etc.) all emit non-zero AAGUIDs.
+    const ZERO_AAGUID = '00000000-0000-0000-0000-000000000000';
+    if (info.aaguid === ZERO_AAGUID) {
+      return {
+        phone_webauthn_attested: false,
+        phone_webauthn_error: 'aaguid_zero_rejected',
+        phone_webauthn_format: info.fmt,
+      };
+    }
     return {
       phone_webauthn_attested: true,
       phone_webauthn_aaguid: info.aaguid,
@@ -729,7 +751,7 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return (res.Item as SessionItem) ?? null;
 }
 
-export const handler = async (event: {
+const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
   body?: string;
@@ -977,16 +999,37 @@ export const handler = async (event: {
       const desktopClass = classifyScan(desktopProj, 'desktop');
       const phoneClass = classifyScan(phoneProj, 'phone');
 
+      // Proof of life: the phone side must have EITHER passed a fresh
+      // WebAuthn registration OR redeemed a valid device-trust token
+      // (which itself is proof of a prior WebAuthn from the same IP).
+      // `webauthnResult.phone_webauthn_attested` is already unified for
+      // both paths above — the trust-redeem branch synthesizes it as
+      // true. Without proof of life, fail the pair even when integrity
+      // scans look clean — design intent is `magic-token || webauthn`.
+      const proofOfLife = (webauthnResult as WebAuthnAnnotations).phone_webauthn_attested === true;
+
       let verdict: Verdict;
       let reason: string;
       let annotations: Record<string, unknown>;
-      if (!desktopClass || !phoneClass) {
-        // Projection lookup unavailable — either creds aren't configured or
-        // Argus didn't have the records yet. Pass through with an annotation
-        // so callers (and CW logs) know the scan-side checks were skipped;
-        // signature/binding checks all passed.
-        verdict = 'paired';
-        reason = 'lookup_unavailable_skipped';
+      if (!proofOfLife) {
+        verdict = 'failed';
+        reason = 'no_proof_of_life';
+        annotations = {
+          desktop_projection_present: !!desktopProj,
+          phone_projection_present: !!phoneProj,
+          ...webauthnResult,
+        };
+      } else if (!desktopClass || !phoneClass) {
+        // Projection lookup failed for at least one side. Old behavior was
+        // fail-OPEN ("paired" with lookup_unavailable_skipped), which let
+        // any attacker who could sign an envelope choose argusSessionIds
+        // that don't exist in Argus and ride the fall-through to a
+        // verdict. Fail CLOSED instead — the whole captcha premise is
+        // that the integrity scans actually ran, so if we can't read them
+        // we don't pair. Operational risk (Argus genuinely down) is
+        // accepted: better to fail visibly than authenticate silently.
+        verdict = 'failed';
+        reason = 'projection_lookup_failed';
         annotations = {
           score_lookup_skipped: true,
           desktop_projection_present: !!desktopProj,
@@ -1048,20 +1091,13 @@ export const handler = async (event: {
         // the winner's verdict. Different-device second scanner → tell
         // them the session is paired with someone else so their UI
         // doesn't falsely claim success.
-        const sameDevice =
-          existing?.phoneAttestation?.publicKey === att.publicKey;
-        if (
-          existing &&
-          sameDevice &&
-          existing.verdict &&
-          existing.verdict !== 'pending'
-        ) {
+        const sameDevice = existing?.phoneAttestation?.publicKey === att.publicKey;
+        if (existing && sameDevice && existing.verdict && existing.verdict !== 'pending') {
           return jsonResp(200, {
             verdict: existing.verdict,
             reason: existing.verdictReason ?? null,
             annotations:
-              (existing as unknown as { annotations?: Record<string, unknown> })
-                .annotations ?? {},
+              (existing as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
             nextDeviceTrust: null,
             concurrent_loser: true,
           });
@@ -1105,3 +1141,39 @@ export const handler = async (event: {
       return jsonResp(200, { error: 'no_matching_route', routeKey });
   }
 };
+
+// ── Warmer wiring ──────────────────────────────────────────────────────
+// EventBridge fires {source:'serverless-plugin-warmup'} every 5 min (see
+// pair-stack.ts → PairApiWarmupRule). The middleware below detects that,
+// pre-hydrates caches, and short-circuits — the route switch above never
+// sees the synthetic event.
+//
+// @middy/warmup v6 dropped its onWarmup callback (it's now a pure
+// short-circuiter), so we roll a tiny middleware that does both.
+const isWarmingUp = (event: unknown): boolean => {
+  if (!event || typeof event !== 'object') return false;
+  const e = event as { source?: unknown; warmup?: unknown };
+  return e.source === 'serverless-plugin-warmup' || e.warmup === true;
+};
+
+const warmupMiddleware = (): MiddlewareObj<unknown, unknown> => ({
+  before: async (request) => {
+    if (!isWarmingUp(request.event)) return;
+    // Pre-fetch the device-trust secret so the first real /phone-attest
+    // after a cold container start skips the SecretsManager round-trip,
+    // and drive one DDB call to warm the underlying HTTPS pool.
+    try {
+      await Promise.all([
+        getTrustSecret(),
+        ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: '__warmup__', SK: 'META' } })),
+      ]);
+    } catch (e) {
+      console.warn(`[pair] warmup hydration failed: ${(e as Error).message}`);
+    }
+    // Returning a value short-circuits the rest of the chain — the real
+    // lambdaHandler (and the route switch) never runs for warmup pings.
+    request.response = { warmed: true };
+  },
+});
+
+export const handler = middy(lambdaHandler).use(warmupMiddleware());

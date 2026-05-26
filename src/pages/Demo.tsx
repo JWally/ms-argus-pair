@@ -10,14 +10,14 @@ type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
 
 function QrPanel({ svg }: { svg: string | null }) {
   return (
-    <div className="qr-frame mx-auto w-fit">
+    <div className="qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
       {svg ? (
         <div
-          className="qr-svg mx-auto block h-80 w-80 sm:h-96 sm:w-96"
+          className="qr-svg block aspect-square w-full"
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       ) : (
-        <div className="mx-auto flex h-80 w-80 items-center justify-center text-muted sm:h-96 sm:w-96">
+        <div className="flex aspect-square w-full items-center justify-center text-muted">
           <IconQR className="h-12 w-12 opacity-40" />
         </div>
       )}
@@ -132,6 +132,18 @@ export function Demo() {
           {/* Mobile-only inline QR — sits right under the intro line. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
             <div className="mt-6 lg:hidden">
+              <div className="neon-callout mx-auto mb-4 max-w-[18rem] sm:max-w-[22rem]">
+                <div className="neon-track">
+                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
+                  <span className="neon-text-red">See · the · demo</span>
+                  <span className="neon-text-green">No · install · No · login</span>
+                  <span className="neon-text-red">Try · it · live</span>
+                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
+                  <span className="neon-text-red">See · the · demo</span>
+                  <span className="neon-text-green">No · install · No · login</span>
+                  <span className="neon-text-red">Try · it · live</span>
+                </div>
+              </div>
               <QrPanel svg={qrSvg} />
             </div>
           )}

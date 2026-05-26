@@ -22,6 +22,7 @@
     "@aws-sdk/client-dynamodb": "^3.658.0",
     "@aws-sdk/client-secrets-manager": "^3.1053.0",
     "@aws-sdk/lib-dynamodb": "^3.658.0",
+    "@middy/core": "^7.6.5",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.0",
     "aws-cdk-lib": "2.190.0",

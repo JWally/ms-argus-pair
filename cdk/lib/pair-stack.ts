@@ -27,6 +27,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -108,7 +110,7 @@ export class PairStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambdaRuntime.Runtime.NODEJS_22_X,
       architecture: lambdaRuntime.Architecture.ARM_64,
-      memorySize: 256,
+      memorySize: 768,
       timeout: cdk.Duration.seconds(10),
       environment: {
         TABLE_NAME: table.tableName,
@@ -118,9 +120,7 @@ export class PairStack extends cdk.Stack {
         // are absent the verdict logic degrades to "skipped" rather than
         // blocking on Argus availability.
         ...(merchantApiUrl ? { MERCHANT_API_URL: merchantApiUrl } : {}),
-        ...(merchantApiCredential
-          ? { MERCHANT_API_CREDENTIAL: merchantApiCredential }
-          : {}),
+        ...(merchantApiCredential ? { MERCHANT_API_CREDENTIAL: merchantApiCredential } : {}),
         ...(merchantCpi ? { MERCHANT_CPI: merchantCpi } : {}),
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
@@ -179,6 +179,21 @@ export class PairStack extends cdk.Stack {
         throttlingRateLimit: 20,
       };
     }
+
+    // ── Lambda warmer ──────────────────────────────────────────────────
+    // Fires a synthetic event every 5 minutes so the Lambda's container
+    // stays warm during idle periods. The `source` matches what
+    // @middy/warmup looks for via `isWarmingUp` in pair-api.ts — the
+    // middleware short-circuits before the route switch runs.
+    const warmupRule = new events.Rule(this, 'PairApiWarmupRule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      description: `Keepalive ping for ${pairFn.functionName}`,
+    });
+    warmupRule.addTarget(
+      new targets.LambdaFunction(pairFn, {
+        event: events.RuleTargetInput.fromObject({ source: 'serverless-plugin-warmup' }),
+      })
+    );
 
     // ── S3 + CloudFront ────────────────────────────────────────────────
     const bucket = new Bucket(this, 'SiteBucket', {
