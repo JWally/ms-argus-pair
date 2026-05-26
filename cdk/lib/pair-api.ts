@@ -703,10 +703,16 @@ async function verifyDeviceTrust(
 }
 
 /**
- * Real client IP. APIGW HTTP v2's requestContext.http.sourceIp is CloudFront's
- * edge — useless for device-trust binding. Read the real viewer IP from the
- * CloudFront-Viewer-Address header (set by the same-origin /api/* behavior
- * via the ALL_VIEWER_EXCEPT_HOST_HEADER origin request policy).
+ * Real client IP. CloudFront injects the CloudFront-Viewer-Address header
+ * on the way to origin AND strips any client-supplied value with the same
+ * name (the CloudFront-* prefix is reserved at the edge — verified
+ * empirically 2026-05-26 by spoofing the header in a curl: the spoofed
+ * value never reaches Lambda). So this header is safe to trust.
+ *
+ * Note: APIGW HTTP v2's requestContext.http.sourceIp ALSO surfaces the
+ * real viewer IP behind a CloudFront integration (not the edge IP, as an
+ * earlier version of this comment claimed). Either field is reliable for
+ * device-trust IP-pinning; we prefer the header for explicitness.
  */
 function getViewerIp(event: {
   headers?: Record<string, string | undefined>;
