@@ -108,6 +108,74 @@ async function getTrustSecret(): Promise<string | null> {
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+// ── argusSessionId single-use ledger ──────────────────────────────────────
+//
+// Without this, an attacker who gets ONE clean argusSessionId pair (via a
+// legitimate pairing, a defeat of the argus clean-verdict path, or token
+// theft) can drive unlimited subsequent pair-sessions: forge ephemeral
+// envelopes per session, reference the recycled ids, fetchProjection
+// returns the same clean data on every call. PoC at
+// ms-argus-attack-bots/bots/pair-session-recycling.mjs.
+//
+// We claim each argusSessionId with a DDB conditional put (PK keyed by the
+// id) the first time it shows up. Second time → ConditionalCheckFailed →
+// 409. TTL'd so the ledger self-cleans on the same horizon as a typical
+// argus projection. Per-row writes are independent of the SESSION#… rows.
+const ARGUS_SID_LEDGER_TTL_SECONDS = 24 * 3600;
+
+async function claimArgusSessionId(
+  argusSessionId: string,
+  pairSessionId: string,
+  role: 'desktop' | 'phone'
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          PK: `ARGUSSID#${argusSessionId}`,
+          SK: 'CLAIM',
+          claimedBy: pairSessionId,
+          role,
+          claimedAt: now,
+          expiresAt: now + ARGUS_SID_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(PK)',
+      })
+    );
+    return { ok: true };
+  } catch (err: unknown) {
+    const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+    if (isConflict) return { ok: false, reason: 'already_claimed' };
+    throw err;
+  }
+}
+
+// ── projection freshness ──────────────────────────────────────────────────
+//
+// Secondary defense. Even if the single-use ledger somehow misses (e.g.,
+// race resolved in attacker's favor on a multi-region write, or a future
+// edit drops the ledger), require the projection's scan timestamp to be
+// recent. 180s comfortably covers the user flow: desktop scan + QR + phone
+// scan + tap is typically 30-90s; 180s leaves slack for slow phones.
+//
+// Strict: a missing created_at on the projection (legacy records pre-
+// dating the field) is treated as STALE. Real argus scans backfill this
+// field; only ancient cached projections wouldn't have it.
+const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
+
+function projectionAgeSeconds(p: MerchantProjection | null): number | null {
+  if (!p || typeof p.created_at !== 'number') return null;
+  return Math.round((Date.now() - p.created_at) / 1000);
+}
+
+function isProjectionFresh(p: MerchantProjection | null): boolean {
+  const age = projectionAgeSeconds(p);
+  if (age === null) return false;
+  return age >= -PROJECTION_FRESHNESS_WINDOW_SECONDS && age <= PROJECTION_FRESHNESS_WINDOW_SECONDS;
+}
+
 type Verdict = 'pending' | 'paired' | 'failed';
 
 interface AttestationInput {
@@ -297,6 +365,8 @@ interface MerchantProjection {
   automation?: number;
   device_tampering?: number;
   network_tampering?: number;
+  /** Epoch ms; null on legacy records. From ms-argus-api MerchantSafeResponse. */
+  created_at?: number | null;
   verdict?: string;
   identification?: {
     browserDetails?: {
@@ -702,59 +772,26 @@ async function verifyWebAuthn(
       return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
     }
     const info = verification.registrationInfo;
-    // Restrict to phone-platform attestation formats. The two-device
-    // captcha's premise is "the phone side is a real phone", and the
-    // attestation fmt is the only field on the WebAuthn response that
-    // lets the server distinguish *what kind* of authenticator signed
-    // the ceremony.
+    // We DO NOT gate on fmt or AAGUID. Earlier attempts to require a
+    // phone-platform attestation format (apple / android-key /
+    // android-safetynet) or a non-zero AAGUID broke real iOS and
+    // Android users. Modern platform authenticators emit
+    // `fmt:'none'` + all-zero AAGUID by default for privacy:
+    //   - iOS Safari Touch ID / Face ID since iOS 14+
+    //   - macOS Safari Touch ID
+    //   - Android GPM passkeys (Play Services 13+) in most flows
+    // Direct attestation only comes back when the RP is on a
+    // platform-specific enterprise allowlist (Apple Anonymous CA,
+    // Android Play Integrity hardware attestation). Not viable for a
+    // public demo.
     //
-    //   - 'apple'             → iOS / iPadOS / macOS platform
-    //                           authenticator. Apple is the only
-    //                           issuer of this fmt.
-    //   - 'android-key'       → Android Keystore attestation, signed
-    //                           by Google with a hardware-backed key
-    //                           on modern devices.
-    //   - 'android-safetynet' → Older Android attestation (deprecated
-    //                           but still in the wild on pre-Play-
-    //                           Services-13 devices); still
-    //                           cryptographically verifiable.
-    //
-    // Deliberately rejected:
-    //   - 'none'      → no signature on attStmt (was the Fix 2 forgery).
-    //   - 'packed'    → ambiguous (Yubikey, Samsung Pass, software
-    //                   passkey managers, some Android paths). A
-    //                   captcha that wants "real phone" can't tell
-    //                   which one without an AAGUID allowlist.
-    //   - 'tpm'       → Windows Hello — a desktop authenticator, not
-    //                   a phone.
-    //   - 'fido-u2f'  → Older hardware-key format, not a platform
-    //                   authenticator.
-    //
-    // Known real-user impact: Samsung Pass passkeys and the small
-    // subset of Google Password Manager flows that emit 'packed' will
-    // be rejected. If that turns out to bite real traffic, the next
-    // hardening step is an AAGUID allowlist sourced from FIDO MDS
-    // (https://fidoalliance.org/metadata/) so we can accept specific
-    // 'packed' authenticators by their cryptographically-bound AAGUID.
-    const PHONE_PLATFORM_FMTS = new Set(['apple', 'android-key', 'android-safetynet']);
-    if (!PHONE_PLATFORM_FMTS.has(info.fmt)) {
-      return {
-        phone_webauthn_attested: false,
-        phone_webauthn_error: `attestation_format_not_phone_platform:${info.fmt}`,
-        phone_webauthn_format: info.fmt,
-      };
-    }
-    // Belt-and-braces: a zero AAGUID alongside any verifiable fmt is
-    // either a misconfigured authenticator or another forgery shape.
-    // Real platform authenticators all emit non-zero AAGUIDs.
-    const ZERO_AAGUID = '00000000-0000-0000-0000-000000000000';
-    if (info.aaguid === ZERO_AAGUID) {
-      return {
-        phone_webauthn_attested: false,
-        phone_webauthn_error: 'aaguid_zero_rejected',
-        phone_webauthn_format: info.fmt,
-      };
-    }
+    // This means the WebAuthn step is structurally forgeable from a
+    // Node script with hand-rolled CBOR + a self-generated P-256
+    // keypair (see ms-argus-attack-bots/bots/pair-webauthn-bypass.mjs).
+    // That's accepted: WebAuthn here is the proof-of-life /
+    // interactivity ceremony, NOT the anchor of trust. The anchor is
+    // the merchant projection lookup gated by Fix 1 — without real
+    // Argus sessions on both sides, the verdict still fails.
     return {
       phone_webauthn_attested: true,
       phone_webauthn_aaguid: info.aaguid,
@@ -853,6 +890,14 @@ const lambdaHandler = async (event: {
       }
       if (payload.role !== 'desktop') {
         return jsonResp(400, { error: 'payload_role_mismatch' });
+      }
+      // Claim the argusSessionId before storing — closes Tier-1 recycling.
+      const desktopClaim = await claimArgusSessionId(argusSessionId, sessionId!, 'desktop');
+      if (!desktopClaim.ok) {
+        return jsonResp(409, {
+          error: 'argus_session_already_claimed',
+          reason: desktopClaim.reason,
+        });
       }
       const stored: StoredAttestation = {
         ...att,
@@ -981,6 +1026,14 @@ const lambdaHandler = async (event: {
       if (att.keyId === s.desktopAttestation.keyId) {
         return jsonResp(400, { error: 'same_device_both_sides' });
       }
+      // Claim the phone argusSessionId before storing — closes Tier-1 recycling.
+      const phoneClaim = await claimArgusSessionId(argusSessionId, sessionId!, 'phone');
+      if (!phoneClaim.ok) {
+        return jsonResp(409, {
+          error: 'argus_session_already_claimed',
+          reason: phoneClaim.reason,
+        });
+      }
       const stored: StoredAttestation = {
         ...att,
         argusSessionId,
@@ -1037,6 +1090,9 @@ const lambdaHandler = async (event: {
       let verdict: Verdict;
       let reason: string;
       let annotations: Record<string, unknown>;
+      const desktopAgeSec = projectionAgeSeconds(desktopProj);
+      const phoneAgeSec = projectionAgeSeconds(phoneProj);
+
       if (!proofOfLife) {
         verdict = 'failed';
         reason = 'no_proof_of_life';
@@ -1060,6 +1116,19 @@ const lambdaHandler = async (event: {
           score_lookup_skipped: true,
           desktop_projection_present: !!desktopProj,
           phone_projection_present: !!phoneProj,
+          ...webauthnResult,
+        };
+      } else if (!isProjectionFresh(desktopProj) || !isProjectionFresh(phoneProj)) {
+        // Secondary defense alongside the single-use ledger. Stale
+        // projections (legacy or recycled past the freshness window) get
+        // rejected even if they somehow slipped past the ledger. Strict
+        // on missing created_at — real argus scans backfill that field.
+        verdict = 'failed';
+        reason = 'projection_stale';
+        annotations = {
+          desktop_projection_age_sec: desktopAgeSec,
+          phone_projection_age_sec: phoneAgeSec,
+          freshness_window_sec: PROJECTION_FRESHNESS_WINDOW_SECONDS,
           ...webauthnResult,
         };
       } else {
