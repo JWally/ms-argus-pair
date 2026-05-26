@@ -702,25 +702,51 @@ async function verifyWebAuthn(
       return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
     }
     const info = verification.registrationInfo;
-    // Reject `none` attestation: it carries no signature on the
-    // attStmt, so @simplewebauthn/server returns verified=true after
-    // only structural checks (challenge / origin / rpIdHash / UV+UP).
-    // All of those are forgeable from a Node script with hand-rolled
-    // CBOR and a self-generated P-256 keypair — no real authenticator
-    // involvement at all. For a two-device captcha the WebAuthn
-    // ceremony is the proof-of-life; if the authenticator can't sign
-    // an attestation we don't trust the ceremony happened.
-    if (info.fmt === 'none') {
+    // Restrict to phone-platform attestation formats. The two-device
+    // captcha's premise is "the phone side is a real phone", and the
+    // attestation fmt is the only field on the WebAuthn response that
+    // lets the server distinguish *what kind* of authenticator signed
+    // the ceremony.
+    //
+    //   - 'apple'             → iOS / iPadOS / macOS platform
+    //                           authenticator. Apple is the only
+    //                           issuer of this fmt.
+    //   - 'android-key'       → Android Keystore attestation, signed
+    //                           by Google with a hardware-backed key
+    //                           on modern devices.
+    //   - 'android-safetynet' → Older Android attestation (deprecated
+    //                           but still in the wild on pre-Play-
+    //                           Services-13 devices); still
+    //                           cryptographically verifiable.
+    //
+    // Deliberately rejected:
+    //   - 'none'      → no signature on attStmt (was the Fix 2 forgery).
+    //   - 'packed'    → ambiguous (Yubikey, Samsung Pass, software
+    //                   passkey managers, some Android paths). A
+    //                   captcha that wants "real phone" can't tell
+    //                   which one without an AAGUID allowlist.
+    //   - 'tpm'       → Windows Hello — a desktop authenticator, not
+    //                   a phone.
+    //   - 'fido-u2f'  → Older hardware-key format, not a platform
+    //                   authenticator.
+    //
+    // Known real-user impact: Samsung Pass passkeys and the small
+    // subset of Google Password Manager flows that emit 'packed' will
+    // be rejected. If that turns out to bite real traffic, the next
+    // hardening step is an AAGUID allowlist sourced from FIDO MDS
+    // (https://fidoalliance.org/metadata/) so we can accept specific
+    // 'packed' authenticators by their cryptographically-bound AAGUID.
+    const PHONE_PLATFORM_FMTS = new Set(['apple', 'android-key', 'android-safetynet']);
+    if (!PHONE_PLATFORM_FMTS.has(info.fmt)) {
       return {
         phone_webauthn_attested: false,
-        phone_webauthn_error: 'attestation_format_none_rejected',
+        phone_webauthn_error: `attestation_format_not_phone_platform:${info.fmt}`,
         phone_webauthn_format: info.fmt,
       };
     }
     // Belt-and-braces: a zero AAGUID alongside any verifiable fmt is
     // either a misconfigured authenticator or another forgery shape.
-    // Real platform authenticators (Apple, Android, Windows Hello,
-    // Yubikey, etc.) all emit non-zero AAGUIDs.
+    // Real platform authenticators all emit non-zero AAGUIDs.
     const ZERO_AAGUID = '00000000-0000-0000-0000-000000000000';
     if (info.aaguid === ZERO_AAGUID) {
       return {
