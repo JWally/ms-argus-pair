@@ -67,8 +67,19 @@ export function Pair() {
         ]);
         if (ctl.signal.aborted) return;
         infoRef.current = info;
-        setHasTrust(!!trustToken);
-        setPhase('ready');
+        const remembered = !!trustToken;
+        setHasTrust(remembered);
+        // Remembered device → silent reauth. Skip the "Confirm" button
+        // and run straight through. submitPhoneAttestation falls back
+        // to fresh WebAuthn (or whatever the user picks) automatically
+        // if the token is rejected, so the worst case is the user sees
+        // one extra prompt instead of seeing a button they have to tap.
+        if (remembered) {
+          setPhase('returning');
+          await pair();
+        } else {
+          setPhase('ready');
+        }
       } catch (e) {
         if (ctl.signal.aborted) return;
         const msg = e instanceof Error ? e.message : String(e);
@@ -83,6 +94,9 @@ export function Pair() {
       }
     })();
     return () => ctl.abort();
+    // runPair is closure-stable; we want this effect to run once per
+    // sessionId mount, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   async function pair() {
