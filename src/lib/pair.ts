@@ -452,14 +452,20 @@ async function createNewPasskey(nonceB64Url: string): Promise<unknown | { error:
   const { startRegistration } = await import('@simplewebauthn/browser');
   const rpId = window.location.hostname;
   try {
+    // user.id must be valid base64url after SimpleWebAuthn decodes it
+    // (iOS Safari rejects non-base64url strings with "invalid characters").
+    // Encoding the rpId gives us a value that is:
+    //   - valid base64url (no dots, no slashes, no padding)
+    //   - stable per host (so repeat registrations on the same device
+    //     dedupe in the OS-managed passkey store)
+    //   - distinct per host (no privacy leak across hosts)
+    const userIdB64Url = btoa(rpId).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const result = await startRegistration({
       optionsJSON: {
         challenge: nonceB64Url,
         rp: { id: rpId, name: 'Argus Pair' },
         user: {
-          // Stable per-device user.id so the OS treats repeat
-          // registrations as updates instead of additional credentials.
-          id: rpId,
+          id: userIdB64Url,
           name: 'pair',
           displayName: 'Argus Pair',
         },
