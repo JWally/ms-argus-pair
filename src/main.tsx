@@ -1,9 +1,17 @@
-import { StrictMode } from 'react';
+import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
-import { Demo } from './pages/Demo';
-import { Pair } from './pages/Pair';
+import { Splash } from './components/Splash';
 import './index.css';
+
+// Route-split: each page lands in its own Vite chunk. Phone users
+// hitting /pair/:id download only the Pair chunk + entry, NOT the
+// raffle / leaderboard / QR generator that live in Demo. Saves
+// ~150KB minified on the phone-side cold load.
+//
+// Named exports → default-export shape that React.lazy expects.
+const Demo = lazy(() => import('./pages/Demo').then((m) => ({ default: m.Demo })));
+const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
@@ -11,10 +19,23 @@ if (!rootElement) throw new Error('root element missing');
 createRoot(rootElement).render(
   <StrictMode>
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Demo />} />
-        <Route path="/pair/:roomId" element={<Pair />} />
-      </Routes>
+      <Suspense fallback={<Splash />}>
+        <Routes>
+          <Route path="/" element={<Demo />} />
+          <Route path="/pair/:roomId" element={<Pair />} />
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   </StrictMode>
 );
+
+// Register the asset-cache service worker for returning visits.
+// Only in production builds — keeps `vite dev` HMR uncontested.
+// Failure is non-fatal; the app works fine without the SW.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* registration failed (private mode, no quota, etc.) — silent */
+    });
+  });
+}

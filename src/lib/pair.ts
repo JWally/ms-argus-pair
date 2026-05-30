@@ -185,6 +185,10 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   const pairOrigin =
     (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
   const pairUrl = `${pairOrigin}/pair/${session.sessionId}`;
+  // Dev affordance: log the pair URL so you can copy-paste it into
+  // another browser / private window without scanning a QR. Cheap; no
+  // PII (sessionId TTLs out in 5 minutes regardless).
+  console.log('[argus-pair] pair URL:', pairUrl);
   events.onStatus?.('waiting for phone');
 
   // Scan + desktop-attest run in the BACKGROUND so the QR can render
