@@ -77,6 +77,34 @@ async function loadGoogleIdentityServices(): Promise<void> {
   });
 }
 
+interface GsiIdNamespace {
+  initialize: (cfg: {
+    client_id: string;
+    nonce: string;
+    callback: (resp: { credential?: string }) => void;
+    auto_select?: boolean;
+    use_fedcm_for_prompt?: boolean;
+    context?: 'signin' | 'signup' | 'use';
+  }) => void;
+  prompt: (
+    cb?: (notif: {
+      isNotDisplayed?: () => boolean;
+      getNotDisplayedReason?: () => string;
+      isSkippedMoment?: () => boolean;
+      getSkippedReason?: () => string;
+      isDismissedMoment?: () => boolean;
+      getDismissedReason?: () => string;
+    }) => void
+  ) => void;
+  cancel: () => void;
+}
+
+interface GoogleGsiNamespace {
+  accounts?: { id?: GsiIdNamespace };
+}
+
+const PROMPT_TIMEOUT_MS = 60_000;
+
 /**
  * Drive Google's "Sign In With Google" flow on the phone. Uses GIS's
  * `initialize` + `prompt` for the One Tap surface (instant on Android
@@ -84,6 +112,11 @@ async function loadGoogleIdentityServices(): Promise<void> {
  *
  * Nonce: passed as `nonce` to `initialize` and echoed inside the
  * returned ID token's `nonce` claim. Backend verifies the claim.
+ *
+ * Timeout: One Tap can silently no-op (suppressed by browser, user
+ * dismissed prior prompt in this session, FedCM denied, etc.). We
+ * bail with a descriptive error after PROMPT_TIMEOUT_MS so callers
+ * can fall back to a different proof-of-life option.
  */
 export async function runGoogleProofOfLife(nonce: string): Promise<OAuthOutcome> {
   if (!PROVIDERS_CONFIGURED.google) {
@@ -94,32 +127,61 @@ export async function runGoogleProofOfLife(nonce: string): Promise<OAuthOutcome>
   } catch (e) {
     return { provider: 'google', error: (e as Error).message };
   }
-  // SCAFFOLD: actual GIS invocation lives here once a Google OAuth client
-  // ID is registered for captcha-dev-jw.argus.pw. The shape below is the
-  // intended call site; uncommenting needs both the env var AND the
-  // Google Cloud project's OAuth consent screen + authorized origin set
-  // up. See cdk/PROVIDERS.md for the checklist.
-  //
-  // return new Promise<OAuthOutcome>((resolve) => {
-  //   const g = (window as { google?: { accounts?: { id?: {
-  //     initialize: (cfg: unknown) => void;
-  //     prompt: () => void;
-  //   } } } }).google;
-  //   g?.accounts?.id?.initialize({
-  //     client_id: GOOGLE_CLIENT_ID,
-  //     nonce,
-  //     callback: (resp: { credential: string }) => {
-  //       if (!resp?.credential) {
-  //         resolve({ provider: 'google', error: 'no_credential' });
-  //         return;
-  //       }
-  //       resolve({ provider: 'google', token: resp.credential });
-  //     },
-  //   });
-  //   g?.accounts?.id?.prompt();
-  // });
-  void nonce;
-  return { provider: 'google', error: 'scaffold_not_wired_yet' };
+  const g = (window as { google?: GoogleGsiNamespace }).google?.accounts?.id;
+  if (!g) {
+    return { provider: 'google', error: 'gsi_namespace_missing' };
+  }
+  return new Promise<OAuthOutcome>((resolve) => {
+    let settled = false;
+    const finish = (outcome: OAuthOutcome): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        g.cancel();
+      } catch {
+        /* GIS may already be torn down */
+      }
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => {
+      finish({ provider: 'google', error: 'prompt_timeout' });
+    }, PROMPT_TIMEOUT_MS);
+    g.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      nonce,
+      use_fedcm_for_prompt: true,
+      context: 'signin',
+      callback: (resp) => {
+        clearTimeout(timer);
+        if (!resp?.credential) {
+          finish({ provider: 'google', error: 'no_credential' });
+          return;
+        }
+        finish({ provider: 'google', token: resp.credential });
+      },
+    });
+    // Prompt notification tells us when One Tap is suppressed (user
+    // closed it earlier this session, FedCM declined, browser blocked
+    // 3p contexts). Resolve early with a descriptive reason so the
+    // caller can render an explicit "Continue with Google" button
+    // instead of waiting for the timeout.
+    g.prompt((notif) => {
+      if (settled) return;
+      if (notif?.isNotDisplayed?.()) {
+        clearTimeout(timer);
+        finish({
+          provider: 'google',
+          error: `prompt_not_displayed:${notif.getNotDisplayedReason?.() ?? 'unknown'}`,
+        });
+      } else if (notif?.isSkippedMoment?.()) {
+        clearTimeout(timer);
+        finish({
+          provider: 'google',
+          error: `prompt_skipped:${notif.getSkippedReason?.() ?? 'unknown'}`,
+        });
+      }
+    });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
