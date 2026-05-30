@@ -28,3 +28,14 @@ createRoot(rootElement).render(
     </BrowserRouter>
   </StrictMode>
 );
+
+// Register the asset-cache service worker for returning visits.
+// Only in production builds — keeps `vite dev` HMR uncontested.
+// Failure is non-fatal; the app works fine without the SW.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* registration failed (private mode, no quota, etc.) — silent */
+    });
+  });
+}
