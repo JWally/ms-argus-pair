@@ -344,18 +344,53 @@ export async function awaitDesktopReady(
   }
 }
 
+/**
+ * Run the WebAuthn proof-of-life ceremony.
+ *
+ * Tries authentication first (uses an existing passkey stored in
+ * iCloud Keychain / Google Password Manager). If no passkey is
+ * registered for this RP, the get() call rejects — we catch and fall
+ * through to registration with `residentKey: 'preferred'` so iOS/Android
+ * persists the credential for next time.
+ *
+ * Server reads either response shape and routes accordingly. HMAC
+ * device-trust silent reauth ran upstream of this; if it succeeded we
+ * never get here.
+ */
 async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: string }> {
+  const { startAuthentication, startRegistration } = await import('@simplewebauthn/browser');
+  const rpId = window.location.hostname;
+  // First: try authentication. If a passkey exists for this RP, the OS
+  // will surface "Use saved passkey?" with Touch ID. Empty
+  // allowCredentials lets the OS pick from any stored credential for
+  // the RP (discoverable-credential flow). NotAllowedError /
+  // "No passkey available" → fall through to registration.
   try {
-    const { startRegistration } = await import('@simplewebauthn/browser');
-    const rpId = window.location.hostname;
-    const result = await startRegistration({
+    return await startAuthentication({
+      optionsJSON: {
+        challenge: nonceB64Url,
+        rpId,
+        userVerification: 'required',
+        timeout: 60_000,
+      },
+    });
+  } catch {
+    /* no stored passkey, or user dismissed — register fresh */
+  }
+  try {
+    return await startRegistration({
       optionsJSON: {
         challenge: nonceB64Url,
         rp: { id: rpId, name: 'Argus Pair' },
         user: {
-          id: nonceB64Url,
-          name: 'ephemeral',
-          displayName: 'Argus Proof of Life',
+          // user.id has to be stable across registrations on the same
+          // device — without it iOS won't surface the saved passkey on
+          // the authentication path. We use the rpId so the same device
+          // always lands on the same user record. Not a privacy issue;
+          // user.id is never sent off the device after registration.
+          id: rpId,
+          name: 'pair',
+          displayName: 'Argus Pair',
         },
         pubKeyCredParams: [
           { type: 'public-key', alg: -7 },
@@ -363,15 +398,20 @@ async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: s
         ],
         authenticatorSelection: {
           authenticatorAttachment: 'platform',
-          residentKey: 'discouraged',
+          // 'preferred' so iOS/Android writes the credential to the
+          // OS-managed passkey store. Authentication path above can
+          // then surface it on subsequent visits without registration.
+          residentKey: 'preferred',
           requireResidentKey: false,
           userVerification: 'required',
         },
-        attestation: 'direct',
+        // 'none' — earlier analysis showed Apple/Google strip
+        // attestation on platform passkeys regardless, so requesting
+        // 'direct' just adds latency without buying any trust.
+        attestation: 'none',
         timeout: 60_000,
       },
     });
-    return result;
   } catch (e) {
     return { error: (e as Error).message };
   }
