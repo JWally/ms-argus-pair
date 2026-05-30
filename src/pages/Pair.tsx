@@ -17,6 +17,15 @@ type Phase =
   | 'timeout'
   | 'error';
 
+// Debug mode disables the trusted-device auto-pass so we always land on
+// the buttons screen — useful for demos / inspecting the ceremony. Flag
+// rides through from the desktop's `?debug=true` query param via the QR
+// URL. UI-only: server-side verification is unchanged.
+function isDebugMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  return new URLSearchParams(window.location.search).get('debug') === 'true';
+}
+
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
   const [phase, setPhase] = useState<Phase>('awaiting-desktop');
@@ -46,12 +55,10 @@ export function Pair() {
         infoRef.current = info;
         const remembered = !!trustToken;
         setHasTrust(remembered);
-        // Remembered device → silent reauth. Skip the "Confirm" button
-        // and run straight through. submitPhoneAttestation falls back
-        // to fresh WebAuthn (or whatever the user picks) automatically
-        // if the token is rejected, so the worst case is the user sees
-        // one extra prompt instead of seeing a button they have to tap.
-        if (remembered) {
+        // Remembered device → silent reauth, unless we're in debug mode
+        // (forced via desktop's ?debug=true → QR → here). Debug always
+        // lands on the buttons so the ceremony is visible.
+        if (remembered && !isDebugMode()) {
           setPhase('returning');
           await pair();
         } else {
@@ -159,7 +166,7 @@ export function Pair() {
     <div className="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
       <header className="flex items-center justify-between">
         <Wordmark />
-        <span className="pill">phone</span>
+        <span className="pill">{isDebugMode() ? 'debug' : 'phone'}</span>
       </header>
 
       {(phase === 'awaiting-desktop' || phase === 'pairing' || phase === 'returning') && (

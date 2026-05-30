@@ -184,7 +184,13 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   // from. Falls back to window.location.origin for local dev.
   const pairOrigin =
     (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
-  const pairUrl = `${pairOrigin}/pair/${session.sessionId}`;
+  // Forward the desktop's `?debug=true` query param through the QR so
+  // the phone-side flow can disable its silent-reauth auto-pass and
+  // always land on the buttons screen. Debug mode is UI-only; it does
+  // not relax any server-side verification.
+  const debugParam =
+    new URLSearchParams(window.location.search).get('debug') === 'true' ? '?debug=true' : '';
+  const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}`;
   // Dev affordance: log the pair URL so you can copy-paste it into
   // another browser / private window without scanning a QR. Cheap; no
   // PII (sessionId TTLs out in 5 minutes regardless).
