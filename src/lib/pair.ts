@@ -184,7 +184,13 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   // from. Falls back to window.location.origin for local dev.
   const pairOrigin =
     (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
-  const pairUrl = `${pairOrigin}/pair/${session.sessionId}`;
+  // Forward the desktop's `?debug=true` query param through the QR so
+  // the phone-side flow can disable its silent-reauth auto-pass and
+  // always land on the buttons screen. Debug mode is UI-only; it does
+  // not relax any server-side verification.
+  const debugParam =
+    new URLSearchParams(window.location.search).get('debug') === 'true' ? '?debug=true' : '';
+  const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}`;
   // Dev affordance: log the pair URL so you can copy-paste it into
   // another browser / private window without scanning a QR. Cheap; no
   // PII (sessionId TTLs out in 5 minutes regardless).
@@ -344,18 +350,124 @@ export async function awaitDesktopReady(
   }
 }
 
-async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: string }> {
+/**
+ * localStorage hint flag — set after a successful registration so the
+ * next visit knows whether to call get() (authentication) or create()
+ * (registration). There's no client-side WebAuthn API to ask "does this
+ * RP own any of my passkeys?" — privacy-driven omission — so we trade
+ * server-side certainty for a single-source-of-truth client flag.
+ *
+ * Mismatches (flag set but the passkey was deleted from keychain, or
+ * flag absent but the credential is still synced) self-heal: the
+ * authentication path catches the iOS rejection and immediately falls
+ * through to registration. Worst case is one extra dialog on the rare
+ * recovery path.
+ */
+/**
+ * localStorage records: have we successfully registered before, and
+ * which credentialId? Used to (a) decide which button to show on the
+ * phone (CREATE vs USE), and (b) pass an explicit `allowCredentials`
+ * on the authentication path so iOS pre-selects the right passkey
+ * instead of showing the generic "No passkeys for this site" sheet
+ * when something's off.
+ *
+ * There's no client-side WebAuthn API to ask "does this RP own any of
+ * my passkeys?" — privacy-driven omission — so the localStorage flag
+ * is the best signal we have. Mismatches (flag set but the passkey
+ * was deleted, or flag absent but the credential is still synced)
+ * are recoverable: the user picks the wrong button, the OS errors out
+ * clearly, they pick the other one.
+ */
+const PASSKEY_HINT_KEY = 'argus-pair:passkey-registered';
+const PASSKEY_CRED_ID_KEY = 'argus-pair:passkey-credential-id';
+
+export function hasPasskeyHint(): boolean {
   try {
-    const { startRegistration } = await import('@simplewebauthn/browser');
-    const rpId = window.location.hostname;
+    return window.localStorage.getItem(PASSKEY_HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function readCredentialId(): string | null {
+  try {
+    return window.localStorage.getItem(PASSKEY_CRED_ID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writePasskeyHint(credentialId: string | null): void {
+  try {
+    if (credentialId) {
+      window.localStorage.setItem(PASSKEY_HINT_KEY, '1');
+      window.localStorage.setItem(PASSKEY_CRED_ID_KEY, credentialId);
+    } else {
+      window.localStorage.removeItem(PASSKEY_HINT_KEY);
+      window.localStorage.removeItem(PASSKEY_CRED_ID_KEY);
+    }
+  } catch {
+    /* private mode / disabled storage — silent */
+  }
+}
+
+/**
+ * Authenticate using the previously-saved passkey. Looks up the
+ * credentialId in localStorage and passes it via `allowCredentials`
+ * so iOS knows exactly which passkey to surface — bypasses the
+ * confusing "No passkeys available" generic sheet when something's
+ * gone wrong.
+ */
+async function authenticateExistingPasskey(
+  nonceB64Url: string
+): Promise<unknown | { error: string }> {
+  const { startAuthentication } = await import('@simplewebauthn/browser');
+  const rpId = window.location.hostname;
+  const credentialId = readCredentialId();
+  try {
+    return await startAuthentication({
+      optionsJSON: {
+        challenge: nonceB64Url,
+        rpId,
+        userVerification: 'required',
+        timeout: 60_000,
+        allowCredentials: credentialId ? [{ id: credentialId, type: 'public-key' }] : undefined,
+      },
+    });
+  } catch (e) {
+    // Hint was wrong (deleted from keychain, never actually synced,
+    // user cancelled). Clear localStorage so next attempt offers
+    // CREATE PASSKEY instead of USE.
+    writePasskeyHint(null);
+    return { error: (e as Error).message };
+  }
+}
+
+/**
+ * Create a fresh resident passkey. iOS/Android writes it to iCloud
+ * Keychain / Google Password Manager so subsequent visits can
+ * authenticate without re-registering.
+ */
+async function createNewPasskey(nonceB64Url: string): Promise<unknown | { error: string }> {
+  const { startRegistration } = await import('@simplewebauthn/browser');
+  const rpId = window.location.hostname;
+  try {
+    // user.id must be valid base64url after SimpleWebAuthn decodes it
+    // (iOS Safari rejects non-base64url strings with "invalid characters").
+    // Encoding the rpId gives us a value that is:
+    //   - valid base64url (no dots, no slashes, no padding)
+    //   - stable per host (so repeat registrations on the same device
+    //     dedupe in the OS-managed passkey store)
+    //   - distinct per host (no privacy leak across hosts)
+    const userIdB64Url = btoa(rpId).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const result = await startRegistration({
       optionsJSON: {
         challenge: nonceB64Url,
         rp: { id: rpId, name: 'Argus Pair' },
         user: {
-          id: nonceB64Url,
-          name: 'ephemeral',
-          displayName: 'Argus Proof of Life',
+          id: userIdB64Url,
+          name: 'pair',
+          displayName: 'Argus Pair',
         },
         pubKeyCredParams: [
           { type: 'public-key', alg: -7 },
@@ -363,14 +475,27 @@ async function runProofOfLife(nonceB64Url: string): Promise<unknown | { error: s
         ],
         authenticatorSelection: {
           authenticatorAttachment: 'platform',
-          residentKey: 'discouraged',
+          // 'preferred' so iOS/Android persists the credential.
+          residentKey: 'preferred',
           requireResidentKey: false,
           userVerification: 'required',
         },
-        attestation: 'direct',
+        // 'none' — Apple/Google strip attestation on platform passkeys
+        // anyway, so 'direct' just adds latency without buying trust.
+        attestation: 'none',
         timeout: 60_000,
       },
     });
+    // Optimistically remember the credentialId. If the server rejects
+    // the response on POST, next visit's authentication will fail and
+    // clear it (recovery path inside authenticateExistingPasskey).
+    if (
+      result &&
+      typeof result === 'object' &&
+      typeof (result as { id?: unknown }).id === 'string'
+    ) {
+      writePasskeyHint((result as { id: string }).id);
+    }
     return result;
   } catch (e) {
     return { error: (e as Error).message };
@@ -399,13 +524,14 @@ interface AttestResponse {
  */
 export interface SubmitPhoneAttestationOptions {
   /**
-   * Proof-of-life mode. Default `"webauthn"` runs the platform
-   * authenticator ceremony. `"oauth"` skips WebAuthn and expects the
-   * caller to have already completed the OAuth flow — pass the result
-   * via `oauthResult`. Server-side verification happens identically:
-   * proof-of-life is set if either path completes.
+   * Proof-of-life mode.
+   *   - `"passkey-create"`  → registration ceremony (CREATE button)
+   *   - `"passkey-auth"`    → authentication ceremony (USE button)
+   *   - `"oauth"`           → caller already ran OAuth, pass `oauthResult`
+   * Server-side verification handles all three identically as
+   * proof-of-life signals.
    */
-  mode?: 'webauthn' | 'oauth';
+  mode?: 'passkey-create' | 'passkey-auth' | 'oauth';
   /** When `mode === "oauth"`, the result from one of the
    *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
@@ -491,10 +617,17 @@ export async function submitPhoneAttestation(
   // (caller's responsibility), THEN we do the Argus scan.
   events.onStatus?.('proof of life + integrity scan');
   const useOAuth = options.mode === 'oauth';
+  // Default to register if the caller didn't pick — first-time visitors
+  // hitting older code paths get the cleaner CREATE flow rather than
+  // the iOS "no passkeys for this site" dialog.
+  const passkeyMode: 'passkey-create' | 'passkey-auth' =
+    options.mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
 
   const webauthnPromise: Promise<unknown | { error: string }> = useOAuth
     ? Promise.resolve({ error: 'mode_oauth_skipped' })
-    : runProofOfLife(info.nonce);
+    : passkeyMode === 'passkey-auth'
+      ? authenticateExistingPasskey(info.nonce)
+      : createNewPasskey(info.nonce);
 
   const argusPromise = argus.run({
     cpi: ARGUS_CPI,

@@ -55,8 +55,12 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { verifyRegistrationResponse } from '@simplewebauthn/server';
-import type { RegistrationResponseJSON } from '@simplewebauthn/server';
+import { verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
+import type {
+  AuthenticationResponseJSON,
+  RegistrationResponseJSON,
+  WebAuthnCredential,
+} from '@simplewebauthn/server';
 import middy from '@middy/core';
 import type { MiddlewareObj } from '@middy/core';
 import {
@@ -917,19 +921,95 @@ interface WebAuthnAnnotations {
   phone_webauthn_error?: string;
 }
 
+// ── Passkey persistence (resident credentials) ─────────────────────────
+//
+// When the client opts into resident-credential creation
+// (residentKey: 'preferred' on the registration request), we persist the
+// (credentialId, publicKey, signCount) tuple so future visits can complete
+// authentication WITHOUT another registration ceremony. The HMAC
+// device-trust silent-reauth path keeps running alongside — passkey
+// authentication is an additional path, not a replacement.
+//
+// Storage shape: PK=PASSKEY#<credentialIdBase64Url>, SK=META on the
+// existing PairSessions table. TTL refreshes to +1y on every successful
+// authentication, so actively-used passkeys never expire; abandoned ones
+// GC themselves a year after last use.
+//
+// We DO NOT enforce uniqueness per argus pubkey — iCloud Keychain may
+// distribute the same passkey across the user's Apple devices, each of
+// which produces the same credentialId.
+
+const PASSKEY_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
+
+interface StoredPasskey {
+  credentialId: string;
+  publicKey: string; // base64
+  signCount: number;
+  argusPubkey: string | null;
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+function publicKeyBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64');
+}
+
+function base64ToBytes(s: string): Uint8Array<ArrayBuffer> {
+  // Copy into a fresh Uint8Array backed by a real ArrayBuffer (Buffer's
+  // underlying ArrayBufferLike isn't assignable to the simplewebauthn
+  // WebAuthnCredential publicKey type, which insists on ArrayBuffer).
+  const src = Buffer.from(s, 'base64');
+  const out = new Uint8Array(new ArrayBuffer(src.length));
+  out.set(src);
+  return out;
+}
+
+async function loadPasskey(credentialId: string): Promise<StoredPasskey | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: { PK: `PASSKEY#${credentialId}`, SK: 'META' },
+    })
+  );
+  return (res.Item as StoredPasskey | undefined) ?? null;
+}
+
+async function savePasskey(p: StoredPasskey): Promise<void> {
+  const ttl = Math.floor(Date.now() / 1000) + PASSKEY_TTL_SECONDS;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { PK: `PASSKEY#${p.credentialId}`, SK: 'META' },
+      UpdateExpression:
+        'SET publicKey = :pk, signCount = :sc, argusPubkey = :ap, ' +
+        'createdAt = if_not_exists(createdAt, :now), lastUsedAt = :now, ' +
+        'expiresAt = :ttl, credentialId = :cid',
+      ExpressionAttributeValues: {
+        ':pk': p.publicKey,
+        ':sc': p.signCount,
+        ':ap': p.argusPubkey,
+        ':now': p.lastUsedAt,
+        ':ttl': ttl,
+        ':cid': p.credentialId,
+      },
+    })
+  );
+}
+
 /**
- * Verify the phone's WebAuthn proof-of-life registration. Uses the
- * session nonce as expectedChallenge — the same nonce the phone signed
- * over in the Argus envelope, so a single binding ties together the
- * Argus scan, the device key, and the TEE attestation.
+ * Verify a stored-passkey authentication assertion. Returns the same
+ * annotations shape as verifyWebAuthn() so the verdict branch can stay
+ * homogeneous. Bumps signCount + lastUsedAt on success.
  *
- * Credentials are non-resident (residentKey:'discouraged' on the
- * client) and we don't persist the credentialId server-side, so the
- * credential is truly ephemeral — nothing to clean up.
+ * Replay protection: the server's stored signCount is compared against
+ * the new counter the authenticator reports. If the new counter is not
+ * strictly greater AND not zero (zero indicates an authenticator that
+ * doesn't implement counters — most platform authenticators), reject.
  */
-async function verifyWebAuthn(
+async function verifyPasskeyAuthentication(
   webauthn: unknown,
-  expectedNonce: string
+  expectedNonce: string,
+  argusPubkey: string
 ): Promise<WebAuthnAnnotations> {
   if (!webauthn || typeof webauthn !== 'object') {
     return { phone_webauthn_attested: false, phone_webauthn_error: 'missing' };
@@ -937,6 +1017,89 @@ async function verifyWebAuthn(
   const w = webauthn as Record<string, unknown>;
   if (typeof w.error === 'string') {
     return { phone_webauthn_attested: false, phone_webauthn_error: w.error };
+  }
+  const auth = webauthn as AuthenticationResponseJSON;
+  if (!auth.id) {
+    return { phone_webauthn_attested: false, phone_webauthn_error: 'missing_credential_id' };
+  }
+  const stored = await loadPasskey(auth.id);
+  if (!stored) {
+    return { phone_webauthn_attested: false, phone_webauthn_error: 'credential_not_registered' };
+  }
+  try {
+    const credential: WebAuthnCredential = {
+      id: stored.credentialId,
+      publicKey: base64ToBytes(stored.publicKey),
+      counter: stored.signCount,
+    };
+    const verification = await verifyAuthenticationResponse({
+      response: auth,
+      expectedChallenge: expectedNonce,
+      expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+      expectedRPID: WEBAUTHN_RP_ID,
+      credential,
+      requireUserVerification: true,
+    });
+    if (!verification.verified) {
+      return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
+    }
+    // Update sign counter + last-used. Re-binds argusPubkey to the most
+    // recent device that proved possession (passkeys can sync across
+    // user's devices via iCloud Keychain).
+    await savePasskey({
+      credentialId: stored.credentialId,
+      publicKey: stored.publicKey,
+      signCount: verification.authenticationInfo.newCounter,
+      argusPubkey,
+      createdAt: stored.createdAt,
+      lastUsedAt: Math.floor(Date.now() / 1000),
+    });
+    return {
+      phone_webauthn_attested: true,
+      phone_webauthn_format: 'passkey_authentication',
+      phone_webauthn_user_verified: verification.authenticationInfo.userVerified,
+      phone_webauthn_credential_backed_up: verification.authenticationInfo.credentialBackedUp,
+    };
+  } catch (e) {
+    return {
+      phone_webauthn_attested: false,
+      phone_webauthn_error: (e as Error).message,
+    };
+  }
+}
+
+/**
+ * Verify the phone's WebAuthn proof-of-life ceremony.
+ *
+ * Branches on the response shape:
+ *   - response.attestationObject present → registration (first visit).
+ *     Verify with verifyRegistrationResponse(). If a credentialId
+ *     came back (resident-key flow), persist it for later
+ *     authentication.
+ *   - response.signature present → authentication (return visit).
+ *     Verify with verifyAuthenticationResponse() against the stored
+ *     publicKey, bump signCount.
+ *
+ * Either path produces the same WebAuthnAnnotations shape, so the
+ * verdict branch downstream doesn't need to know which happened.
+ */
+async function verifyWebAuthn(
+  webauthn: unknown,
+  expectedNonce: string,
+  argusPubkey: string
+): Promise<WebAuthnAnnotations> {
+  if (!webauthn || typeof webauthn !== 'object') {
+    return { phone_webauthn_attested: false, phone_webauthn_error: 'missing' };
+  }
+  const w = webauthn as Record<string, unknown>;
+  if (typeof w.error === 'string') {
+    return { phone_webauthn_attested: false, phone_webauthn_error: w.error };
+  }
+  const response = w.response as Record<string, unknown> | undefined;
+  const isAuthentication =
+    typeof response?.signature === 'string' && typeof response?.authenticatorData === 'string';
+  if (isAuthentication) {
+    return verifyPasskeyAuthentication(webauthn, expectedNonce, argusPubkey);
   }
   try {
     const verification = await verifyRegistrationResponse({
@@ -950,6 +1113,23 @@ async function verifyWebAuthn(
       return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
     }
     const info = verification.registrationInfo;
+    // Persist the credential if the authenticator gave us a resident
+    // credentialId. Catches failures silently — the verdict still
+    // succeeds on the registration alone; a missing passkey row just
+    // means the user falls back to a fresh registration next visit.
+    if (info.credential?.id && info.credential?.publicKey) {
+      const now = Math.floor(Date.now() / 1000);
+      void savePasskey({
+        credentialId: info.credential.id,
+        publicKey: publicKeyBase64(info.credential.publicKey),
+        signCount: info.credential.counter ?? 0,
+        argusPubkey,
+        createdAt: now,
+        lastUsedAt: now,
+      }).catch(() => {
+        /* non-fatal — paired succeeds either way */
+      });
+    }
     // We DO NOT gate on fmt or AAGUID. Earlier attempts to require a
     // phone-platform attestation format (apple / android-key /
     // android-safetynet) or a non-zero AAGUID broke real iOS and
@@ -1339,7 +1519,7 @@ const lambdaHandler = async (event: {
           } as WebAuthnAnnotations)
         : oauthInput
           ? verifyOAuthProofOfLife(oauthInput, s.nonce)
-          : verifyWebAuthn(webauthnInput, s.nonce);
+          : verifyWebAuthn(webauthnInput, s.nonce, att.publicKey);
 
       const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
         fetchProjection(s.desktopAttestation.argusSessionId),

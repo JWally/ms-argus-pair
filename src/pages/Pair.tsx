@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { awaitDesktopReady, submitPhoneAttestation, type PhoneSessionInfo } from '../lib/pair';
+import {
+  awaitDesktopReady,
+  hasPasskeyHint,
+  submitPhoneAttestation,
+  type PhoneSessionInfo,
+} from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
 import { Wordmark } from '../components/Brand';
@@ -16,6 +21,15 @@ type Phase =
   | 'taken'
   | 'timeout'
   | 'error';
+
+// Debug mode disables the trusted-device auto-pass so we always land on
+// the buttons screen — useful for demos / inspecting the ceremony. Flag
+// rides through from the desktop's `?debug=true` query param via the QR
+// URL. UI-only: server-side verification is unchanged.
+function isDebugMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  return new URLSearchParams(window.location.search).get('debug') === 'true';
+}
 
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
@@ -46,12 +60,10 @@ export function Pair() {
         infoRef.current = info;
         const remembered = !!trustToken;
         setHasTrust(remembered);
-        // Remembered device → silent reauth. Skip the "Confirm" button
-        // and run straight through. submitPhoneAttestation falls back
-        // to fresh WebAuthn (or whatever the user picks) automatically
-        // if the token is rejected, so the worst case is the user sees
-        // one extra prompt instead of seeing a button they have to tap.
-        if (remembered) {
+        // Remembered device → silent reauth, unless we're in debug mode
+        // (forced via desktop's ?debug=true → QR → here). Debug always
+        // lands on the buttons so the ceremony is visible.
+        if (remembered && !isDebugMode()) {
           setPhase('returning');
           await pair();
         } else {
@@ -95,16 +107,19 @@ export function Pair() {
     return () => window.clearTimeout(timer);
   }, [phase]);
 
-  async function pair() {
+  async function pair(passkeyMode: 'passkey-create' | 'passkey-auth' = 'passkey-create') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     inflightRef.current = true;
     setPhase(hasTrust ? 'returning' : 'pairing');
     setStatus('starting');
     setErrorMsg(null);
     try {
-      const r = await submitPhoneAttestation(sessionId, infoRef.current, {
-        onStatus: setStatus,
-      });
+      const r = await submitPhoneAttestation(
+        sessionId,
+        infoRef.current,
+        { onStatus: setStatus },
+        { mode: passkeyMode }
+      );
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
@@ -159,7 +174,7 @@ export function Pair() {
     <div className="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
       <header className="flex items-center justify-between">
         <Wordmark />
-        <span className="pill">phone</span>
+        <span className="pill">{isDebugMode() ? 'debug' : 'phone'}</span>
       </header>
 
       {(phase === 'awaiting-desktop' || phase === 'pairing' || phase === 'returning') && (
@@ -200,7 +215,7 @@ export function Pair() {
           </div>
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold tracking-tight">
-              {hasTrust ? 'Welcome back' : 'Just this once.'}
+              {hasTrust ? 'Welcome back' : 'Just this once…?'}
             </h1>
             <p className="text-sm leading-relaxed text-muted">
               {hasTrust
@@ -208,9 +223,41 @@ export function Pair() {
                 : 'Tap once today. Every visit after is silent — promise.'}
             </p>
           </div>
-          <button onClick={pair} className="btn btn-primary w-full py-4 text-base">
-            {hasTrust ? 'Confirm' : 'PASSKEY'}
-          </button>
+          {hasTrust ? (
+            <button onClick={() => pair()} className="btn btn-primary w-full py-4 text-base">
+              Confirm
+            </button>
+          ) : hasPasskeyHint() ? (
+            <>
+              <button
+                onClick={() => pair('passkey-auth')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                USE PASSKEY
+              </button>
+              <button
+                onClick={() => pair('passkey-create')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                CREATE PASSKEY
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => pair('passkey-create')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                CREATE PASSKEY
+              </button>
+              <button
+                onClick={() => pair('passkey-auth')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                USE PASSKEY
+              </button>
+            </>
+          )}
           {PROVIDERS_CONFIGURED.google && !hasTrust && (
             <button onClick={pairWithGoogle} className="btn btn-primary w-full py-4 text-base">
               Continue with Google
