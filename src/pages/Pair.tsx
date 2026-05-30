@@ -241,10 +241,7 @@ export function Pair() {
                 <span>or</span>
                 <span className="h-px flex-1 bg-edge/60" />
               </div>
-              <button
-                onClick={pairWithGoogle}
-                className="flex w-full items-center justify-center gap-3 rounded-xl border border-white/15 bg-white py-3.5 text-sm font-medium text-slate-800 transition hover:bg-white/95"
-              >
+              <button onClick={pairWithGoogle} className="btn btn-primary w-full py-4 text-base">
                 <GoogleGlyph />
                 Continue with Google
               </button>
