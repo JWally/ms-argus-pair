@@ -1068,6 +1068,7 @@ async function verifyOAuthProofOfLife(
 const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
+  queryStringParameters?: Record<string, string | undefined>;
   body?: string;
   headers?: Record<string, string | undefined>;
 }) => {
@@ -1602,6 +1603,12 @@ const lambdaHandler = async (event: {
       // with a 429 at submit. Non-destructive — never increments any
       // bucket. Falls through to "ok" on any failure so the worst
       // case is the user sees the entry endpoint's real error once.
+      //
+      // Site override: browsers don't send `Origin` on same-origin
+      // GETs, so falling back to desktopSiteHost(event) would compute
+      // a different siteHash than POST /entry (which always gets
+      // Origin) and look at a different DDB row. Client passes the
+      // site as a query param to keep both ends aligned.
       const sidStatus = sessionId!;
       const sStatus = await loadSession(sidStatus);
       if (!sStatus) return jsonResp(410, { error: 'session_not_found' });
@@ -1622,7 +1629,14 @@ const lambdaHandler = async (event: {
       }
       const ipStatus = getViewerIp(event);
       const uaStatus = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
-      const siteStatus = desktopSiteHost(event);
+      // Prefer the explicit ?site=<host> query param: same-origin GETs
+      // don't carry the Origin header that desktopSiteHost falls back
+      // to, so without this the peek would hash a different siteHash
+      // than checkRaffleRateLimits sees at POST /entry time.
+      const siteQuery = (event.queryStringParameters?.site ?? '').toLowerCase();
+      const siteStatus = /^[a-z0-9.\-:]{1,253}$/.test(siteQuery)
+        ? siteQuery
+        : desktopSiteHost(event);
       try {
         const peek = await peekRaffleRateLimits(
           phonePubStatus,

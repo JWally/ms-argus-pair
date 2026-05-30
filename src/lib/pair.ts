@@ -604,7 +604,11 @@ export type RaffleStatus =
  * return the real error.
  */
 export async function fetchRaffleStatus(sessionId: string): Promise<RaffleStatus> {
-  return jsonFetch<RaffleStatus>(`${API}/raffle/status/${sessionId}`);
+  // Pass the page host as a query param so the server hashes the same
+  // siteHash that POST /entry sees (browsers don't send Origin on
+  // same-origin GETs). encodeURIComponent guards against weird hosts.
+  const site = encodeURIComponent(window.location.host);
+  return jsonFetch<RaffleStatus>(`${API}/raffle/status/${sessionId}?site=${site}`);
 }
 
 export { HttpError };
