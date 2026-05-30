@@ -59,6 +59,12 @@ import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import middy from '@middy/core';
 import type { MiddlewareObj } from '@middy/core';
+import {
+  isOAuthProvider,
+  verifyOAuth,
+  type OAuthProvider,
+  type OAuthVerifyResult,
+} from './oauth-providers';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -245,6 +251,62 @@ interface RateLimitResult {
   ok: boolean;
   tripped?: string;
   siteHash?: string;
+}
+
+interface RatePeekResult {
+  /** Worst used count across the three buckets. */
+  used: number;
+  /** Configured cap (RAFFLE_BUCKET_MAX). */
+  cap: number;
+  /** Whether at least one bucket is at the cap (entry would 429). */
+  tripped: boolean;
+  /** Epoch seconds when the hour bucket rolls over. */
+  resetAt: number;
+  siteHash: string;
+}
+
+/**
+ * Read-only counterpart to `checkRaffleRateLimits`. Probes each of the
+ * three buckets WITHOUT incrementing so we can answer "would entry
+ * succeed right now?" without consuming a slot. Used by GET
+ * /api/raffle/status so the desktop UI can hide the raffle form when
+ * the user has already hit their hourly cap.
+ */
+async function peekRaffleRateLimits(
+  phonePub: string,
+  desktopPub: string,
+  ua: string,
+  ip: string,
+  siteHost: string
+): Promise<RatePeekResult> {
+  const siteHash = md5hex(siteHost);
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const resetAt = (hour + 1) * 3600;
+  const buckets = [
+    md5hex(phonePub + siteHash),
+    md5hex(desktopPub + siteHash),
+    md5hex(ua + ip + siteHash),
+  ];
+  let used = 0;
+  for (const k of buckets) {
+    const r = await ddb.send(
+      new GetCommand({
+        TableName: TABLE,
+        Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
+        ConsistentRead: false,
+        ProjectionExpression: 'ct',
+      })
+    );
+    const ct = Number((r.Item as { ct?: number } | undefined)?.ct ?? 0);
+    if (ct > used) used = ct;
+  }
+  return {
+    used,
+    cap: RAFFLE_BUCKET_MAX,
+    tripped: used >= RAFFLE_BUCKET_MAX,
+    resetAt,
+    siteHash,
+  };
 }
 
 async function checkRaffleRateLimits(
@@ -930,9 +992,83 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return (res.Item as SessionItem) ?? null;
 }
 
+// ── OAuth proof-of-life ────────────────────────────────────────────────
+//
+// Same shape as WebAuthnAnnotations so the verdict branch below stays
+// homogeneous: `phone_webauthn_attested` is the unified proof-of-life
+// boolean, regardless of how the proof was produced (WebAuthn,
+// device-trust redeem, or OAuth completion). Provider-specific fields
+// surface on top for fraud correlation.
+//
+// On nonce binding: the OAuth verifier checks the token's nonce
+// (Google OIDC) or relies on the client's state round-trip (GitHub /
+// Facebook). Either way, replay across pair sessions fails because
+// each pair session.nonce is unique.
+
+interface OAuthAnnotations extends WebAuthnAnnotations {
+  phone_oauth_provider?: OAuthProvider;
+  phone_oauth_subject?: string;
+  phone_oauth_email_verified?: boolean;
+  phone_oauth_real_user_hint?: 'likely_real' | 'unknown' | 'unsupported';
+  phone_oauth_error?: string;
+}
+
+interface OAuthInput {
+  provider: unknown;
+  token: unknown;
+}
+
+function readOAuthInput(raw: unknown): { provider: OAuthProvider; token: string } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as OAuthInput;
+  if (!isOAuthProvider(o.provider)) return null;
+  if (typeof o.token !== 'string' || o.token.length === 0) return null;
+  return { provider: o.provider, token: o.token };
+}
+
+async function verifyOAuthProofOfLife(
+  rawInput: unknown,
+  expectedNonce: string
+): Promise<OAuthAnnotations> {
+  const input = readOAuthInput(rawInput);
+  if (!input) {
+    return { phone_webauthn_attested: false, phone_oauth_error: 'missing_or_malformed' };
+  }
+  let result: OAuthVerifyResult;
+  try {
+    result = await verifyOAuth(input.provider, {
+      token: input.token,
+      expectedNonce,
+    });
+  } catch (e) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: (e as Error).message,
+    };
+  }
+  if (!result.ok) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: result.reason ?? 'verify_failed',
+    };
+  }
+  return {
+    phone_webauthn_attested: true,
+    phone_webauthn_user_verified: true,
+    phone_webauthn_format: `oauth_${result.provider}`,
+    phone_oauth_provider: result.provider,
+    phone_oauth_subject: result.subject,
+    phone_oauth_email_verified: result.emailVerified,
+    phone_oauth_real_user_hint: result.realUserHint,
+  };
+}
+
 const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
+  queryStringParameters?: Record<string, string | undefined>;
   body?: string;
   headers?: Record<string, string | undefined>;
 }) => {
@@ -1083,10 +1219,15 @@ const lambdaHandler = async (event: {
       // parallel. Both still bind to the session nonce, verified
       // independently below.
       const webauthnInput = body.webauthn;
-      // Device-trust token. Alternative to a fresh WebAuthn ceremony —
-      // proves "this device passed WebAuthn recently from this same IP".
+      // OAuth proof-of-life. Alternative to WebAuthn: client completed a
+      // Google/GitHub/Facebook flow on the phone and posts the resulting
+      // token here. Verifier binds the token's nonce/state to the pair
+      // session.nonce. See oauth-providers.ts for per-provider details.
+      const oauthInput = body.oauth;
+      // Device-trust token. Alternative to a fresh ceremony — proves
+      // "this device passed proof-of-life recently from this same IP".
       // Strict IP-pin; any verify failure returns 401 so the client can
-      // clear the stale token and fall back to fresh WebAuthn.
+      // clear the stale token and fall back to fresh WebAuthn or OAuth.
       const deviceTrustToken =
         typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
       if (!argusSessionId || !att) {
@@ -1186,16 +1327,24 @@ const lambdaHandler = async (event: {
       // If device-trust was redeemed above, we skip WebAuthn verification
       // (trust IS the proof of prior WebAuthn) and synthesize the
       // attested-true annotations from the trust result.
+      // Proof-of-life selector. Precedence: device-trust redeem (silent)
+      // → OAuth (if client sent an oauth field) → WebAuthn (legacy). Only
+      // one path runs per request; the unified annotations shape lets the
+      // downstream verdict code stay homogeneous.
+      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = trustResult?.ok
+        ? Promise.resolve<WebAuthnAnnotations>({
+            phone_webauthn_attested: true,
+            phone_webauthn_user_verified: true,
+            phone_webauthn_format: 'device_trust_redeem',
+          } as WebAuthnAnnotations)
+        : oauthInput
+          ? verifyOAuthProofOfLife(oauthInput, s.nonce)
+          : verifyWebAuthn(webauthnInput, s.nonce);
+
       const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
         fetchProjection(s.desktopAttestation.argusSessionId),
         fetchProjection(argusSessionId),
-        trustResult?.ok
-          ? Promise.resolve<WebAuthnAnnotations>({
-              phone_webauthn_attested: true,
-              phone_webauthn_user_verified: true,
-              phone_webauthn_format: 'device_trust_redeem',
-            } as WebAuthnAnnotations)
-          : verifyWebAuthn(webauthnInput, s.nonce),
+        proofPath,
       ]);
       const desktopClass = classifyScan(desktopProj, 'desktop');
       const phoneClass = classifyScan(phoneProj, 'phone');
@@ -1445,6 +1594,70 @@ const lambdaHandler = async (event: {
       );
       const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
       return jsonResp(200, { ok: true, code, count });
+    }
+
+    case 'GET /api/raffle/status/{id}': {
+      // Read-only "would entry succeed?" probe. Lets the desktop UI
+      // hide the raffle form when the caller has already hit their
+      // hourly cap, instead of letting them fill it in only to bonk
+      // with a 429 at submit. Non-destructive — never increments any
+      // bucket. Falls through to "ok" on any failure so the worst
+      // case is the user sees the entry endpoint's real error once.
+      //
+      // Site override: browsers don't send `Origin` on same-origin
+      // GETs, so falling back to desktopSiteHost(event) would compute
+      // a different siteHash than POST /entry (which always gets
+      // Origin) and look at a different DDB row. Client passes the
+      // site as a query param to keep both ends aligned.
+      const sidStatus = sessionId!;
+      const sStatus = await loadSession(sidStatus);
+      if (!sStatus) return jsonResp(410, { error: 'session_not_found' });
+      if (sStatus.verdict !== 'paired') {
+        return jsonResp(200, { status: 'not_paired', verdict: sStatus.verdict });
+      }
+      const enteredHash = (sStatus as unknown as { raffleHash?: string }).raffleHash;
+      if (enteredHash) {
+        return jsonResp(200, {
+          status: 'already_entered',
+          code: hashToCode(enteredHash),
+        });
+      }
+      const phonePubStatus = sStatus.phoneAttestation?.publicKey ?? '';
+      const desktopPubStatus = sStatus.desktopAttestation?.publicKey ?? '';
+      if (!phonePubStatus || !desktopPubStatus) {
+        return jsonResp(200, { status: 'ok' });
+      }
+      const ipStatus = getViewerIp(event);
+      const uaStatus = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
+      // Prefer the explicit ?site=<host> query param: same-origin GETs
+      // don't carry the Origin header that desktopSiteHost falls back
+      // to, so without this the peek would hash a different siteHash
+      // than checkRaffleRateLimits sees at POST /entry time.
+      const siteQuery = (event.queryStringParameters?.site ?? '').toLowerCase();
+      const siteStatus = /^[a-z0-9.\-:]{1,253}$/.test(siteQuery)
+        ? siteQuery
+        : desktopSiteHost(event);
+      try {
+        const peek = await peekRaffleRateLimits(
+          phonePubStatus,
+          desktopPubStatus,
+          uaStatus,
+          String(ipStatus),
+          siteStatus
+        );
+        return jsonResp(200, {
+          status: peek.tripped ? 'rate_limited' : 'ok',
+          used: peek.used,
+          cap: peek.cap,
+          resetAt: peek.resetAt,
+          site: siteStatus,
+        });
+      } catch {
+        // Degrade open — if DDB is having a moment, just let the UI
+        // show the form. The real entry endpoint will surface the
+        // actual error.
+        return jsonResp(200, { status: 'ok' });
+      }
     }
 
     case 'GET /api/raffle/leaderboard': {

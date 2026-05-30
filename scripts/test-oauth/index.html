@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Argus Pair — Google OAuth smoke test</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+        background: #0d1117;
+        color: #e6edf3;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 1rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.5rem 0 0.5rem;
+        color: #7d8590;
+      }
+      .pill {
+        display: inline-block;
+        padding: 0.1rem 0.5rem;
+        border-radius: 0.5rem;
+        font-size: 0.7rem;
+        background: #1f2933;
+      }
+      pre {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 0.5rem;
+        padding: 0.75rem;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-size: 0.78rem;
+      }
+      .ok {
+        color: #3fb950;
+      }
+      .err {
+        color: #f85149;
+      }
+      .muted {
+        color: #7d8590;
+      }
+      input[type='text'] {
+        width: 100%;
+        font-family: inherit;
+        background: #161b22;
+        color: #e6edf3;
+        border: 1px solid #30363d;
+        border-radius: 0.5rem;
+        padding: 0.5rem;
+      }
+      label {
+        font-size: 0.8rem;
+        color: #7d8590;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+      button {
+        background: #238636;
+        color: #fff;
+        border: 0;
+        padding: 0.4rem 0.8rem;
+        border-radius: 0.5rem;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      button:hover {
+        background: #2ea043;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>
+      Argus Pair —
+      <span class="pill">Google OAuth smoke test</span>
+    </h1>
+
+    <p class="muted">
+      Loads Google Identity Services, fires One Tap with a random nonce, prints the resulting ID
+      token + nonce so you can verify them server-side with
+      <code>scripts/test-oauth/verify.mts</code>.
+    </p>
+
+    <h2>1. Client ID</h2>
+    <p class="muted">
+      Edit if you want; defaults to the dev-jw client. Must be one of the OAuth client's authorized
+      JavaScript origins (this page should serve from <code>http://localhost:5173</code>).
+    </p>
+    <input
+      type="text"
+      id="client-id"
+      value="84525022508-de9l59s4g2pbf436e4313c01ielfvgft.apps.googleusercontent.com"
+    />
+
+    <h2>2. Nonce</h2>
+    <p class="muted">
+      Random per page load — bound into the ID token's <code>nonce</code> claim. The verifier checks
+      it matches what you paste in.
+    </p>
+    <pre id="nonce-display"></pre>
+
+    <h2>3. Sign in</h2>
+    <div class="row">
+      <button id="signin-btn">Continue with Google</button>
+      <span id="status" class="muted">idle</span>
+    </div>
+
+    <h2>4. ID token</h2>
+    <pre id="token-display" class="muted">(waiting for sign-in)</pre>
+
+    <h2>5. Decoded payload (client-side, unverified)</h2>
+    <p class="muted">
+      Sanity check only — verify the <code>aud</code> matches our client ID and
+      <code>nonce</code> matches what you sent. Real signature verification happens in
+      <code>verify.mts</code>.
+    </p>
+    <pre id="payload-display" class="muted">(waiting)</pre>
+
+    <h2>6. Verify command</h2>
+    <p class="muted">Copy-paste this into the repo root to run the actual server-side verifier:</p>
+    <pre id="verify-cmd" class="muted">(waiting)</pre>
+
+    <script>
+      const nonce = (() => {
+        const buf = new Uint8Array(32);
+        crypto.getRandomValues(buf);
+        let s = '';
+        for (const b of buf) s += String.fromCharCode(b);
+        return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      })();
+      document.getElementById('nonce-display').textContent = nonce;
+
+      const statusEl = document.getElementById('status');
+      const tokenEl = document.getElementById('token-display');
+      const payloadEl = document.getElementById('payload-display');
+      const verifyEl = document.getElementById('verify-cmd');
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = cls || 'muted';
+      }
+
+      function decodeJwtPayload(token) {
+        const parts = token.split('.');
+        if (parts.length !== 3) return { _error: 'malformed' };
+        const padded =
+          parts[1].replace(/-/g, '+').replace(/_/g, '/') +
+          '='.repeat((4 - (parts[1].length % 4)) % 4);
+        try {
+          return JSON.parse(atob(padded));
+        } catch (e) {
+          return { _error: e.message };
+        }
+      }
+
+      // Load GIS on demand so the button can validate the client ID first.
+      function loadGsi() {
+        return new Promise((resolve, reject) => {
+          if (window.google?.accounts?.id) return resolve();
+          const s = document.createElement('script');
+          s.src = 'https://accounts.google.com/gsi/client';
+          s.async = true;
+          s.defer = true;
+          s.onload = () => resolve();
+          s.onerror = () => reject(new Error('failed to load GIS'));
+          document.head.appendChild(s);
+        });
+      }
+
+      document.getElementById('signin-btn').addEventListener('click', async () => {
+        const clientId = document.getElementById('client-id').value.trim();
+        if (!clientId) {
+          setStatus('client id required', 'err');
+          return;
+        }
+        setStatus('loading GIS…');
+        try {
+          await loadGsi();
+        } catch (e) {
+          setStatus(e.message, 'err');
+          return;
+        }
+        setStatus('prompting…');
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          nonce,
+          use_fedcm_for_prompt: true,
+          context: 'signin',
+          callback: (resp) => {
+            if (!resp?.credential) {
+              setStatus('no credential', 'err');
+              return;
+            }
+            setStatus('got token', 'ok');
+            tokenEl.textContent = resp.credential;
+            tokenEl.className = '';
+            const payload = decodeJwtPayload(resp.credential);
+            payloadEl.textContent = JSON.stringify(payload, null, 2);
+            payloadEl.className = '';
+            verifyEl.textContent = [
+              'OAUTH_GOOGLE_CLIENT_ID="' + clientId + '" \\',
+              '  npx tsx scripts/test-oauth/verify.mts \\',
+              '  "' + resp.credential + '" \\',
+              '  "' + nonce + '"',
+            ].join('\n');
+            verifyEl.className = '';
+          },
+        });
+        window.google.accounts.id.prompt((notif) => {
+          if (notif?.isNotDisplayed?.()) {
+            setStatus(
+              'prompt not displayed: ' + (notif.getNotDisplayedReason?.() ?? 'unknown'),
+              'err'
+            );
+          } else if (notif?.isSkippedMoment?.()) {
+            setStatus('prompt skipped: ' + (notif.getSkippedReason?.() ?? 'unknown'), 'err');
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

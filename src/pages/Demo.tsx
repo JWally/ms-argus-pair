@@ -4,16 +4,18 @@ import {
   startDesktopSession,
   submitRaffleEntry,
   fetchLeaderboard,
+  fetchRaffleStatus,
   HttpError,
   type DesktopAttestedSummary,
   type LeaderboardRow,
+  type RaffleStatus as RaffleEntryGate,
 } from '../lib/pair';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
 import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
 import { IconCheck, IconX, IconPhone, IconQR, IconShield } from '../components/Icons';
 
-type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
+type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error' | 'timeout';
 
 // Contest target: first handle to this many entries wins.
 const CONTEST_TARGET = 1000;
@@ -89,6 +91,7 @@ export function Demo() {
   const [raffleError, setRaffleError] = useState<string | null>(null);
   const [raffleEntry, setRaffleEntry] = useState<{ code: string; count: number } | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
+  const [entryGate, setEntryGate] = useState<RaffleEntryGate | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
 
@@ -113,6 +116,27 @@ export function Demo() {
       cancelled = true;
     };
   }, []);
+
+  // Once paired, probe the server-side raffle gate (rate-limit + dedupe)
+  // so we can hide the form upfront when the user has already hit their
+  // hourly cap or this session already counted. Degrades to "show the
+  // form" on any error — the submit endpoint still returns the real
+  // verdict.
+  useEffect(() => {
+    if (phase !== 'paired' || !sessionId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const g = await fetchRaffleStatus(sessionId);
+        if (!cancelled) setEntryGate(g);
+      } catch {
+        if (!cancelled) setEntryGate({ status: 'ok' });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, sessionId]);
 
   const qrSvg = useMemo(() => {
     if (!pairUrl) return null;
@@ -157,8 +181,15 @@ export function Demo() {
       setAnnotations((r as { annotations?: Record<string, unknown> }).annotations ?? null);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
-      setPhase('error');
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // Session-expired isn't a fault — the user simply didn't scan in
+      // time. Route it to a calmer screen rather than the red error card.
+      if (msg.includes('session expired')) {
+        setPhase('timeout');
+      } else {
+        setPhase('error');
+        setErrorMsg(msg);
+      }
     }
   }
 
@@ -171,6 +202,7 @@ export function Demo() {
     setVerdictReason(null);
     setAnnotations(null);
     setErrorMsg(null);
+    setEntryGate(null);
     setDesktopAttested(null);
     setSessionId(null);
     setRaffleStatus('idle');
@@ -372,7 +404,42 @@ export function Demo() {
                 {CONTEST_TARGET.toLocaleString()} entries wins.
               </p>
 
-              {raffleStatus !== 'entered' ? (
+              {raffleStatus === 'entered' ? (
+                <div className="mt-6 rounded-xl border border-accent/40 bg-accent/15 px-5 py-4">
+                  <div className="label text-accent-bright">you&apos;re in · code</div>
+                  <div className="mt-1 font-mono text-lg font-semibold text-white">
+                    {raffleEntry?.code} <span className="text-muted">·</span> {raffleEntry?.count}{' '}
+                    {raffleEntry?.count === 1 ? 'entry' : 'entries'}
+                  </div>
+                  <div className="mt-1 text-xs text-muted">
+                    Find this code on the scoreboard below.
+                  </div>
+                </div>
+              ) : entryGate?.status === 'rate_limited' ? (
+                <div className="mt-6 rounded-xl border border-amber-400/35 bg-amber-400/10 px-5 py-4">
+                  <div className="label text-amber-200">limit reached</div>
+                  <div className="mt-1 text-sm text-white">
+                    You&rsquo;ve used your {entryGate.cap} entries this hour
+                    {entryGate.site && entryGate.site !== 'unknown' ? (
+                      <>
+                        {' '}
+                        on <span className="font-mono text-amber-200">{entryGate.site}</span>
+                      </>
+                    ) : null}
+                    . The quota rolls over at the top of the next hour.
+                  </div>
+                </div>
+              ) : entryGate?.status === 'already_entered' ? (
+                <div className="mt-6 rounded-xl border border-accent/40 bg-accent/15 px-5 py-4">
+                  <div className="label text-accent-bright">already counted · code</div>
+                  <div className="mt-1 font-mono text-lg font-semibold text-white">
+                    {entryGate.code}
+                  </div>
+                  <div className="mt-1 text-xs text-muted">
+                    This session was used earlier. Find your code on the scoreboard below.
+                  </div>
+                </div>
+              ) : (
                 <form onSubmit={submitHandle} className="mt-6 flex flex-col gap-3 sm:flex-row">
                   <input
                     type="text"
@@ -396,16 +463,10 @@ export function Demo() {
                     {raffleStatus === 'submitting' ? 'Sending…' : 'Enter →'}
                   </button>
                 </form>
-              ) : (
-                <div className="mt-6 rounded-xl border border-accent/40 bg-accent/15 px-5 py-4">
-                  <div className="label text-accent-bright">you&apos;re in · code</div>
-                  <div className="mt-1 font-mono text-lg font-semibold text-white">
-                    {raffleEntry?.code} <span className="text-muted">·</span> {raffleEntry?.count}{' '}
-                    {raffleEntry?.count === 1 ? 'entry' : 'entries'}
-                  </div>
-                  <div className="mt-1 text-xs text-muted">
-                    Find this code on the scoreboard below.
-                  </div>
+              )}
+              {entryGate?.status === 'ok' && typeof entryGate.used === 'number' && (
+                <div className="mt-2 text-xs text-muted/80">
+                  {entryGate.cap! - entryGate.used} of {entryGate.cap} entries left this hour.
                 </div>
               )}
               {raffleError && (
@@ -472,6 +533,26 @@ export function Demo() {
               <AnnotationsCard annotations={annotations} />
             </>
           )}
+        </section>
+      )}
+
+      {/* Timeout — calmer than an error, because expiring a QR is normal. */}
+      {phase === 'timeout' && (
+        <section className="card border-white/15 p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-accent/15 text-accent">
+              <IconShield className="h-6 w-6" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xl font-semibold">QR code timed out</div>
+              <div className="text-sm text-muted">
+                The code expires after five minutes. Generate a fresh one and try again.
+              </div>
+            </div>
+            <button className="btn btn-primary w-full sm:w-auto" onClick={reset}>
+              New QR
+            </button>
+          </div>
         </section>
       )}
 

@@ -55,6 +55,21 @@ interface PairStackProps extends cdk.StackProps {
   merchantApiCredential?: string;
   /** Public CPI used to partition integrity records (e.g. argus_cpi_test_…). */
   merchantCpi?: string;
+
+  /**
+   * OAuth provider configuration. Optional — when absent, the matching
+   * verifier in oauth-providers.ts returns `*_not_configured` and the
+   * client UI hides the corresponding button.
+   *
+   * client IDs / app IDs are non-secret; they're baked into the Lambda
+   * env vars. App secrets (Facebook only) live in Secrets Manager so
+   * they don't show up in CloudFormation diffs or process listings.
+   */
+  oauthGoogleClientId?: string;
+  oauthGithubClientId?: string;
+  oauthGithubClientSecretArn?: string;
+  oauthFacebookAppId?: string;
+  oauthFacebookAppSecretArn?: string;
 }
 
 export class PairStack extends cdk.Stack {
@@ -68,6 +83,11 @@ export class PairStack extends cdk.Stack {
       merchantApiUrl,
       merchantApiCredential,
       merchantCpi,
+      oauthGoogleClientId,
+      oauthGithubClientId,
+      oauthGithubClientSecretArn,
+      oauthFacebookAppId,
+      oauthFacebookAppSecretArn,
     } = props;
     const domainName = `${subdomain}.${rootDomain}`;
 
@@ -122,12 +142,42 @@ export class PairStack extends cdk.Stack {
         ...(merchantApiUrl ? { MERCHANT_API_URL: merchantApiUrl } : {}),
         ...(merchantApiCredential ? { MERCHANT_API_CREDENTIAL: merchantApiCredential } : {}),
         ...(merchantCpi ? { MERCHANT_CPI: merchantCpi } : {}),
+        // OAuth client IDs / app IDs are non-secret. Absent → verifier
+        // returns *_not_configured, client hides the button.
+        ...(oauthGoogleClientId ? { OAUTH_GOOGLE_CLIENT_ID: oauthGoogleClientId } : {}),
+        ...(oauthGithubClientId ? { OAUTH_GITHUB_CLIENT_ID: oauthGithubClientId } : {}),
+        ...(oauthFacebookAppId ? { OAUTH_FACEBOOK_APP_ID: oauthFacebookAppId } : {}),
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: { minify: true, sourceMap: false, target: 'node22' },
     });
     table.grantReadWriteData(pairFn);
     deviceTrustSecret.grantRead(pairFn);
+
+    // ── OAuth provider secrets ────────────────────────────────────────
+    // Each provider's app secret lives in Secrets Manager so it stays
+    // out of CFN templates. The Lambda gets read access + the secret
+    // value materialised into the named env var at cold start (CDK's
+    // built-in fromSecretCompleteArn + addEnvironment pattern would
+    // also work; this form keeps the lookup explicit).
+    if (oauthGithubClientSecretArn) {
+      const ghSecret = secretsmanager.Secret.fromSecretCompleteArn(
+        this,
+        'OAuthGithubClientSecret',
+        oauthGithubClientSecretArn
+      );
+      ghSecret.grantRead(pairFn);
+      pairFn.addEnvironment('OAUTH_GITHUB_CLIENT_SECRET_ARN', ghSecret.secretArn);
+    }
+    if (oauthFacebookAppSecretArn) {
+      const fbSecret = secretsmanager.Secret.fromSecretCompleteArn(
+        this,
+        'OAuthFacebookAppSecret',
+        oauthFacebookAppSecretArn
+      );
+      fbSecret.grantRead(pairFn);
+      pairFn.addEnvironment('OAUTH_FACEBOOK_APP_SECRET_ARN', fbSecret.secretArn);
+    }
 
     // ── HTTP API ───────────────────────────────────────────────────────
     const api = new apigatewayv2.HttpApi(this, 'PairApi', {
@@ -171,6 +221,11 @@ export class PairStack extends cdk.Stack {
     });
     api.addRoutes({
       path: '/api/raffle/leaderboard',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/raffle/status/{id}',
       methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });

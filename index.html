@@ -13,7 +13,50 @@
     <script defer src="https://static-integrity-dev-jw.argus.pw/argus-loader.iife.js"></script>
   </head>
   <body class="bg-bg text-white font-mono">
-    <div id="root"></div>
+    <!--
+      Inline pre-React splash. Paints at first byte so the user sees the
+      brand + a spinning indicator instead of a blank screen during the
+      ~1.5s bundle download + parse window on mobile 4G. React clobbers
+      `<div id="root">` once it mounts, so the splash naturally goes away
+      without a teardown step. Kept tiny on purpose — no external CSS,
+      no fonts, just inline styles.
+    -->
+    <div
+      id="root"
+      style="
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.5rem;
+        background: #0a0a0a;
+        color: rgba(255, 255, 255, 0.92);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      "
+    >
+      <div style="font-size: 1.15rem; font-weight: 600; letter-spacing: 0.04em">
+        argus<span style="color: #b388ff">.pair</span>
+      </div>
+      <div
+        aria-hidden="true"
+        style="
+          width: 28px;
+          height: 28px;
+          border-radius: 50%;
+          border: 2px solid rgba(255, 255, 255, 0.18);
+          border-top-color: #b388ff;
+          animation: argusPairSpin 0.7s linear infinite;
+        "
+      ></div>
+      <style>
+        @keyframes argusPairSpin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      </style>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
