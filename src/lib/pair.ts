@@ -393,10 +393,25 @@ interface AttestResponse {
  *     parallel, original Promise.allSettled flow. On success, server
  *     returns nextDeviceTrust which we persist for the next visit.
  */
+export interface SubmitPhoneAttestationOptions {
+  /**
+   * Proof-of-life mode. Default `"webauthn"` runs the platform
+   * authenticator ceremony. `"oauth"` skips WebAuthn and expects the
+   * caller to have already completed the OAuth flow — pass the result
+   * via `oauthResult`. Server-side verification happens identically:
+   * proof-of-life is set if either path completes.
+   */
+  mode?: 'webauthn' | 'oauth';
+  /** When `mode === "oauth"`, the result from one of the
+   *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
+  oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
+}
+
 export async function submitPhoneAttestation(
   sessionId: string,
   info: PhoneSessionInfo,
-  events: PairEvents = {}
+  events: PairEvents = {},
+  options: SubmitPhoneAttestationOptions = {}
 ): Promise<AttestResponse> {
   const argus = getArgus();
 
@@ -464,29 +479,36 @@ export async function submitPhoneAttestation(
     }
   }
 
-  // ── Fresh WebAuthn + Argus parallel path ───────────────────────
+  // ── Fresh proof-of-life + Argus parallel path ───────────────────
+  // Proof-of-life slot is filled either by WebAuthn (default — runs in
+  // parallel with the Argus scan) or by an OAuth result the caller
+  // already obtained. OAuth flows can't run in parallel with the Argus
+  // scan because the OAuth UI takes user focus, so OAuth runs FIRST
+  // (caller's responsibility), THEN we do the Argus scan.
   events.onStatus?.('proof of life + integrity scan');
-  // Both run in parallel. WebAuthn waits on the user; Argus runs the full
-  // scan. allSettled — if WebAuthn fails (declined / unsupported) the
-  // Argus scan still completes and we submit with {webauthn:{error}}.
-  const [webauthnSettled, runSettled] = await Promise.allSettled([
-    runProofOfLife(info.nonce),
-    argus.run({
-      cpi: ARGUS_CPI,
-      timeoutMs: 30_000,
-      attest: {
-        purpose: ATTEST_PURPOSE,
-        ttlSeconds: ATTEST_TTL_SECONDS,
-        payload: {
-          sessionId,
-          nonce: info.nonce,
-          role: 'phone',
-          desktopArgusSessionId: info.desktopArgusSessionId,
-          desktopKeyId: info.desktopKeyId,
-        },
+  const useOAuth = options.mode === 'oauth';
+
+  const webauthnPromise: Promise<unknown | { error: string }> = useOAuth
+    ? Promise.resolve({ error: 'mode_oauth_skipped' })
+    : runProofOfLife(info.nonce);
+
+  const argusPromise = argus.run({
+    cpi: ARGUS_CPI,
+    timeoutMs: 30_000,
+    attest: {
+      purpose: ATTEST_PURPOSE,
+      ttlSeconds: ATTEST_TTL_SECONDS,
+      payload: {
+        sessionId,
+        nonce: info.nonce,
+        role: 'phone',
+        desktopArgusSessionId: info.desktopArgusSessionId,
+        desktopKeyId: info.desktopKeyId,
       },
-    }),
-  ]);
+    },
+  });
+
+  const [webauthnSettled, runSettled] = await Promise.allSettled([webauthnPromise, argusPromise]);
 
   if (runSettled.status !== 'fulfilled') {
     throw runSettled.reason;
@@ -508,6 +530,7 @@ export async function submitPhoneAttestation(
         argusSessionId: run.argusSessionId,
         attestation: run.attestation,
         webauthn,
+        ...(useOAuth && options.oauthResult ? { oauth: options.oauthResult } : {}),
       }),
     });
     if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);

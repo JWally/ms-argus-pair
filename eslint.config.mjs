@@ -30,6 +30,10 @@ export default [
         process: 'readonly',
         AbortController: 'readonly',
         Buffer: 'readonly',
+        btoa: 'readonly',
+        atob: 'readonly',
+        TextEncoder: 'readonly',
+        TextDecoder: 'readonly',
         // Lib DOM types for WebRTC + Fetch in our pairing client.
         RTCPeerConnection: 'readonly',
         RTCSessionDescription: 'readonly',

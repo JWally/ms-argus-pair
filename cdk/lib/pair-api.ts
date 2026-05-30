@@ -59,6 +59,12 @@ import { verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import middy from '@middy/core';
 import type { MiddlewareObj } from '@middy/core';
+import {
+  isOAuthProvider,
+  verifyOAuth,
+  type OAuthProvider,
+  type OAuthVerifyResult,
+} from './oauth-providers';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -930,6 +936,79 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return (res.Item as SessionItem) ?? null;
 }
 
+// ── OAuth proof-of-life ────────────────────────────────────────────────
+//
+// Same shape as WebAuthnAnnotations so the verdict branch below stays
+// homogeneous: `phone_webauthn_attested` is the unified proof-of-life
+// boolean, regardless of how the proof was produced (WebAuthn,
+// device-trust redeem, or OAuth completion). Provider-specific fields
+// surface on top for fraud correlation.
+//
+// On nonce binding: the OAuth verifier checks the token's nonce
+// (Google OIDC) or relies on the client's state round-trip (GitHub /
+// Facebook). Either way, replay across pair sessions fails because
+// each pair session.nonce is unique.
+
+interface OAuthAnnotations extends WebAuthnAnnotations {
+  phone_oauth_provider?: OAuthProvider;
+  phone_oauth_subject?: string;
+  phone_oauth_email_verified?: boolean;
+  phone_oauth_real_user_hint?: 'likely_real' | 'unknown' | 'unsupported';
+  phone_oauth_error?: string;
+}
+
+interface OAuthInput {
+  provider: unknown;
+  token: unknown;
+}
+
+function readOAuthInput(raw: unknown): { provider: OAuthProvider; token: string } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as OAuthInput;
+  if (!isOAuthProvider(o.provider)) return null;
+  if (typeof o.token !== 'string' || o.token.length === 0) return null;
+  return { provider: o.provider, token: o.token };
+}
+
+async function verifyOAuthProofOfLife(
+  rawInput: unknown,
+  expectedNonce: string
+): Promise<OAuthAnnotations> {
+  const input = readOAuthInput(rawInput);
+  if (!input) {
+    return { phone_webauthn_attested: false, phone_oauth_error: 'missing_or_malformed' };
+  }
+  let result: OAuthVerifyResult;
+  try {
+    result = await verifyOAuth(input.provider, {
+      token: input.token,
+      expectedNonce,
+    });
+  } catch (e) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: (e as Error).message,
+    };
+  }
+  if (!result.ok) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: result.reason ?? 'verify_failed',
+    };
+  }
+  return {
+    phone_webauthn_attested: true,
+    phone_webauthn_user_verified: true,
+    phone_webauthn_format: `oauth_${result.provider}`,
+    phone_oauth_provider: result.provider,
+    phone_oauth_subject: result.subject,
+    phone_oauth_email_verified: result.emailVerified,
+    phone_oauth_real_user_hint: result.realUserHint,
+  };
+}
+
 const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
@@ -1083,10 +1162,15 @@ const lambdaHandler = async (event: {
       // parallel. Both still bind to the session nonce, verified
       // independently below.
       const webauthnInput = body.webauthn;
-      // Device-trust token. Alternative to a fresh WebAuthn ceremony —
-      // proves "this device passed WebAuthn recently from this same IP".
+      // OAuth proof-of-life. Alternative to WebAuthn: client completed a
+      // Google/GitHub/Facebook flow on the phone and posts the resulting
+      // token here. Verifier binds the token's nonce/state to the pair
+      // session.nonce. See oauth-providers.ts for per-provider details.
+      const oauthInput = body.oauth;
+      // Device-trust token. Alternative to a fresh ceremony — proves
+      // "this device passed proof-of-life recently from this same IP".
       // Strict IP-pin; any verify failure returns 401 so the client can
-      // clear the stale token and fall back to fresh WebAuthn.
+      // clear the stale token and fall back to fresh WebAuthn or OAuth.
       const deviceTrustToken =
         typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
       if (!argusSessionId || !att) {
@@ -1186,16 +1270,24 @@ const lambdaHandler = async (event: {
       // If device-trust was redeemed above, we skip WebAuthn verification
       // (trust IS the proof of prior WebAuthn) and synthesize the
       // attested-true annotations from the trust result.
+      // Proof-of-life selector. Precedence: device-trust redeem (silent)
+      // → OAuth (if client sent an oauth field) → WebAuthn (legacy). Only
+      // one path runs per request; the unified annotations shape lets the
+      // downstream verdict code stay homogeneous.
+      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = trustResult?.ok
+        ? Promise.resolve<WebAuthnAnnotations>({
+            phone_webauthn_attested: true,
+            phone_webauthn_user_verified: true,
+            phone_webauthn_format: 'device_trust_redeem',
+          } as WebAuthnAnnotations)
+        : oauthInput
+          ? verifyOAuthProofOfLife(oauthInput, s.nonce)
+          : verifyWebAuthn(webauthnInput, s.nonce);
+
       const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
         fetchProjection(s.desktopAttestation.argusSessionId),
         fetchProjection(argusSessionId),
-        trustResult?.ok
-          ? Promise.resolve<WebAuthnAnnotations>({
-              phone_webauthn_attested: true,
-              phone_webauthn_user_verified: true,
-              phone_webauthn_format: 'device_trust_redeem',
-            } as WebAuthnAnnotations)
-          : verifyWebAuthn(webauthnInput, s.nonce),
+        proofPath,
       ]);
       const desktopClass = classifyScan(desktopProj, 'desktop');
       const phoneClass = classifyScan(phoneProj, 'phone');
