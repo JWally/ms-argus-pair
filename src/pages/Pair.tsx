@@ -200,12 +200,12 @@ export function Pair() {
           </div>
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold tracking-tight">
-              {hasTrust ? 'Welcome back' : 'Prove you’re real'}
+              {hasTrust ? 'Welcome back' : 'Just this once.'}
             </h1>
             <p className="text-sm leading-relaxed text-muted">
               {hasTrust
                 ? 'We remember this device. One tap to confirm.'
-                : 'One tap. Your phone’s Secure Enclave will confirm this is a real device, and an integrity scan runs alongside it.'}
+                : 'Tap once today. Every visit after is silent — promise.'}
             </p>
           </div>
           <button onClick={pair} className="btn btn-primary w-full py-4 text-base">
