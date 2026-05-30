@@ -200,7 +200,7 @@ export function Pair() {
           </div>
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold tracking-tight">
-              {hasTrust ? 'Welcome back' : 'Just this once.'}
+              {hasTrust ? 'Welcome back' : 'Just this once…?'}
             </h1>
             <p className="text-sm leading-relaxed text-muted">
               {hasTrust
