@@ -13,7 +13,7 @@ import { AnnotationsCard } from '../components/AnnotationsCard';
 import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
 import { IconCheck, IconX, IconPhone, IconQR, IconShield } from '../components/Icons';
 
-type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
+type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error' | 'timeout';
 
 // Contest target: first handle to this many entries wins.
 const CONTEST_TARGET = 1000;
@@ -157,8 +157,15 @@ export function Demo() {
       setAnnotations((r as { annotations?: Record<string, unknown> }).annotations ?? null);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
-      setPhase('error');
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // Session-expired isn't a fault — the user simply didn't scan in
+      // time. Route it to a calmer screen rather than the red error card.
+      if (msg.includes('session expired')) {
+        setPhase('timeout');
+      } else {
+        setPhase('error');
+        setErrorMsg(msg);
+      }
     }
   }
 
@@ -472,6 +479,26 @@ export function Demo() {
               <AnnotationsCard annotations={annotations} />
             </>
           )}
+        </section>
+      )}
+
+      {/* Timeout — calmer than an error, because expiring a QR is normal. */}
+      {phase === 'timeout' && (
+        <section className="card border-white/15 p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-accent/15 text-accent">
+              <IconShield className="h-6 w-6" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xl font-semibold">QR code timed out</div>
+              <div className="text-sm text-muted">
+                The code expires after five minutes. Generate a fresh one and try again.
+              </div>
+            </div>
+            <button className="btn btn-primary w-full sm:w-auto" onClick={reset}>
+              New QR
+            </button>
+          </div>
         </section>
       )}
 
