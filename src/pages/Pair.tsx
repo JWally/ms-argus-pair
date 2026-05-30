@@ -94,10 +94,29 @@ export function Pair() {
       }
     })();
     return () => ctl.abort();
-    // runPair is closure-stable; we want this effect to run once per
-    // sessionId mount, not on every render.
+    // pair / pairWithGoogle are closure-stable; we want this effect to
+    // run once per sessionId mount, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // Auto-close the phone tab once the verdict is in. Paired closes
+  // quickly (1.5s) since there's nothing to read; failed gives the
+  // user enough time to read the reason (3.5s) before closing so the
+  // experience isn't "tap → see Not Verified for half a second → tab
+  // gone." 'taken', 'timeout', 'error' all stay open — those need the
+  // user to decide what to do next.
+  useEffect(() => {
+    if (phase !== 'paired' && phase !== 'failed') return;
+    const delayMs = phase === 'paired' ? 1500 : 3500;
+    const timer = window.setTimeout(() => {
+      try {
+        window.close();
+      } catch {
+        /* noop — works only when window.opener exists / popup context */
+      }
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [phase]);
 
   async function pair() {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
@@ -111,15 +130,6 @@ export function Pair() {
       });
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
-      if (r.verdict === 'paired') {
-        window.setTimeout(() => {
-          try {
-            window.close();
-          } catch {
-            /* noop */
-          }
-        }, 1500);
-      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Server distinguishes "QR is already paired with a different
@@ -155,15 +165,6 @@ export function Pair() {
       );
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
-      if (r.verdict === 'paired') {
-        window.setTimeout(() => {
-          try {
-            window.close();
-          } catch {
-            /* noop */
-          }
-        }, 1500);
-      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('session_paired_with_other_device')) {
