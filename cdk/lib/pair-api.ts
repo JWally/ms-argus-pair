@@ -253,6 +253,62 @@ interface RateLimitResult {
   siteHash?: string;
 }
 
+interface RatePeekResult {
+  /** Worst used count across the three buckets. */
+  used: number;
+  /** Configured cap (RAFFLE_BUCKET_MAX). */
+  cap: number;
+  /** Whether at least one bucket is at the cap (entry would 429). */
+  tripped: boolean;
+  /** Epoch seconds when the hour bucket rolls over. */
+  resetAt: number;
+  siteHash: string;
+}
+
+/**
+ * Read-only counterpart to `checkRaffleRateLimits`. Probes each of the
+ * three buckets WITHOUT incrementing so we can answer "would entry
+ * succeed right now?" without consuming a slot. Used by GET
+ * /api/raffle/status so the desktop UI can hide the raffle form when
+ * the user has already hit their hourly cap.
+ */
+async function peekRaffleRateLimits(
+  phonePub: string,
+  desktopPub: string,
+  ua: string,
+  ip: string,
+  siteHost: string
+): Promise<RatePeekResult> {
+  const siteHash = md5hex(siteHost);
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const resetAt = (hour + 1) * 3600;
+  const buckets = [
+    md5hex(phonePub + siteHash),
+    md5hex(desktopPub + siteHash),
+    md5hex(ua + ip + siteHash),
+  ];
+  let used = 0;
+  for (const k of buckets) {
+    const r = await ddb.send(
+      new GetCommand({
+        TableName: TABLE,
+        Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
+        ConsistentRead: false,
+        ProjectionExpression: 'ct',
+      })
+    );
+    const ct = Number((r.Item as { ct?: number } | undefined)?.ct ?? 0);
+    if (ct > used) used = ct;
+  }
+  return {
+    used,
+    cap: RAFFLE_BUCKET_MAX,
+    tripped: used >= RAFFLE_BUCKET_MAX,
+    resetAt,
+    siteHash,
+  };
+}
+
 async function checkRaffleRateLimits(
   phonePub: string,
   desktopPub: string,
@@ -1537,6 +1593,57 @@ const lambdaHandler = async (event: {
       );
       const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
       return jsonResp(200, { ok: true, code, count });
+    }
+
+    case 'GET /api/raffle/status/{id}': {
+      // Read-only "would entry succeed?" probe. Lets the desktop UI
+      // hide the raffle form when the caller has already hit their
+      // hourly cap, instead of letting them fill it in only to bonk
+      // with a 429 at submit. Non-destructive — never increments any
+      // bucket. Falls through to "ok" on any failure so the worst
+      // case is the user sees the entry endpoint's real error once.
+      const sidStatus = sessionId!;
+      const sStatus = await loadSession(sidStatus);
+      if (!sStatus) return jsonResp(410, { error: 'session_not_found' });
+      if (sStatus.verdict !== 'paired') {
+        return jsonResp(200, { status: 'not_paired', verdict: sStatus.verdict });
+      }
+      const enteredHash = (sStatus as unknown as { raffleHash?: string }).raffleHash;
+      if (enteredHash) {
+        return jsonResp(200, {
+          status: 'already_entered',
+          code: hashToCode(enteredHash),
+        });
+      }
+      const phonePubStatus = sStatus.phoneAttestation?.publicKey ?? '';
+      const desktopPubStatus = sStatus.desktopAttestation?.publicKey ?? '';
+      if (!phonePubStatus || !desktopPubStatus) {
+        return jsonResp(200, { status: 'ok' });
+      }
+      const ipStatus = getViewerIp(event);
+      const uaStatus = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
+      const siteStatus = desktopSiteHost(event);
+      try {
+        const peek = await peekRaffleRateLimits(
+          phonePubStatus,
+          desktopPubStatus,
+          uaStatus,
+          String(ipStatus),
+          siteStatus
+        );
+        return jsonResp(200, {
+          status: peek.tripped ? 'rate_limited' : 'ok',
+          used: peek.used,
+          cap: peek.cap,
+          resetAt: peek.resetAt,
+          site: siteStatus,
+        });
+      } catch {
+        // Degrade open — if DDB is having a moment, just let the UI
+        // show the form. The real entry endpoint will surface the
+        // actual error.
+        return jsonResp(200, { status: 'ok' });
+      }
     }
 
     case 'GET /api/raffle/leaderboard': {

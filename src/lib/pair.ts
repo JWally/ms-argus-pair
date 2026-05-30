@@ -589,4 +589,22 @@ export async function fetchLeaderboard(): Promise<LeaderboardRow[]> {
   return r.leaderboard;
 }
 
+export type RaffleStatus =
+  | { status: 'ok'; used?: number; cap?: number; resetAt?: number; site?: string }
+  | { status: 'rate_limited'; used: number; cap: number; resetAt: number; site: string }
+  | { status: 'already_entered'; code: string }
+  | { status: 'not_paired'; verdict?: string };
+
+/**
+ * Read-only probe of whether the current session can submit a raffle
+ * entry right now. Used by the desktop UI to hide the form when the
+ * caller has already hit their cap, instead of letting them fill it
+ * in only to bonk with a 429. On any network/parse failure, callers
+ * should default to showing the form — the entry endpoint will
+ * return the real error.
+ */
+export async function fetchRaffleStatus(sessionId: string): Promise<RaffleStatus> {
+  return jsonFetch<RaffleStatus>(`${API}/raffle/status/${sessionId}`);
+}
+
 export { HttpError };

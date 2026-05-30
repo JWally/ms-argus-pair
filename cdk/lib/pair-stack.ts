@@ -224,6 +224,11 @@ export class PairStack extends cdk.Stack {
       methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
+    api.addRoutes({
+      path: '/api/raffle/status/{id}',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration,
+    });
     // Catch-all so any drift in client URL construction returns JSON, not
     // CloudFront-rewritten SPA HTML. Kept the lesson from the WebRTC era.
     api.addRoutes({
