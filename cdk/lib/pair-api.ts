@@ -51,6 +51,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  ScanCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
@@ -174,6 +175,115 @@ function isProjectionFresh(p: MerchantProjection | null): boolean {
   const age = projectionAgeSeconds(p);
   if (age === null) return false;
   return age >= -PROJECTION_FRESHNESS_WINDOW_SECONDS && age <= PROJECTION_FRESHNESS_WINDOW_SECONDS;
+}
+
+// ── Raffle / leaderboard ──────────────────────────────────────────────────
+//
+// After a paired verdict, the desktop can submit a handle to claim one
+// leaderboard entry. Three independent rate-limit buckets, each capped per
+// rolling hour, ALL scoped by the desktop's site host so one phone (or
+// desktop, or UA+IP) can spend its 5/hr separately on each site:
+//   1. phone device pubkey + site   (SDK persistent key — strongest anti-Sybil)
+//   2. desktop device pubkey + site (same on the host side)
+//   3. UA + IP + site               (weakest, catches header-swap reruns)
+// "Site" is the desktop's loaded alias (Origin header), not a fixed string —
+// CloudFront's ALL_VIEWER_EXCEPT_HOST_HEADER policy strips Host, so Origin is
+// the trustworthy signal here (and originAllowed has already validated it
+// against ALLOWED_ORIGINS by the time we read it).
+const RAFFLE_FALLBACK_SITE = 'unknown';
+const RAFFLE_BUCKET_MAX = 3;
+const RAFFLE_BUCKET_TTL_SECONDS = 2 * 3600;
+const RAFFLE_LEADERBOARD_TOP = 25;
+const HANDLE_RE = /^[a-z0-9._@-]{3,64}$/;
+
+const md5hex = (s: string) => createHash('md5').update(s).digest('hex');
+
+function normalizeHandle(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const h = raw.trim().toLowerCase();
+  return HANDLE_RE.test(h) ? h : null;
+}
+
+/**
+ * Hash the submitted handle for storage + display. The doubled
+ * `${h}::${h}` input is a cheap domain-separator so the stored hash
+ * isn't directly lookup-able against a rainbow table of plain
+ * md5(email). md5 is fine here — this is privacy hygiene, not auth.
+ *
+ * Returns:
+ *   - `hash`: full 32-char hex (used as the DDB partition key)
+ *   - `code`: short public identifier (`xxxx-xxxx`, 8 hex chars +
+ *             dash, ~4B-space — collision-safe up to ~65k entries by
+ *             the birthday bound, which comfortably covers any contest
+ *             this site will run)
+ */
+function handleHash(h: string): { hash: string; code: string } {
+  const hash = md5hex(`${h}::${h}`);
+  const code = `${hash.slice(0, 4)}-${hash.slice(4, 8)}`;
+  return { hash, code };
+}
+
+function hashToCode(hash: string): string {
+  return `${hash.slice(0, 4)}-${hash.slice(4, 8)}`;
+}
+
+/**
+ * Pull the desktop's site host from the Origin header. CloudFront forwards
+ * Origin (it's not in the "except" list of ALL_VIEWER_EXCEPT_HOST_HEADER),
+ * and originAllowed has already validated it against ALLOWED_ORIGINS.
+ */
+function desktopSiteHost(event: { headers?: Record<string, string | undefined> }): string {
+  const raw = event.headers?.origin ?? event.headers?.Origin ?? '';
+  try {
+    return new URL(raw).host.toLowerCase();
+  } catch {
+    return RAFFLE_FALLBACK_SITE;
+  }
+}
+
+interface RateLimitResult {
+  ok: boolean;
+  tripped?: string;
+  siteHash?: string;
+}
+
+async function checkRaffleRateLimits(
+  phonePub: string,
+  desktopPub: string,
+  ua: string,
+  ip: string,
+  siteHost: string
+): Promise<RateLimitResult> {
+  const siteHash = md5hex(siteHost);
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
+  const buckets = [
+    md5hex(phonePub + siteHash),
+    md5hex(desktopPub + siteHash),
+    md5hex(ua + ip + siteHash),
+  ];
+  for (const k of buckets) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
+          UpdateExpression: 'ADD ct :one SET expiresAt = if_not_exists(expiresAt, :ttl)',
+          ConditionExpression: 'attribute_not_exists(ct) OR ct < :max',
+          ExpressionAttributeValues: {
+            ':one': 1,
+            ':max': RAFFLE_BUCKET_MAX,
+            ':ttl': ttl,
+          },
+        })
+      );
+    } catch (err: unknown) {
+      const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+      if (isConflict) return { ok: false, tripped: k.slice(0, 8), siteHash };
+      throw err;
+    }
+  }
+  return { ok: true, siteHash };
 }
 
 type Verdict = 'pending' | 'paired' | 'failed';
@@ -830,7 +940,13 @@ const lambdaHandler = async (event: {
 
   const routeKey = event.routeKey;
   const sessionId = event.pathParameters?.id?.toLowerCase();
-  if (routeKey !== 'POST /api/session/start' && !SESSION_ID_RE.test(sessionId ?? '')) {
+  // Routes that don't carry an {id} path parameter — skip the UUID check.
+  const idLessRoutes = new Set([
+    'POST /api/session/start',
+    'POST /api/raffle/entry',
+    'GET /api/raffle/leaderboard',
+  ]);
+  if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
   }
   const body = parseBody(event.body);
@@ -1233,6 +1349,141 @@ const lambdaHandler = async (event: {
         reason: s.verdictReason ?? null,
         annotations: (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
       });
+    }
+
+    case 'POST /api/raffle/entry': {
+      const sid = typeof body.sessionId === 'string' ? body.sessionId.toLowerCase() : undefined;
+      const handle = normalizeHandle(body.handle);
+      if (!sid || !SESSION_ID_RE.test(sid)) {
+        return jsonResp(400, { error: 'invalid_session_id' });
+      }
+      if (!handle) {
+        return jsonResp(400, {
+          error: 'invalid_handle',
+          allowed: '3-64 chars, [a-z0-9._@-]',
+        });
+      }
+      const s = await loadSession(sid);
+      // 410 (Gone) rather than 404 — CloudFront's errorResponses[404]
+      // rewrites any 404 from /api/* to /index.html, which trashes the
+      // JSON body the client expects. The pre-existing 404s on
+      // desktop-attest / phone-attest have the same latent bug but are
+      // never hit in practice (those flows always use a fresh sessionId
+      // from /start). Raffle entry is the first endpoint where a stale
+      // sessionId can realistically appear.
+      if (!s) return jsonResp(410, { error: 'session_not_found' });
+      if (s.verdict !== 'paired') {
+        return jsonResp(409, { error: 'session_not_paired', verdict: s.verdict });
+      }
+      const sRaffle = s as unknown as { raffleHash?: string };
+      if (sRaffle.raffleHash) {
+        return jsonResp(409, {
+          error: 'session_already_entered',
+          code: hashToCode(sRaffle.raffleHash),
+        });
+      }
+      const phonePub = s.phoneAttestation?.publicKey ?? '';
+      const desktopPub = s.desktopAttestation?.publicKey ?? '';
+      if (!phonePub || !desktopPub) {
+        return jsonResp(409, { error: 'session_missing_attestations' });
+      }
+      const ip = getViewerIp(event);
+      const ua = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
+      const siteHost = desktopSiteHost(event);
+
+      // Rate-limit BEFORE consuming the session: a 429 should leave the
+      // session usable so the user can re-submit after the hour rolls.
+      // Buckets are scoped to the desktop's site host, so one phone gets
+      // independent 5/hr quotas on each site it pairs from.
+      const rl = await checkRaffleRateLimits(phonePub, desktopPub, ua, String(ip), siteHost);
+      if (!rl.ok) {
+        return jsonResp(429, {
+          error: 'rate_limited',
+          bucket: rl.tripped,
+          site: siteHost,
+        });
+      }
+
+      // Hash the handle before any persistence. We never store the
+      // submitted email anywhere — DDB only sees the hash + counter.
+      const { hash, code } = handleHash(handle);
+
+      // Atomically claim the session for this hash. Concurrent submits
+      // for the same sessionId: loser gets 409 here.
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { PK: `SESSION#${sid}`, SK: 'META' },
+            UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
+            ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(raffleHash)',
+            ExpressionAttributeValues: {
+              ':h': hash,
+              ':t': Math.floor(Date.now() / 1000),
+            },
+          })
+        );
+      } catch (err: unknown) {
+        const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+        if (isConflict) {
+          return jsonResp(409, { error: 'session_already_entered' });
+        }
+        throw err;
+      }
+
+      const updated = await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
+          UpdateExpression: 'ADD ct :one SET lastEntryAt = :t',
+          ExpressionAttributeValues: {
+            ':one': 1,
+            ':t': Math.floor(Date.now() / 1000),
+          },
+          ReturnValues: 'ALL_NEW',
+        })
+      );
+      const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
+      return jsonResp(200, { ok: true, code, count });
+    }
+
+    case 'GET /api/raffle/leaderboard': {
+      // Scan HANDLE# rows. Only rows where the key looks like a full 32-char
+      // md5 hex are returned — guards against any legacy plaintext-handle
+      // rows that might still be in the table.
+      const out: { code: string; count: number; lastEntryAt: number }[] = [];
+      let cursor: Record<string, unknown> | undefined;
+      do {
+        const page = await ddb.send(
+          new ScanCommand({
+            TableName: TABLE,
+            FilterExpression: 'begins_with(PK, :p) AND SK = :sk',
+            ExpressionAttributeValues: { ':p': 'HANDLE#', ':sk': 'CT' },
+            ProjectionExpression: 'PK, ct, lastEntryAt',
+            ExclusiveStartKey: cursor,
+          })
+        );
+        for (const it of page.Items ?? []) {
+          const row = it as { PK?: string; ct?: number; lastEntryAt?: number };
+          const hash = String(row.PK ?? '').replace(/^HANDLE#/, '');
+          if (!/^[0-9a-f]{32}$/.test(hash)) continue;
+          out.push({
+            code: hashToCode(hash),
+            count: Number(row.ct ?? 0),
+            lastEntryAt: Number(row.lastEntryAt ?? 0),
+          });
+        }
+        cursor = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+      } while (cursor);
+      out.sort((a, b) => b.count - a.count || b.lastEntryAt - a.lastEntryAt);
+      return {
+        statusCode: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=10',
+        },
+        body: JSON.stringify({ leaderboard: out.slice(0, RAFFLE_LEADERBOARD_TOP) }),
+      };
     }
 
     default:

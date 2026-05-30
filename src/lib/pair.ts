@@ -401,9 +401,7 @@ export async function submitPhoneAttestation(
   const argus = getArgus();
 
   // ── Silent redeem path ─────────────────────────────────────────
-  const { loadTrustToken, saveTrustToken, clearTrustToken } = await import(
-    './device-trust'
-  );
+  const { loadTrustToken, saveTrustToken, clearTrustToken } = await import('./device-trust');
   const trustToken = await loadTrustToken();
   if (trustToken) {
     events.onStatus?.('welcome back — verifying');
@@ -425,17 +423,14 @@ export async function submitPhoneAttestation(
       });
       if (run.attestation) {
         try {
-          const r = await jsonFetch<AttestResponse>(
-            `${API}/session/${sessionId}/phone-attest`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                argusSessionId: run.argusSessionId,
-                attestation: run.attestation,
-                deviceTrustToken: trustToken,
-              }),
-            }
-          );
+          const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
+            method: 'POST',
+            body: JSON.stringify({
+              argusSessionId: run.argusSessionId,
+              attestation: run.attestation,
+              deviceTrustToken: trustToken,
+            }),
+          });
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
           return r;
         } catch (postErr) {
@@ -443,10 +438,7 @@ export async function submitPhoneAttestation(
             // 409 already_attested: this device already paired in this
             // session (likely a retried request whose first response was
             // lost). Treat as success — fetch the existing verdict.
-            if (
-              postErr.status === 409 &&
-              postErr.bodyJson?.error === 'already_attested'
-            ) {
+            if (postErr.status === 409 && postErr.bodyJson?.error === 'already_attested') {
               const fallback = await jsonFetch<AttestResponse>(
                 `${API}/session/${sessionId}/result`,
                 { method: 'GET' }
@@ -527,17 +519,51 @@ export async function submitPhoneAttestation(
     // the error up. Without this, transient network retries or double-fire
     // touch events on mobile make the phone show "Something went wrong"
     // even though the desktop sees the pairing succeed.
-    if (
-      e instanceof HttpError &&
-      e.status === 409 &&
-      e.bodyJson?.error === 'already_attested'
-    ) {
-      const fallback = await jsonFetch<AttestResponse>(
-        `${API}/session/${sessionId}/result`,
-        { method: 'GET' }
-      );
+    if (e instanceof HttpError && e.status === 409 && e.bodyJson?.error === 'already_attested') {
+      const fallback = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/result`, {
+        method: 'GET',
+      });
       return fallback;
     }
     throw e;
   }
 }
+
+// ── Raffle / leaderboard ─────────────────────────────────────────────────
+
+export interface RaffleEntryResult {
+  ok: true;
+  /** Short public identifier (`xxxx-xxxx`) derived from the email hash. */
+  code: string;
+  count: number;
+}
+
+export interface LeaderboardRow {
+  /** Short public identifier (`xxxx-xxxx`). The plaintext email is never returned. */
+  code: string;
+  count: number;
+  lastEntryAt: number;
+}
+
+/**
+ * Claim a leaderboard entry against a paired sessionId. Server runs three
+ * rate-limit buckets (phone pubkey, desktop pubkey, UA+IP) — any of them
+ * tripping returns 429. A paired session is single-use; the second submit
+ * for the same sessionId returns 409.
+ */
+export async function submitRaffleEntry(
+  sessionId: string,
+  handle: string
+): Promise<RaffleEntryResult> {
+  return jsonFetch<RaffleEntryResult>(`${API}/raffle/entry`, {
+    method: 'POST',
+    body: JSON.stringify({ sessionId, handle: handle.trim().toLowerCase() }),
+  });
+}
+
+export async function fetchLeaderboard(): Promise<LeaderboardRow[]> {
+  const r = await jsonFetch<{ leaderboard: LeaderboardRow[] }>(`${API}/raffle/leaderboard`);
+  return r.leaderboard;
+}
+
+export { HttpError };

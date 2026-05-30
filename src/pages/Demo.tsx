@@ -1,12 +1,59 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode-svg';
-import { startDesktopSession, type DesktopAttestedSummary } from '../lib/pair';
+import {
+  startDesktopSession,
+  submitRaffleEntry,
+  fetchLeaderboard,
+  HttpError,
+  type DesktopAttestedSummary,
+  type LeaderboardRow,
+} from '../lib/pair';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
 import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
 import { IconCheck, IconX, IconPhone, IconQR, IconShield } from '../components/Icons';
 
 type Phase = 'idle' | 'scanning' | 'waiting' | 'paired' | 'failed' | 'error';
+
+// Contest target: first handle to this many entries wins.
+const CONTEST_TARGET = 1000;
+
+function ContestPill() {
+  return (
+    <span className="pill">
+      <span className="contest-dot" aria-hidden /> Contest live
+    </span>
+  );
+}
+
+function ScoreboardRow({
+  rank,
+  row,
+  highlight,
+}: {
+  rank: number;
+  row: LeaderboardRow;
+  highlight: boolean;
+}) {
+  const isLeader = rank === 1;
+  return (
+    <li
+      className={`flex items-center justify-between rounded-md px-3 py-2 font-mono text-sm ${
+        highlight
+          ? 'bg-accent/25 font-semibold text-white ring-1 ring-accent/50'
+          : isLeader
+            ? 'bg-white/[0.04] font-semibold text-white'
+            : 'text-white/80'
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-3">
+        <span className="w-7 shrink-0 text-right tabular-nums text-muted/70">{rank}</span>
+        <span className="truncate">{row.code}</span>
+      </span>
+      <span className="tabular-nums text-muted">{row.count}</span>
+    </li>
+  );
+}
 
 function QrPanel({ svg }: { svg: string | null }) {
   return (
@@ -25,6 +72,8 @@ function QrPanel({ svg }: { svg: string | null }) {
   );
 }
 
+type RaffleStatus = 'idle' | 'submitting' | 'entered' | 'error';
+
 export function Demo() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
@@ -34,8 +83,36 @@ export function Demo() {
   const [annotations, setAnnotations] = useState<Record<string, unknown> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [desktopAttested, setDesktopAttested] = useState<DesktopAttestedSummary | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [handleInput, setHandleInput] = useState('');
+  const [raffleStatus, setRaffleStatus] = useState<RaffleStatus>('idle');
+  const [raffleError, setRaffleError] = useState<string | null>(null);
+  const [raffleEntry, setRaffleEntry] = useState<{ code: string; count: number } | null>(null);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
+
+  async function refreshLeaderboard() {
+    try {
+      setLeaderboard(await fetchLeaderboard());
+    } catch {
+      /* keep stale data on transient errors */
+    }
+  }
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await fetchLeaderboard();
+        if (!cancelled) setLeaderboard(rows);
+      } catch {
+        /* keep stale */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const qrSvg = useMemo(() => {
     if (!pairUrl) return null;
@@ -71,6 +148,7 @@ export function Demo() {
         onDesktopAttested: setDesktopAttested,
       });
       stopRef.current = session.stop;
+      setSessionId(session.sessionId);
       setPairUrl(session.pairUrl);
       setPhase('waiting');
       const r = await session.result;
@@ -94,8 +172,53 @@ export function Demo() {
     setAnnotations(null);
     setErrorMsg(null);
     setDesktopAttested(null);
+    setSessionId(null);
+    setRaffleStatus('idle');
+    setRaffleError(null);
+    setRaffleEntry(null);
+    setHandleInput('');
     startedRef.current = true;
     void startDemo();
+  }
+
+  async function submitHandle(e: FormEvent) {
+    e.preventDefault();
+    if (!sessionId || raffleStatus === 'submitting') return;
+    setRaffleStatus('submitting');
+    setRaffleError(null);
+    try {
+      const r = await submitRaffleEntry(sessionId, handleInput);
+      setRaffleEntry({ code: r.code, count: r.count });
+      setRaffleStatus('entered');
+      void refreshLeaderboard();
+    } catch (e) {
+      setRaffleStatus('error');
+      if (e instanceof HttpError) {
+        const err = (e.bodyJson?.error as string | undefined) ?? `http_${e.status}`;
+        const bucket = e.bodyJson?.bucket as string | undefined;
+        if (err === 'rate_limited') {
+          const site = e.bodyJson?.site as string | undefined;
+          setRaffleError(
+            `Rate-limited on ${site ?? 'this site'} (${bucket ?? 'bucket'} hit cap). Try again next hour.`
+          );
+        } else if (err === 'session_already_entered') {
+          const code = e.bodyJson?.code as string | undefined;
+          setRaffleError(
+            code ? `This session already counted for ${code}.` : 'Session already used.'
+          );
+        } else if (err === 'invalid_handle') {
+          setRaffleError('Handle must be 3-64 chars: letters, digits, . _ @ -');
+        } else if (err === 'session_not_paired') {
+          setRaffleError('Pair the phone first.');
+        } else if (err === 'session_not_found') {
+          setRaffleError('Session expired. Hit "Run again" and re-pair.');
+        } else {
+          setRaffleError(err);
+        }
+      } else {
+        setRaffleError(e instanceof Error ? e.message : String(e));
+      }
+    }
   }
 
   useEffect(() => {
@@ -106,11 +229,14 @@ export function Demo() {
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-6xl flex-col gap-10 px-6 py-10 sm:py-16">
-      <header className="flex items-center justify-between">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <Wordmark />
-        <span className="pill">
-          <IconShield className="h-3 w-3" /> dual-device check
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <ContestPill />
+          <span className="pill">
+            <IconShield className="h-3 w-3" /> dual-device check
+          </span>
+        </div>
       </header>
 
       {/* Hero — text left, QR right (or result panel right after pairing) */}
@@ -120,7 +246,8 @@ export function Demo() {
             <IconShield className="h-3 w-3" /> Real-time integrity
           </span>
           <h1 className="mt-5 text-3xl font-semibold leading-[1.1] tracking-tight sm:text-4xl lg:text-5xl">
-            QR Captcha Demo
+            QR Captcha <span className="hero-strike text-muted/60">Demo</span>{' '}
+            <span className="text-accent-bright">Challenge</span>
           </h1>
           <p className="mt-5 text-base leading-relaxed text-white/85">
             Nothing to install. Nothing to sign into. Nothing to worry about.
@@ -128,11 +255,17 @@ export function Demo() {
           <p className="mt-3 max-w-xl text-base leading-relaxed text-muted">
             Two devices, an integrity check, good to go.
           </p>
+          <p className="contest-throb mt-3 max-w-xl text-base font-semibold leading-relaxed text-white/95 sm:font-normal">
+            <em className="text-accent-bright">How to Win!</em> Complete the CAPTCHA (qr thing) and
+            enter <em>an</em> email (doesn&apos;t have to be your private email). First one to 1,000
+            wins!
+          </p>
 
           {/* Mobile-only inline QR — sits right under the intro line. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
             <div className="mt-6 lg:hidden">
-              <div className="neon-callout mx-auto mb-4 max-w-[18rem] sm:max-w-[22rem]">
+              <QrPanel svg={qrSvg} />
+              <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
                 <div className="neon-track">
                   <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
                   <span className="neon-text-red">See · the · demo</span>
@@ -144,7 +277,6 @@ export function Demo() {
                   <span className="neon-text-red">Try · it · live</span>
                 </div>
               </div>
-              <QrPanel svg={qrSvg} />
             </div>
           )}
 
@@ -223,6 +355,86 @@ export function Demo() {
               </button>
             </div>
           </div>
+
+          <div className="contest-panel card card-accent relative overflow-hidden p-7 sm:p-8">
+            <div className="relative">
+              <div className="flex items-center justify-between">
+                <span className="label flex items-center gap-2">
+                  <span className="contest-dot" aria-hidden /> Contest · live
+                </span>
+                <span className="label">first to {CONTEST_TARGET.toLocaleString()}</span>
+              </div>
+              <h2 className="mt-3 text-2xl font-semibold leading-tight tracking-tight sm:text-3xl">
+                Claim your spot.
+              </h2>
+              <p className="mt-2 max-w-lg text-sm leading-relaxed text-muted">
+                One entry per paired session. Three per hour per device. First handle to{' '}
+                {CONTEST_TARGET.toLocaleString()} entries wins.
+              </p>
+
+              {raffleStatus !== 'entered' ? (
+                <form onSubmit={submitHandle} className="mt-6 flex flex-col gap-3 sm:flex-row">
+                  <input
+                    type="text"
+                    inputMode="email"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder="handle or email"
+                    value={handleInput}
+                    onChange={(e) => setHandleInput(e.target.value)}
+                    className="contest-input w-full flex-1 rounded-xl border-2 border-accent/50 bg-black/55 px-4 py-4 font-mono text-base text-white placeholder:text-muted/80 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/60"
+                    minLength={3}
+                    maxLength={64}
+                    required
+                  />
+                  <button
+                    type="submit"
+                    className="btn btn-primary px-6 py-4 text-base"
+                    disabled={raffleStatus === 'submitting' || handleInput.trim().length < 3}
+                  >
+                    {raffleStatus === 'submitting' ? 'Sending…' : 'Enter →'}
+                  </button>
+                </form>
+              ) : (
+                <div className="mt-6 rounded-xl border border-accent/40 bg-accent/15 px-5 py-4">
+                  <div className="label text-accent-bright">you&apos;re in · code</div>
+                  <div className="mt-1 font-mono text-lg font-semibold text-white">
+                    {raffleEntry?.code} <span className="text-muted">·</span> {raffleEntry?.count}{' '}
+                    {raffleEntry?.count === 1 ? 'entry' : 'entries'}
+                  </div>
+                  <div className="mt-1 text-xs text-muted">
+                    Find this code on the scoreboard below.
+                  </div>
+                </div>
+              )}
+              {raffleError && (
+                <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {raffleError}
+                </div>
+              )}
+
+              {leaderboard.length > 0 && (
+                <div className="mt-7 border-t border-edge/60 pt-5">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h3 className="label">Scoreboard</h3>
+                    <span className="label text-muted/70">top 25</span>
+                  </div>
+                  <ol className="space-y-1">
+                    {leaderboard.map((r, i) => (
+                      <ScoreboardRow
+                        key={r.code}
+                        rank={i + 1}
+                        row={r}
+                        highlight={raffleEntry?.code === r.code}
+                      />
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </div>
+          </div>
+
           {annotations && (
             <>
               <DeviceComparisonCard annotations={annotations} />
