@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { awaitDesktopReady, submitPhoneAttestation, type PhoneSessionInfo } from '../lib/pair';
+import {
+  awaitDesktopReady,
+  hasPasskeyHint,
+  submitPhoneAttestation,
+  type PhoneSessionInfo,
+} from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
 import { Wordmark } from '../components/Brand';
@@ -102,16 +107,19 @@ export function Pair() {
     return () => window.clearTimeout(timer);
   }, [phase]);
 
-  async function pair() {
+  async function pair(passkeyMode: 'passkey-create' | 'passkey-auth' = 'passkey-create') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     inflightRef.current = true;
     setPhase(hasTrust ? 'returning' : 'pairing');
     setStatus('starting');
     setErrorMsg(null);
     try {
-      const r = await submitPhoneAttestation(sessionId, infoRef.current, {
-        onStatus: setStatus,
-      });
+      const r = await submitPhoneAttestation(
+        sessionId,
+        infoRef.current,
+        { onStatus: setStatus },
+        { mode: passkeyMode }
+      );
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
@@ -215,9 +223,41 @@ export function Pair() {
                 : 'Tap once today. Every visit after is silent — promise.'}
             </p>
           </div>
-          <button onClick={pair} className="btn btn-primary w-full py-4 text-base">
-            {hasTrust ? 'Confirm' : 'PASSKEY'}
-          </button>
+          {hasTrust ? (
+            <button onClick={() => pair()} className="btn btn-primary w-full py-4 text-base">
+              Confirm
+            </button>
+          ) : hasPasskeyHint() ? (
+            <>
+              <button
+                onClick={() => pair('passkey-auth')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                USE PASSKEY
+              </button>
+              <button
+                onClick={() => pair('passkey-create')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                CREATE PASSKEY
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => pair('passkey-create')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                CREATE PASSKEY
+              </button>
+              <button
+                onClick={() => pair('passkey-auth')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                USE PASSKEY
+              </button>
+            </>
+          )}
           {PROVIDERS_CONFIGURED.google && !hasTrust && (
             <button onClick={pairWithGoogle} className="btn btn-primary w-full py-4 text-base">
               Continue with Google
