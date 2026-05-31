@@ -1,0 +1,330 @@
+/**
+ * WebSocket handler for ms-argus-pair.
+ *
+ * Stateless routing via signed/sealed envelopes — no DDB. Pattern lifted
+ * (with hardening) from JWally/safety-socket-server.
+ *
+ * **Bootstrap.** Clients receive an HMAC-signed `wsToken` from POST
+ * /session/start (HTTP API). The token attests:
+ *     {sessionId, role, iat, exp}
+ * It rides as a query string to the WebSocket: `?token=…`.
+ *
+ * **$connect.** We don't enforce the token at $connect (API GW only lets
+ * us inspect query string here, but the auth path is cleaner inside
+ * `whoami`). Just accept.
+ *
+ * **whoami.** Client sends `{action:"whoami", token, publicKey}`. We
+ * verify the HMAC token, then AES-256-GCM seal a connection-identity
+ * envelope:
+ *     {connectionId, sessionId, role, ip, origin, iat}
+ * and return the base64 ciphertext as `envelope`. Client stores it.
+ *
+ * **message.** Client sends `{action:"message", me, peer, data}`. We
+ * decrypt both envelopes (AES-GCM auth tag prevents forgery), check:
+ *   - origin matches
+ *   - sessionId matches (same pair session)
+ *   - both envelopes are within MAX_AGE_SEC of issuance (replay window)
+ * Then PostToConnection to the peer's connectionId with `{data}`.
+ *
+ * Keys derived from a single 64-byte secret via HKDF-SHA256:
+ *   - "ws-bootstrap-hmac-v1" → bootstrap HMAC key
+ *   - "ws-envelope-aes-v1"   → envelope AES-256-GCM key
+ */
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  hkdfSync,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import {
+  ApiGatewayManagementApiClient,
+  PostToConnectionCommand,
+  GoneException,
+} from '@aws-sdk/client-apigatewaymanagementapi';
+
+// ── Constants ──────────────────────────────────────────────────────────
+
+const TOKEN_TTL_SECONDS = 5 * 60; // bootstrap token TTL
+const ENVELOPE_MAX_AGE_SEC = 60 * 60; // 1 hour — peer messages allowed within
+const ALLOWED_ROLES = new Set(['desktop', 'phone']);
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+
+// ── Secret material (cold-start cached) ────────────────────────────────
+
+const sm = new SecretsManagerClient({});
+let cachedRoot: Buffer | null = null;
+let cachedHmacKey: Buffer | null = null;
+let cachedAesKey: Buffer | null = null;
+
+async function loadSecretMaterial(): Promise<{
+  hmacKey: Buffer;
+  aesKey: Buffer;
+}> {
+  if (cachedHmacKey && cachedAesKey) {
+    return { hmacKey: cachedHmacKey, aesKey: cachedAesKey };
+  }
+  const arn = process.env.WS_ENVELOPE_SECRET_ARN;
+  if (!arn) throw new Error('WS_ENVELOPE_SECRET_ARN not configured');
+  const r = await sm.send(new GetSecretValueCommand({ SecretId: arn }));
+  if (!r.SecretString) throw new Error('WS envelope secret empty');
+  cachedRoot = Buffer.from(r.SecretString, 'utf-8');
+  // HKDF-SHA256 — distinct info strings = independent keys from one root.
+  cachedHmacKey = Buffer.from(
+    hkdfSync(
+      'sha256',
+      cachedRoot,
+      Buffer.alloc(0),
+      Buffer.from('ws-bootstrap-hmac-v1', 'utf-8'),
+      32
+    )
+  );
+  cachedAesKey = Buffer.from(
+    hkdfSync('sha256', cachedRoot, Buffer.alloc(0), Buffer.from('ws-envelope-aes-v1', 'utf-8'), 32)
+  );
+  return { hmacKey: cachedHmacKey, aesKey: cachedAesKey };
+}
+
+// ── Bootstrap token (HMAC-signed JSON, base64url) ──────────────────────
+
+interface BootstrapClaims {
+  v: 1;
+  sessionId: string;
+  role: 'desktop' | 'phone';
+  iat: number;
+  exp: number;
+}
+
+function b64urlBytes(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(s: string): Buffer {
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
+}
+
+export async function mintBootstrapToken(
+  sessionId: string,
+  role: 'desktop' | 'phone'
+): Promise<string> {
+  const { hmacKey } = await loadSecretMaterial();
+  const iat = Math.floor(Date.now() / 1000);
+  const claims: BootstrapClaims = {
+    v: 1,
+    sessionId,
+    role,
+    iat,
+    exp: iat + TOKEN_TTL_SECONDS,
+  };
+  const body = b64urlBytes(Buffer.from(JSON.stringify(claims), 'utf-8'));
+  const mac = createHmac('sha256', hmacKey).update(body).digest('base64url');
+  return `${body}.${mac}`;
+}
+
+async function verifyBootstrapToken(token: string): Promise<BootstrapClaims | null> {
+  if (typeof token !== 'string' || !token.includes('.')) return null;
+  const [body, mac] = token.split('.', 2);
+  if (!body || !mac) return null;
+  const { hmacKey } = await loadSecretMaterial();
+  const expected = createHmac('sha256', hmacKey).update(body).digest('base64url');
+  const a = Buffer.from(mac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  let claims: BootstrapClaims;
+  try {
+    claims = JSON.parse(b64urlDecode(body).toString('utf-8')) as BootstrapClaims;
+  } catch {
+    return null;
+  }
+  if (claims.v !== 1) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (now > claims.exp) return null;
+  if (!ALLOWED_ROLES.has(claims.role)) return null;
+  return claims;
+}
+
+// ── Connection-identity envelope (AES-256-GCM sealed) ──────────────────
+
+interface Envelope {
+  v: 1;
+  connectionId: string;
+  sessionId: string;
+  role: 'desktop' | 'phone';
+  ip: string;
+  origin: string;
+  iat: number;
+  publicKey?: string;
+}
+
+async function sealEnvelope(env: Envelope): Promise<string> {
+  const { aesKey } = await loadSecretMaterial();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
+  const pt = Buffer.from(JSON.stringify(env), 'utf-8');
+  const ct = Buffer.concat([cipher.update(pt), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // wire layout: b64url( iv || ciphertext || tag )
+  return b64urlBytes(Buffer.concat([iv, ct, tag]));
+}
+
+async function openEnvelope(blob: string): Promise<Envelope | null> {
+  try {
+    const buf = b64urlDecode(blob);
+    if (buf.length < 12 + 16) return null;
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(buf.length - 16);
+    const ct = buf.subarray(12, buf.length - 16);
+    const { aesKey } = await loadSecretMaterial();
+    const decipher = createDecipheriv('aes-256-gcm', aesKey, iv);
+    decipher.setAuthTag(tag);
+    const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
+    const env = JSON.parse(pt.toString('utf-8')) as Envelope;
+    if (env.v !== 1) return null;
+    return env;
+  } catch {
+    return null;
+  }
+}
+
+// ── Lambda handler ─────────────────────────────────────────────────────
+
+interface WsEvent {
+  requestContext: {
+    routeKey: string;
+    connectionId: string;
+    domainName: string;
+    stage: string;
+    identity?: { sourceIp?: string };
+  };
+  queryStringParameters?: Record<string, string | undefined>;
+  headers?: Record<string, string | undefined>;
+  body?: string;
+}
+
+interface WsResp {
+  statusCode: number;
+  body?: string;
+}
+
+function ok(): WsResp {
+  return { statusCode: 200 };
+}
+
+function bad(body: string): WsResp {
+  return { statusCode: 400, body };
+}
+
+function originOk(origin: string | undefined): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.includes(origin);
+}
+
+async function sendToConnection(
+  event: WsEvent,
+  connectionId: string,
+  data: unknown
+): Promise<void> {
+  const endpoint = `https://${event.requestContext.domainName}/${event.requestContext.stage}`;
+  const client = new ApiGatewayManagementApiClient({ endpoint });
+  try {
+    await client.send(
+      new PostToConnectionCommand({
+        ConnectionId: connectionId,
+        Data: JSON.stringify(data),
+      })
+    );
+  } catch (e) {
+    if (e instanceof GoneException) {
+      // peer disconnected — silent drop; sender's reply UX handles
+      return;
+    }
+    throw e;
+  }
+}
+
+async function handleWhoami(
+  event: WsEvent,
+  body: { token?: unknown; publicKey?: unknown; origin?: unknown }
+): Promise<WsResp> {
+  if (typeof body.token !== 'string') return bad('missing_token');
+  const claims = await verifyBootstrapToken(body.token);
+  if (!claims) return bad('invalid_token');
+  const origin = typeof body.origin === 'string' ? body.origin : '';
+  if (!originOk(origin)) return bad('origin_not_allowed');
+  const ip = event.requestContext.identity?.sourceIp ?? '';
+  const env: Envelope = {
+    v: 1,
+    connectionId: event.requestContext.connectionId,
+    sessionId: claims.sessionId,
+    role: claims.role,
+    ip,
+    origin,
+    iat: Math.floor(Date.now() / 1000),
+    publicKey: typeof body.publicKey === 'string' ? body.publicKey : undefined,
+  };
+  const envelope = await sealEnvelope(env);
+  await sendToConnection(event, event.requestContext.connectionId, {
+    action: 'whoami',
+    envelope,
+    sessionId: claims.sessionId,
+    role: claims.role,
+  });
+  return ok();
+}
+
+async function handleMessage(
+  event: WsEvent,
+  body: { me?: unknown; peer?: unknown; data?: unknown }
+): Promise<WsResp> {
+  if (typeof body.me !== 'string' || typeof body.peer !== 'string') return bad('missing_envelopes');
+  const me = await openEnvelope(body.me);
+  const peer = await openEnvelope(body.peer);
+  if (!me || !peer) return bad('invalid_envelope');
+  // Server-of-record identity check: the connection sending this message
+  // MUST own the `me` envelope. Stops a third party with leaked envelopes
+  // from impersonating a peer.
+  if (me.connectionId !== event.requestContext.connectionId) {
+    return bad('envelope_connection_mismatch');
+  }
+  // Pair session must match — peers from different sessions can't talk.
+  if (me.sessionId !== peer.sessionId) return bad('cross_session');
+  // Same site only.
+  if (me.origin !== peer.origin) return bad('cross_origin');
+  // Roles must be distinct (desktop talks to phone, not desktop to desktop).
+  if (me.role === peer.role) return bad('same_role');
+  // Replay window.
+  const now = Math.floor(Date.now() / 1000);
+  if (now - me.iat > ENVELOPE_MAX_AGE_SEC || now - peer.iat > ENVELOPE_MAX_AGE_SEC) {
+    return bad('envelope_expired');
+  }
+  await sendToConnection(event, peer.connectionId, {
+    action: 'message',
+    from: me.role,
+    sessionId: me.sessionId,
+    data: body.data ?? null,
+  });
+  return ok();
+}
+
+export const handler = async (event: WsEvent): Promise<WsResp> => {
+  const route = event.requestContext.routeKey;
+  if (route === '$connect') return ok();
+  if (route === '$disconnect') return ok();
+  let body: { action?: string } & Record<string, unknown> = {};
+  try {
+    if (event.body) body = JSON.parse(event.body) as typeof body;
+  } catch {
+    return bad('invalid_json');
+  }
+  switch (body.action) {
+    case 'whoami':
+      return handleWhoami(event, body as Record<string, unknown>);
+    case 'message':
+      return handleMessage(event, body as Record<string, unknown>);
+    default:
+      return bad('unknown_action');
+  }
+};

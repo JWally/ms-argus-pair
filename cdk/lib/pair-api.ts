@@ -69,6 +69,7 @@ import {
   type OAuthProvider,
   type OAuthVerifyResult,
 } from './oauth-providers';
+import { mintBootstrapToken } from './ws-handler';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -1373,7 +1374,23 @@ const lambdaHandler = async (event: {
           ConditionExpression: 'attribute_not_exists(PK)',
         })
       );
-      return jsonResp(200, { sessionId: id, nonce, expiresAt });
+      // Bootstrap WebSocket tokens — one per role. Client opens WSS,
+      // sends whoami with the matching token, server returns an AES-
+      // sealed connection-identity envelope. See cdk/lib/ws-handler.ts.
+      const [desktopWsToken, phoneWsToken] = await Promise.all([
+        mintBootstrapToken(id, 'desktop'),
+        mintBootstrapToken(id, 'phone'),
+      ]);
+      return jsonResp(200, {
+        sessionId: id,
+        nonce,
+        expiresAt,
+        ws: {
+          url: process.env.WS_API_URL ?? null,
+          desktopToken: desktopWsToken,
+          phoneToken: phoneWsToken,
+        },
+      });
     }
 
     case 'GET /api/session/{id}/info': {

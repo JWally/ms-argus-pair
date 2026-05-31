@@ -89,6 +89,31 @@ export class PairStack extends cdk.Stack {
       oauthFacebookAppId,
       oauthFacebookAppSecretArn,
     } = props;
+
+    // Pair fundamentally can't run without the merchant API — every
+    // /phone-attest call fetches the desktop + phone projections to
+    // compute the verdict. If any of the three context flags is missing
+    // the Lambda comes up with an empty MERCHANT_API_URL and every pair
+    // attempt fails with `projection_lookup_failed`.
+    //
+    // The CDK deploy script in package.json sources `.env` and forwards
+    // these via -c flags. Forgetting `source .env` before running
+    // `npx cdk deploy` directly was the failure mode we just hit. Throw
+    // at synth time so it can't happen silently again.
+    const missingMerchant: string[] = [];
+    if (!merchantApiUrl) missingMerchant.push('merchantApiUrl');
+    if (!merchantApiCredential) missingMerchant.push('merchantApiCredential');
+    if (!merchantCpi) missingMerchant.push('merchantCpi');
+    if (missingMerchant.length > 0) {
+      throw new Error(
+        `PairStack is missing required merchant context: ${missingMerchant.join(', ')}. ` +
+          'Pair calls the merchant API on every /phone-attest; without it, every ' +
+          'pair fails with projection_lookup_failed. Source .env and pass via ' +
+          '`-c merchantApiUrl=... -c merchantApiCredential=... -c merchantCpi=...` ' +
+          '(or just use `npm run deploy`, which handles this).'
+      );
+    }
+
     const domainName = `${subdomain}.${rootDomain}`;
 
     const zone = HostedZone.fromLookup(this, 'HostedZone', { domainName: rootDomain });
@@ -245,6 +270,75 @@ export class PairStack extends cdk.Stack {
       };
     }
 
+    // ── WebSocket envelope secret ─────────────────────────────────────
+    // Single 64-byte secret used as HKDF source for two derived keys:
+    //   - HMAC key: signs the short-lived bootstrap token returned by
+    //     POST /session/start so the WS $whoami call can prove the
+    //     client is allowed to talk
+    //   - AES-256-GCM key: seals the connection-identity envelope
+    //     ({connectionId, sessionId, role, ip, origin, iat}) so the
+    //     client holds an opaque, tamper-proof routing handle without
+    //     a server-side lookup table
+    // Same pattern as DeviceTrustSecret — survives Lambda redeploys.
+    const wsEnvelopeSecret = new secretsmanager.Secret(this, 'WsEnvelopeSecret', {
+      description: 'HKDF source for ms-argus-pair WebSocket bootstrap HMAC + envelope AES keys',
+      generateSecretString: { passwordLength: 64, excludePunctuation: true },
+    });
+
+    // ── WebSocket handler Lambda ───────────────────────────────────────
+    // Handles $connect / $disconnect / message routes. Stateless —
+    // routes peer messages by decrypting the envelopes the clients
+    // present, no DDB lookup. See cdk/lib/ws-handler.ts.
+    const wsHandlerFn = new lambda.NodejsFunction(this, 'PairWsHandlerFn', {
+      entry: path.join(__dirname, 'ws-handler.ts'),
+      handler: 'handler',
+      runtime: lambdaRuntime.Runtime.NODEJS_22_X,
+      architecture: lambdaRuntime.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        ALLOWED_ORIGINS: allOrigins.join(','),
+        WS_ENVELOPE_SECRET_ARN: wsEnvelopeSecret.secretArn,
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+    });
+    wsEnvelopeSecret.grantRead(wsHandlerFn);
+    // The pair HTTP Lambda mints bootstrap tokens at /session/start →
+    // shares the same secret.
+    wsEnvelopeSecret.grantRead(pairFn);
+    pairFn.addEnvironment('WS_ENVELOPE_SECRET_ARN', wsEnvelopeSecret.secretArn);
+
+    // ── WebSocket API ──────────────────────────────────────────────────
+    const wsApi = new apigatewayv2.WebSocketApi(this, 'PairWsApi', {
+      apiName: `${cdk.Stack.of(this).stackName}-ws`,
+      routeSelectionExpression: '$request.body.action',
+      connectRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('ConnectInt', wsHandlerFn),
+      },
+      disconnectRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('DisconnectInt', wsHandlerFn),
+      },
+      defaultRouteOptions: {
+        integration: new integrations.WebSocketLambdaIntegration('DefaultInt', wsHandlerFn),
+      },
+    });
+    new apigatewayv2.WebSocketStage(this, 'PairWsStage', {
+      webSocketApi: wsApi,
+      stageName: 'prod',
+      autoDeploy: true,
+    });
+    // Grant the handler permission to PostToConnection on this API —
+    // needed for sending messages back to clients (and routing
+    // peer-to-peer messages once that wiring lands).
+    wsApi.grantManageConnections(wsHandlerFn);
+    // Surface the deployed API id + endpoint for the handler to construct
+    // the management-API URL at runtime.
+    wsHandlerFn.addEnvironment('WS_API_ID', wsApi.apiId);
+    // The pair HTTP Lambda needs the public WS URL so /session/start can
+    // return it in the response body for the client to dial.
+    pairFn.addEnvironment('WS_API_URL', `${wsApi.apiEndpoint}/prod`);
+
     // ── Lambda warmer ──────────────────────────────────────────────────
     // Fires a synthetic event every 5 minutes so the Lambda's container
     // stays warm during idle periods. The `source` matches what
@@ -370,5 +464,6 @@ export class PairStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'SiteURL', { value: `https://${domainName}` });
     new cdk.CfnOutput(this, 'ApiUrl', { value: api.apiEndpoint });
+    new cdk.CfnOutput(this, 'WsApiUrl', { value: `${wsApi.apiEndpoint}/prod` });
   }
 }
