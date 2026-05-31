@@ -51,7 +51,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
-  ScanCommand,
+  QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
@@ -1915,10 +1915,18 @@ const lambdaHandler = async (event: {
         new UpdateCommand({
           TableName: TABLE,
           Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
-          UpdateExpression: 'ADD ct :one SET lastEntryAt = :t',
+          // `lbPk` and `code` aren't used by the increment itself — they
+          // exist so LeaderboardIndex (GSI) can serve the top-N Query
+          // without a Scan. `lbPk` is a constant partition key all
+          // leaderboard rows share; `code` is the user-facing 6-char
+          // handle code projected into the index so the read doesn't
+          // have to recompute it from PK on every page view.
+          UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, lbPk = :lb, code = :code',
           ExpressionAttributeValues: {
             ':one': 1,
             ':t': Math.floor(Date.now() / 1000),
+            ':lb': 'LB',
+            ':code': code,
           },
           ReturnValues: 'ALL_NEW',
         })
@@ -2002,41 +2010,39 @@ const lambdaHandler = async (event: {
     }
 
     case 'GET /api/raffle/leaderboard': {
-      // Scan HANDLE# rows. Only rows where the key looks like a full 32-char
-      // md5 hex are returned — guards against any legacy plaintext-handle
-      // rows that might still be in the table.
-      const out: { code: string; count: number; lastEntryAt: number }[] = [];
-      let cursor: Record<string, unknown> | undefined;
-      do {
-        const page = await ddb.send(
-          new ScanCommand({
-            TableName: TABLE,
-            FilterExpression: 'begins_with(PK, :p) AND SK = :sk',
-            ExpressionAttributeValues: { ':p': 'HANDLE#', ':sk': 'CT' },
-            ProjectionExpression: 'PK, ct, lastEntryAt',
-            ExclusiveStartKey: cursor,
-          })
-        );
-        for (const it of page.Items ?? []) {
-          const row = it as { PK?: string; ct?: number; lastEntryAt?: number };
-          const hash = String(row.PK ?? '').replace(/^HANDLE#/, '');
-          if (!/^[0-9a-f]{32}$/.test(hash)) continue;
-          out.push({
-            code: hashToCode(hash),
+      // Single Query on LeaderboardIndex (GSI): partition lbPk="LB",
+      // sort by ct DESC, take Limit=25. Server-side sorted, no Scan,
+      // no client-side merge. Cost is O(top-N) regardless of total
+      // entries on the table. The GSI projection includes `code` and
+      // `lastEntryAt` so we have everything the response needs without
+      // a follow-up GetItem per row.
+      const r = await ddb.send(
+        new QueryCommand({
+          TableName: TABLE,
+          IndexName: 'LeaderboardIndex',
+          KeyConditionExpression: 'lbPk = :lb',
+          ExpressionAttributeValues: { ':lb': 'LB' },
+          ScanIndexForward: false,
+          Limit: RAFFLE_LEADERBOARD_TOP,
+        })
+      );
+      const out: { code: string; count: number; lastEntryAt: number }[] = (r.Items ?? []).map(
+        (it) => {
+          const row = it as { code?: string; ct?: number; lastEntryAt?: number };
+          return {
+            code: String(row.code ?? ''),
             count: Number(row.ct ?? 0),
             lastEntryAt: Number(row.lastEntryAt ?? 0),
-          });
+          };
         }
-        cursor = page.LastEvaluatedKey as Record<string, unknown> | undefined;
-      } while (cursor);
-      out.sort((a, b) => b.count - a.count || b.lastEntryAt - a.lastEntryAt);
+      );
       return {
         statusCode: 200,
         headers: {
           'Content-Type': 'application/json',
           'Cache-Control': 'public, max-age=10',
         },
-        body: JSON.stringify({ leaderboard: out.slice(0, RAFFLE_LEADERBOARD_TOP) }),
+        body: JSON.stringify({ leaderboard: out }),
       };
     }
 

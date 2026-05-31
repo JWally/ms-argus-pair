@@ -149,6 +149,19 @@ export class PairStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
+    // GSI: top-N leaderboard query. Every HANDLE# row sets `lbPk="LB"`
+    // and we sort by `ct` DESC, Limit=25. Replaces the full-table Scan
+    // that /api/raffle/leaderboard used to run. Single-PK hot-partition
+    // is fine for dev-jw; at prod scale the writes would need shard
+    // fan-out (`LB#${hour}` or `LB#${0-9}`).
+    table.addGlobalSecondaryIndex({
+      indexName: 'LeaderboardIndex',
+      partitionKey: { name: 'lbPk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'ct', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['code', 'lastEntryAt'],
+    });
+
     // ── Pair API Lambda ────────────────────────────────────────────────
     const pairFn = new lambda.NodejsFunction(this, 'PairApiFn', {
       entry: path.join(__dirname, 'pair-api.ts'),
