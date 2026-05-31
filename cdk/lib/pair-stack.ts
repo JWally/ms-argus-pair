@@ -338,6 +338,15 @@ export class PairStack extends cdk.Stack {
     // The pair HTTP Lambda needs the public WS URL so /session/start can
     // return it in the response body for the client to dial.
     pairFn.addEnvironment('WS_API_URL', `${wsApi.apiEndpoint}/prod`);
+    // /phone-attest server-pushes the verdict to the desktop's WS
+    // connection (replaces the desktop's /result polling). To do that
+    // the HTTP Lambda needs PostToConnection rights on this WS API.
+    // The management endpoint is the https:// form (apiEndpoint is wss://).
+    wsApi.grantManageConnections(pairFn);
+    pairFn.addEnvironment(
+      'WS_MGMT_ENDPOINT',
+      `https://${wsApi.apiId}.execute-api.${cdk.Stack.of(this).region}.amazonaws.com/prod`
+    );
 
     // ── Lambda warmer ──────────────────────────────────────────────────
     // Fires a synthetic event every 5 minutes so the Lambda's container

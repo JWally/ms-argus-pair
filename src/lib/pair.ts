@@ -33,6 +33,8 @@
  * nonce so the proofs stay tied to this specific session.
  */
 
+import { connectAndWhoami, type WsConnection } from './ws';
+
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
 const ATTEST_TTL_SECONDS = 120;
@@ -167,44 +169,115 @@ export interface DesktopSession {
   }>;
 }
 
-const RESULT_POLL_MS = 1000;
+interface SessionStartResp {
+  sessionId: string;
+  nonce: string;
+  expiresAt: number;
+  ws: {
+    url: string;
+    desktopToken: string;
+    phoneToken: string;
+  };
+}
+
+interface VerdictShape {
+  verdict: string;
+  reason: string | null;
+  annotations?: Record<string, unknown>;
+}
 
 export async function startDesktopSession(events: PairEvents = {}): Promise<DesktopSession> {
   events.onStatus?.('starting session');
-  const session = await jsonFetch<{
-    sessionId: string;
-    nonce: string;
-    expiresAt: number;
-  }>(`${API}/session/start`, { method: 'POST' });
+  const session = await jsonFetch<SessionStartResp>(`${API}/session/start`, { method: 'POST' });
+  if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
+    throw new Error('session/start did not return WebSocket bootstrap material');
+  }
 
-  // QR always points to the canonical argus host (env-pinned at build
-  // time via VITE_PAIR_URL_BASE). This keeps the phone's WebAuthn rpId
-  // stable across alias domains — a credential created at the argus
-  // host can be redeemed regardless of which alias the desktop loaded
-  // from. Falls back to window.location.origin for local dev.
+  // Stand up the WebSocket BEFORE rendering the QR — the QR has to carry
+  // the desktop's sealed connection envelope for the phone to address
+  // peer messages back. Adds ~100–200ms to QR-render latency. Worth it.
+  const desktopConn = await connectAndWhoami({
+    url: session.ws.url,
+    token: session.ws.desktopToken,
+    origin: window.location.origin,
+  });
+
+  // QR points at the canonical argus host (env-pinned at build time via
+  // VITE_PAIR_URL_BASE). Phone-side WebAuthn rpId stays stable across
+  // alias domains. Falls back to window.location.origin for local dev.
   const pairOrigin =
     (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
   // Forward the desktop's `?debug=true` query param through the QR so
-  // the phone-side flow can disable its silent-reauth auto-pass and
-  // always land on the buttons screen. Debug mode is UI-only; it does
-  // not relax any server-side verification.
+  // the phone-side flow can disable its silent-reauth auto-pass. Debug
+  // mode is UI-only; does not relax server-side verification.
   const debugMode = new URLSearchParams(window.location.search).get('debug') === 'true';
   const debugParam = debugMode ? '?debug=true' : '';
-  const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}`;
-  // Dev affordance: log the pair URL so you can copy-paste it into
-  // another browser / private window without scanning a QR. Gated on
-  // ?debug=true so it doesn't surface in production console for
-  // regular users. Cheap; sessionId TTLs out in 5 minutes regardless.
+  // The hash fragment carries the WS routing material end-to-end. Hash
+  // fragments are NOT sent to the server in HTTP requests — they stay
+  // client-side. Phone parses them on page load.
+  const pairHash = new URLSearchParams({
+    wsUrl: session.ws.url,
+    e: desktopConn.envelope,
+    pt: session.ws.phoneToken,
+  });
+  const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}#${pairHash.toString()}`;
   if (debugMode) {
     console.log('[argus-pair] pair URL:', pairUrl);
   }
   events.onStatus?.('waiting for phone');
 
-  // Scan + desktop-attest run in the BACKGROUND so the QR can render
-  // immediately. The phone polls /info until desktopReady, so a phone
-  // that arrives before the desktop scan finishes just waits.
+  // Routing state. The peer envelope only arrives when the phone sends
+  // its first peer message (phone-here); buffer desktopReady until both
+  // sides are present.
   let cancelled = false;
   let scanError: Error | null = null;
+  let phoneEnvelope: string | null = null;
+  let bufferedReady: Record<string, unknown> | null = null;
+
+  const sendReadyIfBothUp = () => {
+    if (phoneEnvelope && bufferedReady) {
+      desktopConn.sendPeer(phoneEnvelope, bufferedReady);
+      bufferedReady = null;
+    }
+  };
+
+  // Result promise — resolved by the server-pushed verdict arriving over
+  // the WS. /phone-attest decrypts the desktopEnvelope it received from
+  // the phone and PostToConnection's the verdict to this socket.
+  let resolveResult!: (v: VerdictShape) => void;
+  let rejectResult!: (e: unknown) => void;
+  const result = new Promise<VerdictShape>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  desktopConn.onMessage((msg) => {
+    if (cancelled) return;
+    const data = msg.data as { kind?: string } | null;
+    if (!data || typeof data.kind !== 'string') return;
+    if (data.kind === 'phone-here') {
+      phoneEnvelope = msg.fromEnvelope;
+      sendReadyIfBothUp();
+    } else if (data.kind === 'verdict') {
+      resolveResult({
+        verdict: (data as { verdict: string }).verdict,
+        reason: (data as { reason: string | null }).reason ?? null,
+        annotations: (data as { annotations?: Record<string, unknown> }).annotations,
+      });
+    }
+  });
+
+  // Bound the wait. Session TTL is 5 minutes — once the server-side row
+  // is gone /phone-attest will 404 anyway and no verdict push will land,
+  // so reject locally rather than spin forever.
+  const expiryMs = Math.max(0, session.expiresAt * 1000 - Date.now());
+  window.setTimeout(() => {
+    if (cancelled) return;
+    rejectResult(new Error('session expired'));
+  }, expiryMs);
+
+  // Background: scan + desktop-attest. When done, queue the desktop-
+  // ready peer message (or send immediately if the phone is already up).
   (async () => {
     try {
       const argus = getArgus();
@@ -240,60 +313,20 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
         clean: !!attResp.clean,
         summary: attResp.summary ?? null,
       });
+      bufferedReady = {
+        kind: 'desktop-ready',
+        nonce: session.nonce,
+        expiresAt: session.expiresAt,
+        desktopArgusSessionId: run.argusSessionId,
+        desktopKeyId: run.attestation.keyId,
+      };
+      sendReadyIfBothUp();
     } catch (e) {
       scanError = e as Error;
       events.onError?.(e);
+      rejectResult(e);
     }
   })();
-
-  const result = new Promise<{
-    verdict: string;
-    reason: string | null;
-    annotations?: Record<string, unknown>;
-  }>((resolve, reject) => {
-    const tick = async () => {
-      if (cancelled) return;
-      if (scanError) {
-        reject(scanError);
-        return;
-      }
-      try {
-        // 204 = still pending; 200+JSON = real verdict.
-        const url = `${API}/session/${session.sessionId}/result?_=${Date.now()}`;
-        const res = await fetch(url, {
-          cache: 'no-store',
-          headers: { Accept: 'application/json' },
-        });
-        if (res.status === 204) {
-          if (Date.now() / 1000 > session.expiresAt) {
-            reject(new Error('session expired'));
-            return;
-          }
-          window.setTimeout(tick, RESULT_POLL_MS);
-          return;
-        }
-        if (!res.ok) {
-          throw new Error(`poll → ${res.status}`);
-        }
-        const ct = res.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) {
-          const snip = (await res.text()).slice(0, 80);
-          throw new Error(`poll → non-JSON: ${snip}`);
-        }
-        resolve(
-          (await res.json()) as {
-            verdict: string;
-            reason: string | null;
-            annotations?: Record<string, unknown>;
-          }
-        );
-      } catch (e) {
-        events.onError?.(e);
-        reject(e);
-      }
-    };
-    tick();
-  });
 
   return {
     sessionId: session.sessionId,
@@ -301,6 +334,11 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     expiresAt: session.expiresAt,
     stop: () => {
       cancelled = true;
+      desktopConn.close();
+      if (scanError) {
+        // Surface the still-buffered error if nothing else has resolved.
+        rejectResult(scanError);
+      }
     },
     result,
   };
@@ -313,43 +351,93 @@ export interface PhoneSessionInfo {
   expiresAt: number;
   desktopArgusSessionId: string;
   desktopKeyId: string;
+  /**
+   * Sealed envelope addressing the desktop's WebSocket connection.
+   * The phone forwards it to /phone-attest so the server can PostToConnection
+   * the verdict straight back to the desktop instead of having the desktop
+   * poll /result.
+   */
+  desktopEnvelope: string;
+  /** Live WS connection the phone opened to receive `desktop-ready`. */
+  conn: WsConnection;
+}
+
+interface PairHashParams {
+  wsUrl: string;
+  desktopEnvelope: string;
+  phoneToken: string;
+}
+
+function parsePairHash(): PairHashParams {
+  const raw = window.location.hash.replace(/^#/, '');
+  const params = new URLSearchParams(raw);
+  const wsUrl = params.get('wsUrl');
+  const e = params.get('e');
+  const pt = params.get('pt');
+  if (!wsUrl || !e || !pt) {
+    throw new Error('pair URL is missing WebSocket routing material in the fragment — open via QR');
+  }
+  return { wsUrl, desktopEnvelope: e, phoneToken: pt };
 }
 
 /**
- * Poll /info until desktopReady (with timeout). Called on mount so by the
- * time the user taps "Proof of Life" the data is already in hand and we
- * can start WebAuthn + the Argus scan immediately in parallel.
+ * WebSocket handshake replacing the old /info polling loop. Phone arrives
+ * via QR, parses the hash fragment for {wsUrl, desktopEnvelope, phoneToken},
+ * opens its own WS connection, announces itself to the desktop with a
+ * `phone-here` peer message, and blocks until the desktop relays back
+ * `desktop-ready` (which carries the same fields /info used to return).
+ *
+ * The desktop's envelope arrives in `fromEnvelope` on EVERY peer message
+ * the desktop sends — but we capture it once up front from the QR so the
+ * phone can address /phone-attest's server-side push before the first
+ * peer message round-trips.
  */
 export async function awaitDesktopReady(
-  sessionId: string,
+  _sessionId: string,
   signal?: AbortSignal
 ): Promise<PhoneSessionInfo> {
-  const POLL_MS = 500;
-  const HARD_TIMEOUT_MS = 60_000;
-  const startedAt = Date.now();
-  while (true) {
-    if (signal?.aborted) throw new Error('aborted');
-    const info = await jsonFetch<{
-      nonce?: string;
-      expiresAt?: number;
-      desktopReady?: boolean;
-      desktopArgusSessionId?: string;
-      desktopKeyId?: string;
-      expired?: boolean;
-    }>(`${API}/session/${sessionId}/info`);
-    if (info.expired) throw new Error('session expired');
-    if (info.desktopReady && info.desktopArgusSessionId && info.desktopKeyId && info.nonce) {
-      return {
-        nonce: info.nonce,
-        expiresAt: info.expiresAt ?? 0,
-        desktopArgusSessionId: info.desktopArgusSessionId,
-        desktopKeyId: info.desktopKeyId,
-      };
-    }
-    if (Date.now() - startedAt > HARD_TIMEOUT_MS) {
-      throw new Error("desktop didn't finish scanning in time");
-    }
-    await new Promise((r) => setTimeout(r, POLL_MS));
+  if (signal?.aborted) throw new Error('aborted');
+  const { wsUrl, desktopEnvelope, phoneToken } = parsePairHash();
+
+  const conn = await connectAndWhoami({
+    url: wsUrl,
+    token: phoneToken,
+    origin: window.location.origin,
+  });
+
+  if (signal?.aborted) {
+    conn.close();
+    throw new Error('aborted');
+  }
+  const onAbort = () => conn.close();
+  signal?.addEventListener('abort', onAbort);
+
+  try {
+    // Tell the desktop we're here. Server auto-includes our envelope on
+    // the relayed message so the desktop can address us back.
+    conn.sendPeer(desktopEnvelope, { kind: 'phone-here' });
+
+    const msg = await conn.waitForMessage((m) => {
+      const d = m.data as { kind?: string } | null;
+      return d?.kind === 'desktop-ready';
+    }, 60_000);
+
+    const data = msg.data as {
+      nonce: string;
+      expiresAt: number;
+      desktopArgusSessionId: string;
+      desktopKeyId: string;
+    };
+    return {
+      nonce: data.nonce,
+      expiresAt: data.expiresAt,
+      desktopArgusSessionId: data.desktopArgusSessionId,
+      desktopKeyId: data.desktopKeyId,
+      desktopEnvelope,
+      conn,
+    };
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -577,6 +665,7 @@ export async function submitPhoneAttestation(
               argusSessionId: run.argusSessionId,
               attestation: run.attestation,
               deviceTrustToken: trustToken,
+              desktopEnvelope: info.desktopEnvelope,
             }),
           });
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
@@ -670,6 +759,7 @@ export async function submitPhoneAttestation(
         argusSessionId: run.argusSessionId,
         attestation: run.attestation,
         webauthn,
+        desktopEnvelope: info.desktopEnvelope,
         ...(useOAuth && options.oauthResult ? { oauth: options.oauthResult } : {}),
       }),
     });

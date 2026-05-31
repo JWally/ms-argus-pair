@@ -82,7 +82,13 @@ export function Pair() {
         }
       }
     })();
-    return () => ctl.abort();
+    return () => {
+      ctl.abort();
+      // Close the WS opened during awaitDesktopReady. After phone-attest
+      // returns the server already pushed the verdict to the desktop;
+      // the phone has no further use for the socket.
+      infoRef.current?.conn.close();
+    };
     // pair / pairWithGoogle are closure-stable; we want this effect to
     // run once per sessionId mount, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps

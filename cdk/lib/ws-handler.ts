@@ -148,7 +148,7 @@ async function verifyBootstrapToken(token: string): Promise<BootstrapClaims | nu
 
 // ── Connection-identity envelope (AES-256-GCM sealed) ──────────────────
 
-interface Envelope {
+export interface Envelope {
   v: 1;
   connectionId: string;
   sessionId: string;
@@ -157,6 +157,34 @@ interface Envelope {
   origin: string;
   iat: number;
   publicKey?: string;
+}
+
+/**
+ * Server-side helper: PostToConnection a JSON payload to a peer that we
+ * have an opened envelope for. Used by /phone-attest to push the verdict
+ * straight to the desktop's WS connection (avoids /result polling).
+ *
+ * `endpoint` is the management-API HTTPS URL (NOT the wss:// form);
+ * callers pass `process.env.WS_MGMT_ENDPOINT`.
+ */
+export async function postToPeer(
+  endpoint: string,
+  connectionId: string,
+  data: unknown
+): Promise<{ ok: true } | { ok: false; reason: 'gone' | string }> {
+  const client = new ApiGatewayManagementApiClient({ endpoint });
+  try {
+    await client.send(
+      new PostToConnectionCommand({
+        ConnectionId: connectionId,
+        Data: JSON.stringify(data),
+      })
+    );
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof GoneException) return { ok: false, reason: 'gone' };
+    return { ok: false, reason: (e as Error).message };
+  }
 }
 
 async function sealEnvelope(env: Envelope): Promise<string> {
@@ -170,7 +198,7 @@ async function sealEnvelope(env: Envelope): Promise<string> {
   return b64urlBytes(Buffer.concat([iv, ct, tag]));
 }
 
-async function openEnvelope(blob: string): Promise<Envelope | null> {
+export async function openEnvelope(blob: string): Promise<Envelope | null> {
   try {
     const buf = b64urlDecode(blob);
     if (buf.length < 12 + 16) return null;
@@ -303,6 +331,11 @@ async function handleMessage(
   await sendToConnection(event, peer.connectionId, {
     action: 'message',
     from: me.role,
+    // Include the sender's envelope so the recipient can reply without
+    // a separate handshake. The recipient doesn't get to forge this —
+    // we hand them the same sealed blob the sender presented to us,
+    // which decrypts only if AES auth-tag verifies.
+    fromEnvelope: body.me,
     sessionId: me.sessionId,
     data: body.data ?? null,
   });
