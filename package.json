@@ -19,6 +19,7 @@
     "deploy": "source .env 2>/dev/null; PAIR_HOST=$(node cdk/bin/print-pair-host.mjs) && VITE_PAIR_URL_BASE=\"https://${PAIR_HOST}\" npm run build && npx cdk deploy --all -c merchantApiUrl=\"${MERCHANT_API_URL:-}\" -c merchantApiCredential=\"${MERCHANT_API_CREDENTIAL:-}\" -c merchantCpi=\"${MERCHANT_CPI:-}\" -c oauthGoogleClientId=\"${OAUTH_GOOGLE_CLIENT_ID:-}\" -c oauthGithubClientId=\"${OAUTH_GITHUB_CLIENT_ID:-}\" -c oauthGithubClientSecretArn=\"${OAUTH_GITHUB_CLIENT_SECRET_ARN:-}\" -c oauthFacebookAppId=\"${OAUTH_FACEBOOK_APP_ID:-}\" -c oauthFacebookAppSecretArn=\"${OAUTH_FACEBOOK_APP_SECRET_ARN:-}\" --require-approval never"
   },
   "dependencies": {
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
     "@aws-sdk/client-dynamodb": "^3.658.0",
     "@aws-sdk/client-secrets-manager": "^3.1053.0",
     "@aws-sdk/lib-dynamodb": "^3.658.0",
@@ -37,6 +38,7 @@
     "@types/aws-lambda": "^8.10.161",
     "@types/react": "^19.2.9",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.53.1",
     "@typescript-eslint/parser": "^8.53.1",
     "@vitejs/plugin-react": "^4.7.0",
@@ -54,6 +56,7 @@
     "tailwindcss": "^3.4.19",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "ws": "^8.21.0"
   }
 }

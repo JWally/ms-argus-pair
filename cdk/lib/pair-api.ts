@@ -69,6 +69,7 @@ import {
   type OAuthProvider,
   type OAuthVerifyResult,
 } from './oauth-providers';
+import { mintBootstrapToken, openEnvelope, postToPeer } from './ws-handler';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -1373,7 +1374,23 @@ const lambdaHandler = async (event: {
           ConditionExpression: 'attribute_not_exists(PK)',
         })
       );
-      return jsonResp(200, { sessionId: id, nonce, expiresAt });
+      // Bootstrap WebSocket tokens — one per role. Client opens WSS,
+      // sends whoami with the matching token, server returns an AES-
+      // sealed connection-identity envelope. See cdk/lib/ws-handler.ts.
+      const [desktopWsToken, phoneWsToken] = await Promise.all([
+        mintBootstrapToken(id, 'desktop'),
+        mintBootstrapToken(id, 'phone'),
+      ]);
+      return jsonResp(200, {
+        sessionId: id,
+        nonce,
+        expiresAt,
+        ws: {
+          url: process.env.WS_API_URL ?? null,
+          desktopToken: desktopWsToken,
+          phoneToken: phoneWsToken,
+        },
+      });
     }
 
     case 'GET /api/session/{id}/info': {
@@ -1741,6 +1758,39 @@ const lambdaHandler = async (event: {
           });
         }
         return jsonResp(409, { error: 'write_conflict' });
+      }
+      // WS push: when the phone arrived via the QR'd hash fragment it
+      // also carries the desktop's sealed connection envelope. Decrypt,
+      // validate it's bound to THIS session + the desktop role, then
+      // PostToConnection the verdict straight into the desktop's open
+      // socket. Replaces the desktop's /result polling on the happy
+      // path; fire-and-forget — push failure does not fail the response.
+      const desktopEnvelopeRaw = body.desktopEnvelope;
+      if (typeof desktopEnvelopeRaw === 'string' && desktopEnvelopeRaw.length > 0) {
+        const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
+        if (!mgmtEndpoint) {
+          console.warn('[pair] WS_MGMT_ENDPOINT not configured; skipping verdict push');
+        } else {
+          const env = await openEnvelope(desktopEnvelopeRaw);
+          if (!env) {
+            console.warn('[pair] desktopEnvelope failed to open; skipping verdict push');
+          } else if (env.sessionId !== sessionId) {
+            console.warn('[pair] desktopEnvelope sessionId mismatch; skipping verdict push');
+          } else if (env.role !== 'desktop') {
+            console.warn('[pair] desktopEnvelope role != desktop; skipping verdict push');
+          } else {
+            const push = await postToPeer(mgmtEndpoint, env.connectionId, {
+              kind: 'verdict',
+              sessionId,
+              verdict,
+              reason,
+              annotations,
+            });
+            if (!push.ok) {
+              console.warn(`[pair] verdict push failed: ${push.reason}`);
+            }
+          }
+        }
       }
       return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
     }
