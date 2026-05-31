@@ -188,13 +188,16 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   // the phone-side flow can disable its silent-reauth auto-pass and
   // always land on the buttons screen. Debug mode is UI-only; it does
   // not relax any server-side verification.
-  const debugParam =
-    new URLSearchParams(window.location.search).get('debug') === 'true' ? '?debug=true' : '';
+  const debugMode = new URLSearchParams(window.location.search).get('debug') === 'true';
+  const debugParam = debugMode ? '?debug=true' : '';
   const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}`;
   // Dev affordance: log the pair URL so you can copy-paste it into
-  // another browser / private window without scanning a QR. Cheap; no
-  // PII (sessionId TTLs out in 5 minutes regardless).
-  console.log('[argus-pair] pair URL:', pairUrl);
+  // another browser / private window without scanning a QR. Gated on
+  // ?debug=true so it doesn't surface in production console for
+  // regular users. Cheap; sessionId TTLs out in 5 minutes regardless.
+  if (debugMode) {
+    console.log('[argus-pair] pair URL:', pairUrl);
+  }
   events.onStatus?.('waiting for phone');
 
   // Scan + desktop-attest run in the BACKGROUND so the QR can render
