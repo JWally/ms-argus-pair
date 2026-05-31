@@ -15,4 +15,8 @@ pre-push:
   parallel: true
   commands:
     build:
-      run: npm run build
+      # PAIR_ALLOW_ORIGIN_FALLBACK acknowledges this is a lint-build,
+      # not a real deploy. The actual deploy script (`npm run deploy`)
+      # sets VITE_PAIR_URL_BASE explicitly so the guard fires only when
+      # someone runs cdk deploy directly without sourcing env.
+      run: PAIR_ALLOW_ORIGIN_FALLBACK=1 npm run build
