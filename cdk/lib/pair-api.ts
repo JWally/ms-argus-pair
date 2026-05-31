@@ -276,31 +276,102 @@ interface RatePeekResult {
  * /api/raffle/status so the desktop UI can hide the raffle form when
  * the user has already hit their hourly cap.
  */
-async function peekRaffleRateLimits(
-  phonePub: string,
-  desktopPub: string,
-  ua: string,
-  ip: string,
-  siteHost: string
-): Promise<RatePeekResult> {
-  const siteHash = md5hex(siteHost);
+/**
+ * Inputs for the raffle rate-limit gate. Five orthogonal axes, any one
+ * tripping → 429.
+ *
+ *   - phonePub:     Argus pubkey from the phone scan (defeated by phone
+ *                   incognito, since IDB regenerates the persistent key)
+ *   - desktopPub:   same on the desktop side
+ *   - desktopUa+desktopIp: stable per desktop browser instance on a
+ *                   network; switches when attacker rotates browsers
+ *   - phoneUa+phoneIp: stable per physical phone regardless of incognito
+ *                   (UA never changes mid-session, IP rarely does);
+ *                   captured from the phone's Argus projection at
+ *                   phone-attest time and persisted on the session row
+ *   - authIdentity: passkey credentialId OR oauth subject. Stable across
+ *                   incognito (iCloud Keychain / OAuth providers don't
+ *                   reset per-browser-mode). Skipped when neither path
+ *                   produced an identity (e.g. silent reauth on a fresh
+ *                   browser).
+ */
+interface RateLimitInputs {
+  phonePub: string;
+  desktopPub: string;
+  desktopUa: string;
+  desktopIp: string;
+  phoneUa: string;
+  phoneIp: string;
+  authIdentity: string | null;
+  siteHost: string;
+}
+
+/**
+ * Resolve the auth-identity string from a session's annotations. Preferred
+ * source order:
+ *   1. OAuth subject (Google sub / GitHub id / Facebook user_id) — stable
+ *      per provider account forever
+ *   2. WebAuthn credentialId — stable per passkey (iCloud Keychain /
+ *      Google Password Manager keep this across incognito)
+ *   3. Phone Argus pubkey from the device-trust silent-reauth path —
+ *      stable for any user whose HMAC token survived (implies they're
+ *      NOT in incognito, so this is a useful fallback)
+ * Returns null when none of the above are available — caller skips the
+ * identity bucket and relies on the other four axes.
+ */
+function resolveRaffleAuthIdentity(
+  annotations: Record<string, unknown>,
+  session: { phoneAttestation?: { publicKey?: string } }
+): string | null {
+  const sub = annotations.phone_oauth_subject;
+  if (typeof sub === 'string' && sub.length > 0) return `oauth:${sub}`;
+  const credId = annotations.phone_webauthn_credential_id;
+  if (typeof credId === 'string' && credId.length > 0) return `passkey:${credId}`;
+  const trustRedeemed = annotations.phone_device_trust_redeemed === true;
+  const pub = session.phoneAttestation?.publicKey;
+  if (trustRedeemed && typeof pub === 'string' && pub.length > 0) {
+    return `argus-pub:${pub}`;
+  }
+  return null;
+}
+
+/** Build the per-axis bucket keys. Identity bucket omitted when caller
+ *  has no identity to bind to. */
+function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; buckets: string[] } {
+  const siteHash = md5hex(inputs.siteHost);
+  const buckets = [
+    md5hex(inputs.phonePub + siteHash),
+    md5hex(inputs.desktopPub + siteHash),
+    md5hex(inputs.desktopUa + inputs.desktopIp + siteHash),
+    md5hex(inputs.phoneUa + inputs.phoneIp + siteHash),
+  ];
+  if (inputs.authIdentity) {
+    buckets.push(md5hex(inputs.authIdentity + siteHash));
+  }
+  return { siteHash, buckets };
+}
+
+async function peekRaffleRateLimits(inputs: RateLimitInputs): Promise<RatePeekResult> {
+  const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const resetAt = (hour + 1) * 3600;
-  const buckets = [
-    md5hex(phonePub + siteHash),
-    md5hex(desktopPub + siteHash),
-    md5hex(ua + ip + siteHash),
-  ];
+  // Parallel GetItem on every bucket — saves ~40ms vs sequential when
+  // there are 5 buckets. Each is a tiny ConsistentRead=false get,
+  // perfectly safe to fire in parallel.
+  const reads = await Promise.all(
+    buckets.map((k) =>
+      ddb.send(
+        new GetCommand({
+          TableName: TABLE,
+          Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
+          ConsistentRead: false,
+          ProjectionExpression: 'ct',
+        })
+      )
+    )
+  );
   let used = 0;
-  for (const k of buckets) {
-    const r = await ddb.send(
-      new GetCommand({
-        TableName: TABLE,
-        Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
-        ConsistentRead: false,
-        ProjectionExpression: 'ct',
-      })
-    );
+  for (const r of reads) {
     const ct = Number((r.Item as { ct?: number } | undefined)?.ct ?? 0);
     if (ct > used) used = ct;
   }
@@ -313,24 +384,19 @@ async function peekRaffleRateLimits(
   };
 }
 
-async function checkRaffleRateLimits(
-  phonePub: string,
-  desktopPub: string,
-  ua: string,
-  ip: string,
-  siteHost: string
-): Promise<RateLimitResult> {
-  const siteHash = md5hex(siteHost);
+async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimitResult> {
+  const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
-  const buckets = [
-    md5hex(phonePub + siteHash),
-    md5hex(desktopPub + siteHash),
-    md5hex(ua + ip + siteHash),
-  ];
-  for (const k of buckets) {
-    try {
-      await ddb.send(
+  // Parallel UpdateItems with allSettled — every bucket's atomic
+  // ConditionalCheck runs independently. Mixed outcomes are possible
+  // (some succeed, some trip): if any trip we 429 the caller. The
+  // small downside is the buckets that succeeded got incremented even
+  // on a 429, which is the same accept-an-off-by-one behavior the old
+  // sequential code had — just amplified to all 5 axes at once.
+  const results = await Promise.allSettled(
+    buckets.map((k) =>
+      ddb.send(
         new UpdateCommand({
           TableName: TABLE,
           Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
@@ -342,11 +408,16 @@ async function checkRaffleRateLimits(
             ':ttl': ttl,
           },
         })
-      );
-    } catch (err: unknown) {
-      const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-      if (isConflict) return { ok: false, tripped: k.slice(0, 8), siteHash };
-      throw err;
+      )
+    )
+  );
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'rejected') {
+      const isConflict =
+        (r.reason as { name?: string } | undefined)?.name === 'ConditionalCheckFailedException';
+      if (isConflict) return { ok: false, tripped: buckets[i].slice(0, 8), siteHash };
+      throw r.reason;
     }
   }
   return { ok: true, siteHash };
@@ -569,6 +640,7 @@ interface ClassifiedScan {
   browserVersion: string | null;
   os: string | null;
   ip: string | null;
+  ua: string | null;
   asnName: string | null;
   city: string | null;
   country: string | null;
@@ -709,6 +781,7 @@ function classifyScan(p: MerchantProjection | null, side: string): ClassifiedSca
     browserVersion,
     os: osLabel,
     ip,
+    ua: ua || null,
     asnName,
     city,
     country,
@@ -752,6 +825,7 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
     desktop_browser_version: desktop.browserVersion,
     desktop_os: desktop.os,
     desktop_ip: desktop.ip,
+    desktop_ua: desktop.ua,
     desktop_asn_name: desktop.asnName,
     desktop_city: desktop.city,
     desktop_country: desktop.country,
@@ -762,6 +836,11 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
     phone_browser_version: phone.browserVersion,
     phone_os: phone.os,
     phone_ip: phone.ip,
+    // Phone UA + IP feed the per-phone rate-limit bucket on raffle entry.
+    // Without them, an incognito phone regenerates its Argus pubkey each
+    // session and the pubkey bucket is useless. UA + IP are stable per
+    // physical phone (UA never changes mid-session, IP rarely does).
+    phone_ua: phone.ua,
     phone_asn_name: phone.asnName,
     phone_city: phone.city,
     phone_country: phone.country,
@@ -916,6 +995,11 @@ interface WebAuthnAnnotations {
   phone_webauthn_attested: boolean;
   phone_webauthn_aaguid?: string;
   phone_webauthn_format?: string;
+  /** Stable per-user identifier for the auth-identity rate-limit bucket.
+   *  Passkey path → credentialId; populated by both registration and
+   *  authentication so the same user gets the same bucket whether they
+   *  just created or just used their passkey. */
+  phone_webauthn_credential_id?: string;
   phone_webauthn_credential_backed_up?: boolean;
   phone_webauthn_user_verified?: boolean;
   phone_webauthn_error?: string;
@@ -1057,6 +1141,7 @@ async function verifyPasskeyAuthentication(
     return {
       phone_webauthn_attested: true,
       phone_webauthn_format: 'passkey_authentication',
+      phone_webauthn_credential_id: stored.credentialId,
       phone_webauthn_user_verified: verification.authenticationInfo.userVerified,
       phone_webauthn_credential_backed_up: verification.authenticationInfo.credentialBackedUp,
     };
@@ -1154,6 +1239,7 @@ async function verifyWebAuthn(
       phone_webauthn_attested: true,
       phone_webauthn_aaguid: info.aaguid,
       phone_webauthn_format: info.fmt,
+      phone_webauthn_credential_id: info.credential?.id,
       phone_webauthn_credential_backed_up: info.credentialBackedUp,
       phone_webauthn_user_verified: info.userVerified,
     };
@@ -1716,15 +1802,30 @@ const lambdaHandler = async (event: {
       if (!phonePub || !desktopPub) {
         return jsonResp(409, { error: 'session_missing_attestations' });
       }
-      const ip = getViewerIp(event);
-      const ua = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
+      const desktopIp = getViewerIp(event);
+      const desktopUa = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
       const siteHost = desktopSiteHost(event);
+      // Phone-side identifiers are observed during phone-attest and
+      // persisted on the session row's annotations; pull them back out
+      // for the rate-limit gate. Both are strings or absent.
+      const a = (s as { annotations?: Record<string, unknown> }).annotations ?? {};
+      const phoneUa = typeof a.phone_ua === 'string' ? a.phone_ua : '';
+      const phoneIp = typeof a.phone_ip === 'string' ? a.phone_ip : '';
+      const authIdentity = resolveRaffleAuthIdentity(a, s);
 
       // Rate-limit BEFORE consuming the session: a 429 should leave the
       // session usable so the user can re-submit after the hour rolls.
-      // Buckets are scoped to the desktop's site host, so one phone gets
-      // independent 5/hr quotas on each site it pairs from.
-      const rl = await checkRaffleRateLimits(phonePub, desktopPub, ua, String(ip), siteHost);
+      // Five buckets — see RateLimitInputs for the per-axis rationale.
+      const rl = await checkRaffleRateLimits({
+        phonePub,
+        desktopPub,
+        desktopUa,
+        desktopIp: String(desktopIp),
+        phoneUa,
+        phoneIp,
+        authIdentity,
+        siteHost,
+      });
       if (!rl.ok) {
         return jsonResp(429, {
           error: 'rate_limited',
@@ -1818,13 +1919,23 @@ const lambdaHandler = async (event: {
         ? siteQuery
         : desktopSiteHost(event);
       try {
-        const peek = await peekRaffleRateLimits(
-          phonePubStatus,
-          desktopPubStatus,
-          uaStatus,
-          String(ipStatus),
-          siteStatus
-        );
+        // Pull phone-side identifiers and auth identity from the same
+        // session annotations the entry path will read — peek and check
+        // need to hash identical inputs.
+        const aStatus = (sStatus as { annotations?: Record<string, unknown> }).annotations ?? {};
+        const phoneUaStatus = typeof aStatus.phone_ua === 'string' ? aStatus.phone_ua : '';
+        const phoneIpStatus = typeof aStatus.phone_ip === 'string' ? aStatus.phone_ip : '';
+        const authIdStatus = resolveRaffleAuthIdentity(aStatus, sStatus);
+        const peek = await peekRaffleRateLimits({
+          phonePub: phonePubStatus,
+          desktopPub: desktopPubStatus,
+          desktopUa: uaStatus,
+          desktopIp: String(ipStatus),
+          phoneUa: phoneUaStatus,
+          phoneIp: phoneIpStatus,
+          authIdentity: authIdStatus,
+          siteHost: siteStatus,
+        });
         return jsonResp(200, {
           status: peek.tripped ? 'rate_limited' : 'ok',
           used: peek.used,
