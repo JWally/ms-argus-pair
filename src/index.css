@@ -120,44 +120,84 @@
     ry: 15%;
   }
 
-  /* Hazy pre-arrival placeholder. The container softly inhales/exhales
-     so the whole image gently moves "through haze". Each cell independ-
-     ently flickers via its own animation-delay set inline from React.
-     Blur softens the cell edges so the silhouette reads as "a QR is
-     materialising" instead of "21×21 sharp pixels". */
-  .fuzzy-qr {
-    filter: blur(0.45px);
-    animation: fuzzy-qr-breathe 2.8s ease-in-out infinite;
-    will-change: transform, filter;
+  /* Real QR arrival: one-shot blue-pulse + soft fade-in that runs
+     the moment React swaps the real <svg> into the slot. The pulse
+     reads as a "got it!" beat without being loud. */
+  .qr-svg svg {
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
   }
-  .fuzzy-qr .fuzzy-cell {
-    animation: fuzzy-qr-flicker 1.6s ease-in-out infinite;
-    transform-origin: center;
+  .qr-svg.qr-arrived {
+    animation: qr-arrival 520ms ease-out forwards;
   }
-  @keyframes fuzzy-qr-breathe {
-    0%,
-    100% {
-      transform: scale(1);
-      filter: blur(0.45px) hue-rotate(0deg);
+  @keyframes qr-arrival {
+    0% {
+      opacity: 0;
+      filter: blur(6px) drop-shadow(0 0 24px rgba(80, 160, 255, 0.95));
     }
     50% {
-      transform: scale(1.012);
-      filter: blur(0.7px) hue-rotate(8deg);
+      opacity: 1;
+      filter: blur(1px) drop-shadow(0 0 14px rgba(80, 160, 255, 0.6));
     }
-  }
-  @keyframes fuzzy-qr-flicker {
-    0%,
     100% {
-      opacity: var(--cell-low, 0.25);
-    }
-    50% {
-      opacity: var(--cell-high, 0.85);
+      opacity: 1;
+      filter: blur(0) drop-shadow(0 0 0 transparent);
     }
   }
-  /* Honour reduced-motion: keep the silhouette, drop the wobble. */
+
+  /* DVD-screensaver loading state. Two nested wrappers: outer drives
+     translateX (alternate, linear), inner drives translateY + the
+     color cycle, on a different period. Non-commensurate periods +
+     linear timing = classic DVD bounce that never repeats the same
+     path. Pure compositor work; no JS. */
+  .qr-dvd-stage {
+    container-type: size;
+  }
+  .qr-dvd-x {
+    position: absolute;
+    top: 0;
+    left: 0;
+    will-change: transform;
+    animation: qr-dvd-x 7.3s linear infinite alternate;
+    pointer-events: none;
+    user-select: none;
+  }
+  .qr-dvd-y {
+    display: inline-block;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: clamp(0.95rem, 4cqi, 1.4rem);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #c79bff;
+    /* Halo: stacked text-shadows from tight to wide so the glow has a
+       falloff curve rather than a single hard ring. Same purple hue
+       throughout — no color cycle. */
+    text-shadow:
+      0 0 4px #c79bff,
+      0 0 10px rgba(168, 85, 247, 0.85),
+      0 0 22px rgba(168, 85, 247, 0.55),
+      0 0 36px rgba(140, 60, 220, 0.4);
+    will-change: transform;
+    animation: qr-dvd-y 5.1s linear infinite alternate;
+  }
+  @keyframes qr-dvd-x {
+    to {
+      transform: translateX(calc(100cqi - 7em));
+    }
+  }
+  @keyframes qr-dvd-y {
+    to {
+      transform: translateY(calc(100cqb - 1.2em));
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .fuzzy-qr,
-    .fuzzy-qr .fuzzy-cell {
+    .qr-svg.qr-arrived {
+      animation: none;
+    }
+    .qr-dvd-x,
+    .qr-dvd-y {
       animation: none;
     }
   }

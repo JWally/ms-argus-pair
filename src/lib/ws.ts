@@ -78,9 +78,28 @@ interface WhoamiResp {
 }
 
 /**
+ * Open a WebSocket and wait for the TCP+TLS handshake to complete.
+ * Splitting open() from whoami() lets callers parallelise the WS
+ * handshake with /session/start — the token comes from the HTTP
+ * response but $connect doesn't require it, so the WS handshake can
+ * race the HTTP round-trip and the two latencies overlap instead of
+ * stacking.
+ */
+export async function openWs(url: string): Promise<WebSocket> {
+  const ws = new WebSocket(url);
+  await waitOpen(ws);
+  return ws;
+}
+
+/**
  * Open a WebSocket, send whoami, return a ready-to-use connection
  * carrying the sealed envelope. The envelope is the routing handle the
  * caller hands to peers (via QR, peer-relay, etc.) so they can address it.
+ *
+ * Pass `existingWs` when the caller has already opened the socket via
+ * openWs() — this is the parallel-handshake path. Without it, we open
+ * the socket here (the original behaviour, retained for callers that
+ * don't have a static URL available before /session/start completes).
  */
 export async function connectAndWhoami(opts: {
   url: string;
@@ -88,10 +107,11 @@ export async function connectAndWhoami(opts: {
   origin: string;
   publicKey?: string;
   timeoutMs?: number;
+  existingWs?: WebSocket;
 }): Promise<WsConnection> {
   const timeoutMs = opts.timeoutMs ?? 10_000;
-  const ws = new WebSocket(opts.url);
-  await waitOpen(ws);
+  const ws = opts.existingWs ?? new WebSocket(opts.url);
+  if (!opts.existingWs) await waitOpen(ws);
 
   // Set up the persistent peer-message fanout BEFORE sending whoami so
   // we never miss a server reply. The whoami response itself isn't a

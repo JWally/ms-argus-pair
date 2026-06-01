@@ -4,6 +4,17 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { Splash } from './components/Splash';
 import './index.css';
 
+// Globals shared with pair.ts so the controllerchange-driven SW reload
+// can defer firing while a pair session is mid-flight. See the
+// addEventListener('controllerchange', …) handler below.
+declare global {
+  interface Window {
+    __argusSessionInFlight?: boolean;
+    __argusPendingReload?: boolean;
+    __argusFlushPendingReload?: () => void;
+  }
+}
+
 // Route-split: each page lands in its own Vite chunk. Phone users
 // hitting /pair/:id download only the Pair chunk + entry, NOT the
 // raffle / leaderboard / QR generator that live in Demo. Saves
@@ -47,9 +58,47 @@ createRoot(rootElement).render(
 //      from network. Manual escape for stuck clients.
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => {
+    let refreshing = false;
+    /**
+     * Auto-refresh on a TRUE SW update — i.e. the page was being
+     * controlled by an OLD SW and a NEW SW just took over. Skips the
+     * first-install case where `controllerchange` fires only because
+     * there was no controller before; reloading then is wasted and
+     * shows as a "pre-flash" on the demo. Tracks the update via
+     * `updatefound` + the new worker's `statechange` so we only reload
+     * when we have unambiguous evidence of an actual update.
+     */
+    const doReload = () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    };
+    const maybeReload = () => {
+      if (window.__argusSessionInFlight) {
+        window.__argusPendingReload = true;
+        return;
+      }
+      doReload();
+    };
     void navigator.serviceWorker
       .register('/sw.js')
       .then((registration) => {
+        const handleNewWorker = (worker: ServiceWorker | null) => {
+          if (!worker) return;
+          worker.addEventListener('statechange', () => {
+            if (worker.state === 'activated' && navigator.serviceWorker.controller) {
+              // Genuine update: there was a prior controller and a new
+              // SW has just activated to replace it.
+              maybeReload();
+            }
+          });
+        };
+        registration.addEventListener('updatefound', () => {
+          handleNewWorker(registration.installing);
+        });
+        // Browsers already revalidate sw.js on navigation; explicit
+        // update() here is belt-and-suspenders for SPAs that don't
+        // navigate often. Failure is non-fatal.
         registration.update().catch(() => {
           /* update check failed — non-fatal, browser retries on next nav */
         });
@@ -57,11 +106,12 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
       .catch(() => {
         /* registration failed (private mode, no quota, etc.) — silent */
       });
-    let refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (refreshing) return;
-      refreshing = true;
-      window.location.reload();
-    });
+    // The session-end path (in pair.ts / Pair.tsx) calls this so the
+    // deferred reload fires the moment the user is no longer mid-flow.
+    window.__argusFlushPendingReload = () => {
+      if (window.__argusPendingReload && !window.__argusSessionInFlight) {
+        doReload();
+      }
+    };
   });
 }

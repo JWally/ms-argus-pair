@@ -50,6 +50,9 @@ export function Pair() {
       });
       return () => ctl.abort();
     }
+    // Pair flow starts on mount — flag the session as in-flight so the
+    // SW controllerchange handler defers any reload until we're done.
+    if (typeof window !== 'undefined') window.__argusSessionInFlight = true;
     (async () => {
       try {
         const [info, trustToken] = await Promise.all([
@@ -88,6 +91,12 @@ export function Pair() {
       // returns the server already pushed the verdict to the desktop;
       // the phone has no further use for the socket.
       infoRef.current?.conn.close();
+      // Pair flow done — release the SW reload lock and trigger any
+      // reload that was deferred mid-flow.
+      if (typeof window !== 'undefined') {
+        window.__argusSessionInFlight = false;
+        window.__argusFlushPendingReload?.();
+      }
     };
     // pair / pairWithGoogle are closure-stable; we want this effect to
     // run once per sessionId mount, not on every render.

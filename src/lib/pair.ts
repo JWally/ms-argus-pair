@@ -33,7 +33,7 @@
  * nonce so the proofs stay tied to this specific session.
  */
 
-import { connectAndWhoami, type WsConnection } from './ws';
+import { connectAndWhoami, openWs, type WsConnection } from './ws';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -187,19 +187,55 @@ interface VerdictShape {
 }
 
 export async function startDesktopSession(events: PairEvents = {}): Promise<DesktopSession> {
+  // Mark the session as in-flight so the SW controllerchange handler
+  // defers any pending page reloads until we're done. Without this, a
+  // mid-pair SW activation drops the WS and forces the user to restart.
+  if (typeof window !== 'undefined') window.__argusSessionInFlight = true;
+
   events.onStatus?.('starting session');
-  const session = await jsonFetch<SessionStartResp>(`${API}/session/start`, { method: 'POST' });
+
+  // Race the WS TCP+TLS handshake against the /session/start HTTP
+  // round-trip. The WS URL is static per deploy (baked in at build via
+  // VITE_PAIR_WS_URL), and $connect doesn't need a token — only whoami
+  // does, and the token comes from the HTTP response. So we can open
+  // the socket while the HTTP request is in-flight; the two latencies
+  // overlap instead of stacking. Saves the WS-handshake hit (~50–
+  // 200ms warm, ~450ms cold) on every fresh session.
+  //
+  // When VITE_PAIR_WS_URL is unset (local dev, legacy deploy), we fall
+  // back to the serial path: wait for /session/start, then open WS.
+  const staticWsUrl = import.meta.env.VITE_PAIR_WS_URL as string | undefined;
+  const eagerWsPromise = staticWsUrl
+    ? openWs(staticWsUrl).catch((e) => {
+        // If the eager open fails (network blip, bad URL), fall back
+        // to the post-HTTP open inside connectAndWhoami.
+        console.warn('[argus-pair] eager ws open failed, falling back', e);
+        return null;
+      })
+    : Promise.resolve(null);
+
+  const [session, eagerWs] = await Promise.all([
+    jsonFetch<SessionStartResp>(`${API}/session/start`, { method: 'POST' }),
+    eagerWsPromise,
+  ]);
   if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
+    if (eagerWs) eagerWs.close();
+    if (typeof window !== 'undefined') window.__argusSessionInFlight = false;
     throw new Error('session/start did not return WebSocket bootstrap material');
   }
 
-  // Stand up the WebSocket BEFORE rendering the QR — the QR has to carry
-  // the desktop's sealed connection envelope for the phone to address
-  // peer messages back. Adds ~100–200ms to QR-render latency. Worth it.
+  // The WS URL in session.ws.url is what the server says. If our eager
+  // socket is on a DIFFERENT URL (stale build env), discard the eager
+  // socket and let connectAndWhoami open a fresh one against the
+  // server-authoritative URL.
+  const reuseEagerWs = eagerWs && eagerWs.url.startsWith(session.ws.url);
+  if (eagerWs && !reuseEagerWs) eagerWs.close();
+
   const desktopConn = await connectAndWhoami({
     url: session.ws.url,
     token: session.ws.desktopToken,
     origin: window.location.origin,
+    existingWs: reuseEagerWs ? eagerWs : undefined,
   });
 
   // QR points at the canonical argus host (env-pinned at build time via
@@ -339,6 +375,15 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     }
   })();
 
+  // When the session ends (either way), clear the in-flight flag and
+  // flush any deferred SW reload that controllerchange queued during it.
+  const clearInFlight = () => {
+    if (typeof window === 'undefined') return;
+    window.__argusSessionInFlight = false;
+    window.__argusFlushPendingReload?.();
+  };
+  void result.then(clearInFlight, clearInFlight);
+
   return {
     sessionId: session.sessionId,
     pairUrl,
@@ -350,6 +395,7 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
         // Surface the still-buffered error if nothing else has resolved.
         rejectResult(scanError);
       }
+      clearInFlight();
     },
     result,
   };

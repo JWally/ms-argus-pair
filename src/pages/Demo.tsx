@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode-svg';
 import {
   startDesktopSession,
@@ -58,82 +58,32 @@ function ScoreboardRow({
 }
 
 /**
- * Pre-arrival placeholder: a hazy QR-shaped grid that wobbles. Beats a
- * static icon because it tells the user "the thing you're about to scan
- * is being made" instead of "this slot is empty". Pure CSS animation
- * driven by random per-cell delays — no JS rerender cost, no canvas.
- *
- * 21×21 grid mirrors the smallest real QR Version (V1). Three corner
- * "finder" patterns drawn at fixed positions so the silhouette reads
- * as a QR even through the blur. Filter blur + opacity drift on each
- * cell gives the "moving through haze" feeling.
+ * Pre-arrival loading state: the argus.pair wordmark bounces around
+ * the QR slot DVD-screensaver style. X and Y on non-commensurate
+ * periods so the path never repeats. Random starting position per
+ * mount via negative animation-delay — looks fresh every load
+ * instead of always starting from the top-left corner.
  */
-function FuzzyQrPlaceholder() {
-  const GRID = 21;
-  // Seeded so the visual layout is stable across renders within a
-  // session, but each cell still flickers independently via CSS delay.
-  const cells = useMemo(() => {
-    const out: { x: number; y: number; opacity: number; delay: number }[] = [];
-    for (let y = 0; y < GRID; y++) {
-      for (let x = 0; x < GRID; x++) {
-        // Pseudo-random — deterministic per cell so the SSR-eq pass is
-        // stable but each cell still has its own phase.
-        const seed = x * 73 + y * 131;
-        const rand = ((seed * 9301 + 49297) % 233280) / 233280;
-        if (rand < 0.42) continue; // sparser than a real QR, more "wisp"
-        out.push({
-          x,
-          y,
-          opacity: 0.4 + (rand - 0.42) * 0.9,
-          delay: ((seed % 100) / 100) * 2, // 0–2s phase
-        });
-      }
-    }
-    return out;
-  }, []);
-  // The 7×7 finder boxes in 3 corners, drawn explicitly so the
-  // silhouette is recognisable as a QR even through blur.
-  const finder = (cx: number, cy: number) => (
-    <g key={`f${cx}${cy}`} opacity={0.55}>
-      <rect x={cx} y={cy} width={7} height={7} fill="currentColor" />
-      <rect x={cx + 1} y={cy + 1} width={5} height={5} fill="var(--bg, #0a0a0a)" />
-      <rect x={cx + 2} y={cy + 2} width={3} height={3} fill="currentColor" />
-    </g>
-  );
+function QrLoadingGlyphs() {
+  // Negative animation-delay sampled inside each animation's full
+  // period — picks a random phase so the wordmark starts mid-flight
+  // somewhere inside the slot rather than always from (0,0). Lazy
+  // useState initializer keeps the values stable across re-renders
+  // while staying per-mount-random; it's the React-idiomatic way to
+  // do "compute once on first render" without tripping the
+  // react-hooks lint rules around purity or ref-reads.
+  const [starts] = useState(() => ({
+    x: `-${(Math.random() * 7.3).toFixed(2)}s`,
+    y: `-${(Math.random() * 5.1).toFixed(2)}s`,
+  }));
   return (
-    <svg
-      viewBox={`0 0 ${GRID} ${GRID}`}
-      className="fuzzy-qr aspect-square w-full text-white/70"
-      role="img"
-      aria-label="generating QR code"
-    >
-      {/* Subtle backdrop tile so the "edge" of the QR is implied */}
-      <rect x={0} y={0} width={GRID} height={GRID} fill="transparent" />
-      {finder(0, 0)}
-      {finder(GRID - 7, 0)}
-      {finder(0, GRID - 7)}
-      {cells.map((c, i) => (
-        <rect
-          key={i}
-          x={c.x}
-          y={c.y}
-          width={1}
-          height={1}
-          fill="currentColor"
-          className="fuzzy-cell"
-          style={
-            {
-              // CSS variables consumed by the keyframes in index.css. The
-              // animation oscillates between `--cell-low` and `--cell-high`,
-              // so per-cell opacity varies even with the same animation.
-              '--cell-low': c.opacity * 0.35,
-              '--cell-high': c.opacity,
-              animationDelay: `${c.delay}s`,
-            } as CSSProperties
-          }
-        />
-      ))}
-    </svg>
+    <div className="qr-dvd-stage relative aspect-square w-full overflow-hidden" aria-hidden>
+      <div className="qr-dvd-x" style={{ animationDelay: starts.x }}>
+        <div className="qr-dvd-y" style={{ animationDelay: starts.y }}>
+          argus.pair
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -142,11 +92,11 @@ function QrPanel({ svg }: { svg: string | null }) {
     <div className="qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
       {svg ? (
         <div
-          className="qr-svg block aspect-square w-full"
+          className="qr-svg qr-arrived block aspect-square w-full text-white/90"
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       ) : (
-        <FuzzyQrPlaceholder />
+        <QrLoadingGlyphs />
       )}
     </div>
   );
