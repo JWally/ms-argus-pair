@@ -11,6 +11,19 @@
          `defer`: the SDK isn't touched until the user taps the button, so it
          doesn't need to block the parser. -->
     <script defer src="https://static-integrity-dev-jw.argus.pw/argus-loader.iife.js"></script>
+    <style>
+      /* Splash spinner keyframes — defined in <head> so they survive
+         React's `createRoot.render()` clobber of #root. If this lived
+         inside #root (as the old inline splash did) the keyframes would
+         vanish on mount and the Suspense-fallback Splash spinner would
+         render but not spin — visually reading as "spinner stopped,
+         page about to appear, then spinner starts again". */
+      @keyframes argusPairSpin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
   </head>
   <body class="bg-bg text-white font-mono">
     <!--
@@ -49,13 +62,6 @@
           animation: argusPairSpin 0.7s linear infinite;
         "
       ></div>
-      <style>
-        @keyframes argusPairSpin {
-          to {
-            transform: rotate(360deg);
-          }
-        }
-      </style>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
