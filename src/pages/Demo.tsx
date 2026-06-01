@@ -168,14 +168,18 @@ export function Demo() {
 
   const qrSvg = useMemo(() => {
     if (!pairUrl) return null;
+    // Standard QR conventions for maximum scanner compatibility:
+    // black modules on white background, full module size (no inter-
+    // module gaps), 2-module quiet zone padding. The stylized
+    // white-on-dark + dot-grid look we used to ship scanned fine in
+    // good light but fell over on iOS Camera in dim conditions.
     return new QRCode({
       content: pairUrl,
-      padding: 0,
-      color: '#ffffff',
-      background: 'transparent',
+      padding: 2,
+      color: '#000000',
+      background: '#ffffff',
       ecl: 'M',
       container: 'svg-viewbox',
-      squareSizePercent: 0.8,
     }).svg();
   }, [pairUrl]);
 

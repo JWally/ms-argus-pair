@@ -96,28 +96,20 @@
     border-width: 0 2px 2px 0;
     border-bottom-right-radius: 12px;
   }
+  .qr-svg {
+    /* White card around the QR so the dark frame doesn't bleed into
+       the quiet zone. Scanners want a clearly delimited light field. */
+    @apply overflow-hidden rounded-lg bg-white;
+  }
   .qr-svg svg {
     display: block;
     width: 100%;
     height: 100%;
   }
-  /* Modern rounded modules. The fork inlines `shape-rendering:crispEdges`
-     on every <rect>, which kills anti-aliasing on the rounded corners —
-     override here with !important. */
+  /* Crisp pixel grid — no anti-aliasing on module edges. Standard QR
+     readers expect hard edges; geometricPrecision softens them. */
   .qr-svg rect {
-    shape-rendering: geometricPrecision !important;
-  }
-  /* Data dots are drawn at 0.8× their cell with gaps → render as circles. */
-  .qr-svg .littleSquare {
-    rx: 50%;
-    ry: 50%;
-  }
-  /* Finder modules touch their neighbors, so rx only rounds the outer
-     perimeter of each finder eye (and its inner 3×3) — gives the Apple-y
-     rounded-square eye without breaking scannability. */
-  .qr-svg .bigSquare {
-    rx: 15%;
-    ry: 15%;
+    shape-rendering: crispEdges !important;
   }
 
   /* Real QR arrival: one-shot blue-pulse + soft fade-in that runs
