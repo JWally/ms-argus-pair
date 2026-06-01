@@ -111,6 +111,24 @@ self.addEventListener('fetch', (event) => {
   // Cross-origin (argus-loader CDN, Google GIS, etc.) — leave to browser.
   if (url.origin !== self.location.origin) return;
 
+  // Escape hatch: any URL with ?fresh=1 (or fresh anywhere) bypasses
+  // the cache and wipes all SW caches in the background. Power-user
+  // way to unstick a wedged client without DevTools:
+  //   https://captcha-dev-jw.argus.pw/?fresh=1
+  //   https://captcha-dev-jw.argus.pw/pair/<id>?fresh=1
+  // Triggers a fresh fetch + full purge; the user gets clean state
+  // and every other tab on this origin reloads via controllerchange.
+  if (url.searchParams.get('fresh') === '1') {
+    event.respondWith(
+      (async () => {
+        const keys = await caches.keys();
+        await Promise.all(keys.filter((k) => k.startsWith('pair-')).map((k) => caches.delete(k)));
+        return fetch(req, { cache: 'reload' });
+      })()
+    );
+    return;
+  }
+
   // Content-hashed bundles: cache-first.
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(cacheFirstAsset(req));
