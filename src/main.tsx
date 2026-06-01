@@ -29,21 +29,29 @@ createRoot(rootElement).render(
   </StrictMode>
 );
 
-// Register the asset/HTML-cache service worker for returning visits.
-// Only in production builds — keeps `vite dev` HMR uncontested.
+// Service worker is deliberately NOT registered here. We had one that
+// cached assets + HTML for a 24h stale-while-revalidate window, but
+// Safari + stale bundles + an in-flight argus scan turned out to be a
+// long tail of "why did desktop hang?" reports. The win (a few hundred
+// ms on cellular cold-load) wasn't worth the debugging tax.
 //
-// Deliberately bare: no controllerchange auto-reload, no updatefound
-// listener, no registration.update() polling. The browser activates a
-// new SW naturally on the next navigation; reloading mid-session
-// (which Safari was eager to do) drops the WebSocket and forces the
-// user to start over. Users on stale code see the new bundle on their
-// next visit — that's a one-visit staleness window, fine.
-//
-// Manual escape for any stuck client: ?fresh=1 (handled in sw.js).
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
-  window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js').catch(() => {
-      /* registration failed (private mode, no quota, etc.) — silent */
+// For visitors who already installed the old SW: nuke it. The /sw.js
+// file in this build is a self-uninstaller that deletes its own caches
+// and unregisters itself. Belt-and-suspenders, we also drive the
+// unregister from here so the SW never even runs on this page load.
+if ('serviceWorker' in navigator) {
+  void navigator.serviceWorker.getRegistrations().then((regs) => {
+    regs.forEach((r) => {
+      void r.unregister();
     });
   });
+  if ('caches' in window) {
+    void window.caches.keys().then((keys) => {
+      keys
+        .filter((k) => k.startsWith('pair-'))
+        .forEach((k) => {
+          void window.caches.delete(k);
+        });
+    });
+  }
 }
