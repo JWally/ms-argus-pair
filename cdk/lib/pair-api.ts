@@ -1409,6 +1409,7 @@ const lambdaHandler = async (event: {
     'POST /api/session/start',
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
+    'GET /api/_valkey-debug',
   ]);
   if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
@@ -1417,6 +1418,90 @@ const lambdaHandler = async (event: {
   if (body === null) return jsonResp(400, { error: 'invalid_body' });
 
   switch (routeKey) {
+    case 'GET /api/_valkey-debug': {
+      // Diagnostic-only endpoint. Tries DNS → raw TCP → TLS → ioredis
+      // and reports where the chain breaks. Safe to expose because it
+      // only reports connectivity outcomes; no Valkey command is run.
+      const host = process.env.VALKEY_ENDPOINT ?? '';
+      const port = Number(process.env.VALKEY_PORT ?? '6379');
+      const result: Record<string, unknown> = { host, port };
+      const dnsmod = await import('node:dns/promises');
+      try {
+        const addrs = await dnsmod.resolve4(host);
+        result.dns = { ok: true, addrs };
+      } catch (e) {
+        result.dns = { ok: false, err: (e as Error).message };
+        return jsonResp(200, result);
+      }
+      const ips = (result.dns as { addrs: string[] }).addrs;
+      const tcpResults: Record<string, unknown>[] = [];
+      const netmod = await import('node:net');
+      for (const ip of ips) {
+        const tcp: Record<string, unknown> = { ip };
+        try {
+          const t0 = Date.now();
+          await new Promise<void>((resolve, reject) => {
+            const sock = netmod.createConnection({ host: ip, port, timeout: 2000 });
+            sock.once('connect', () => {
+              sock.end();
+              resolve();
+            });
+            sock.once('error', (err) => reject(err));
+            sock.once('timeout', () => reject(new Error('tcp_timeout')));
+          });
+          tcp.ok = true;
+          tcp.ms = Date.now() - t0;
+        } catch (e) {
+          tcp.ok = false;
+          tcp.err = (e as Error).message;
+        }
+        tcpResults.push(tcp);
+      }
+      result.tcp = tcpResults;
+      const tlsmod = await import('node:tls');
+      const tlsResults: Record<string, unknown>[] = [];
+      for (const ip of ips) {
+        const t: Record<string, unknown> = { ip };
+        try {
+          const t0 = Date.now();
+          await new Promise<void>((resolve, reject) => {
+            const sock = tlsmod.connect({
+              host: ip,
+              port,
+              servername: host,
+              timeout: 3000,
+              rejectUnauthorized: false,
+            });
+            sock.once('secureConnect', () => {
+              sock.end();
+              resolve();
+            });
+            sock.once('error', (err) => reject(err));
+            sock.once('timeout', () => reject(new Error('tls_timeout')));
+          });
+          t.ok = true;
+          t.ms = Date.now() - t0;
+        } catch (e) {
+          t.ok = false;
+          t.err = (e as Error).message;
+        }
+        tlsResults.push(t);
+      }
+      result.tls = tlsResults;
+      // Finally exercise the cached ioredis path end-to-end with a PING.
+      // If this passes, the rate-limit Lua call uses the same client and
+      // should work too.
+      try {
+        const { getValkey } = await import('./valkey-client');
+        const t0 = Date.now();
+        const valkey = getValkey();
+        const pong = await valkey.ping();
+        result.ioredisPing = { ok: true, pong, ms: Date.now() - t0, status: valkey.status };
+      } catch (e) {
+        result.ioredisPing = { ok: false, err: (e as Error).message };
+      }
+      return jsonResp(200, result);
+    }
     case 'POST /api/session/start': {
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');

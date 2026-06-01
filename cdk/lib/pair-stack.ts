@@ -270,6 +270,13 @@ export class PairStack extends cdk.Stack {
       integration,
     });
     api.addRoutes({
+      // Temporary diagnostic — DNS+TCP+TLS reachability check against
+      // the Valkey endpoint, for debugging the post-migration timeouts.
+      path: '/api/_valkey-debug',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration,
+    });
+    api.addRoutes({
       path: '/api/session/{id}/info',
       methods: [apigatewayv2.HttpMethod.GET],
       integration,

@@ -46,34 +46,61 @@ declare module 'ioredis' {
 
 let cached: Redis | null = null;
 
+/**
+ * Lambda containers freeze between invocations. The underlying TCP
+ * socket can die during the freeze without ioredis noticing — the next
+ * `exec()` then throws "Stream isn't writeable and enableOfflineQueue
+ * options is false" forever, because the cached client is held in a
+ * permanently-broken state.
+ *
+ * Fix: gate the singleton on `client.status === 'ready'`. If it's
+ * anything else (`end`, `wait`, `connecting`, `reconnecting`, `close`),
+ * tear it down and build a fresh one. Plus an `end` handler that null's
+ * the singleton so the next request unambiguously builds new.
+ *
+ * `lazyConnect: false` + `enableOfflineQueue: true` together let
+ * commands queue while a fresh client is mid-handshake — the
+ * `commandTimeout` is the upper bound, so a hanging connect can't
+ * stall a Lambda invocation past its budget.
+ */
 export function getValkey(): Redis {
-  if (cached) return cached;
+  if (cached && cached.status === 'ready') return cached;
+  if (cached) {
+    try {
+      cached.disconnect();
+    } catch {
+      /* socket already gone — ignore */
+    }
+    cached = null;
+  }
   const host = process.env.VALKEY_ENDPOINT;
   if (!host) throw new Error('VALKEY_ENDPOINT not configured');
   const port = Number(process.env.VALKEY_PORT ?? '6379');
-  cached = new Redis({
+  const client = new Redis({
     host,
     port,
     tls: {},
-    // Don't block module load on a TCP handshake; first command opens it.
-    lazyConnect: true,
-    // Bounded retry so a transient Valkey blip doesn't hang a Lambda
-    // invocation for its whole 10s timeout.
-    maxRetriesPerRequest: 2,
-    connectTimeout: 2_000,
-    commandTimeout: 1_500,
-    // Keep the connection alive across Lambda invocations within a warm
-    // container. Without this, ioredis pings can keep the event loop
-    // open and prevent the Lambda runtime from freezing the container
-    // between invocations — which means it never actually freezes and
-    // we burn billable time. enableOfflineQueue=false also keeps the
-    // failure surface honest.
-    keepAlive: 30_000,
-    enableOfflineQueue: false,
+    lazyConnect: false,
+    maxRetriesPerRequest: 1,
+    connectTimeout: 5_000,
+    commandTimeout: 2_000,
+    enableOfflineQueue: true,
+    // Reconnect on ANY redis-level error so a stuck socket doesn't
+    // persist. Returning 1 means "reconnect AND requeue this command".
+    reconnectOnError: () => 1,
   });
-  cached.defineCommand('rlIncr', {
+  client.on('error', (err) => {
+    console.warn(`[valkey] client error: ${err.message}`);
+  });
+  client.on('end', () => {
+    // Connection terminated for good — drop the singleton so the next
+    // getValkey() call builds fresh.
+    if (cached === client) cached = null;
+  });
+  client.defineCommand('rlIncr', {
     numberOfKeys: 1,
     lua: RL_INCR_LUA,
   });
+  cached = client;
   return cached;
 }
