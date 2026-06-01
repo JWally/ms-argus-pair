@@ -1749,8 +1749,6 @@ const lambdaHandler = async (event: {
         sessionId?: string;
         nonce?: string;
         role?: string;
-        desktopArgusSessionId?: string;
-        desktopKeyId?: string;
       };
       if (payload.sessionId !== sessionId) {
         return jsonResp(400, { error: 'payload_session_mismatch' });
@@ -1761,13 +1759,27 @@ const lambdaHandler = async (event: {
       if (payload.role !== 'phone') {
         return jsonResp(400, { error: 'payload_role_mismatch' });
       }
-      // Phone bound itself to the host's argusSessionId — verify it matches what
-      // the desktop actually submitted. Stops a third party from joining a
-      // session they've snooped the QR for *and* swapping their own desktop scan in.
-      if (payload.desktopArgusSessionId !== s.desktopAttestation.argusSessionId) {
+      // Phone bound itself to the host's argusSessionId — verify it matches
+      // what the desktop actually submitted. Stops a third party from
+      // joining a session they've snooped the QR for *and* swapping their
+      // own desktop scan in.
+      //
+      // These fields used to live inside the phone's signed envelope, but
+      // moving them to top-level POST body lets the phone scan start as
+      // soon as it has nonce (from QR hash) instead of waiting for the
+      // desktop-ready WS message to arrive. Security is preserved because
+      // the phone learns these values from the legitimate desktop's
+      // desktop-ready peer message, which the WS handler routes by role,
+      // and the values are then validated against storage server-side.
+      const desktopArgusSessionIdInput = body.desktopArgusSessionId as string | undefined;
+      const desktopKeyIdInput = body.desktopKeyId as string | undefined;
+      if (
+        !desktopArgusSessionIdInput ||
+        desktopArgusSessionIdInput !== s.desktopAttestation.argusSessionId
+      ) {
         return jsonResp(400, { error: 'desktop_argus_session_mismatch' });
       }
-      if (payload.desktopKeyId !== s.desktopAttestation.keyId) {
+      if (!desktopKeyIdInput || desktopKeyIdInput !== s.desktopAttestation.keyId) {
         return jsonResp(400, { error: 'desktop_keyId_mismatch' });
       }
       // Optional integrity check: phone & desktop must be different devices.

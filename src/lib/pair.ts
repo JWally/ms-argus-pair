@@ -245,10 +245,16 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   // The hash fragment carries the WS routing material end-to-end. Hash
   // fragments are NOT sent to the server in HTTP requests — they stay
   // client-side. Phone parses them on page load.
+  // `n` (nonce) lets the phone start its argus.run() scan immediately
+  // on arrival, in parallel with the desktop's scan, instead of waiting
+  // for the desktop-ready WS message. desktopArgusSessionId and
+  // desktopKeyId still arrive via desktop-ready and ship as top-level
+  // POST body fields (no longer inside the phone's signed envelope).
   const pairHash = new URLSearchParams({
     wsUrl: session.ws.url,
     e: desktopConn.envelope,
     pt: session.ws.phoneToken,
+    n: session.nonce,
   });
   const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}#${pairHash.toString()}`;
   if (debugMode) {
@@ -401,12 +407,23 @@ export interface PhoneSessionInfo {
   desktopEnvelope: string;
   /** Live WS connection the phone opened to receive `desktop-ready`. */
   conn: WsConnection;
+  /**
+   * Argus scan started at connect-time, before the user even taps the
+   * verify button. Resolves once the phone's own integrity scan
+   * completes (~3s on most networks). Awaited at POST time so phone
+   * arrival → user tap → submit doesn't serialise the scan after the
+   * tap. Signed payload only binds {sessionId, nonce, role: phone} —
+   * desktopArgusSessionId/desktopKeyId travel as unsigned top-level
+   * body fields and are validated server-side against storage.
+   */
+  scanPromise: Promise<ArgusRunResult>;
 }
 
 interface PairHashParams {
   wsUrl: string;
   desktopEnvelope: string;
   phoneToken: string;
+  nonce: string;
 }
 
 function parsePairHash(): PairHashParams {
@@ -415,10 +432,11 @@ function parsePairHash(): PairHashParams {
   const wsUrl = params.get('wsUrl');
   const e = params.get('e');
   const pt = params.get('pt');
-  if (!wsUrl || !e || !pt) {
+  const n = params.get('n');
+  if (!wsUrl || !e || !pt || !n) {
     throw new Error('pair URL is missing WebSocket routing material in the fragment — open via QR');
   }
-  return { wsUrl, desktopEnvelope: e, phoneToken: pt };
+  return { wsUrl, desktopEnvelope: e, phoneToken: pt, nonce: n };
 }
 
 /**
@@ -434,11 +452,11 @@ function parsePairHash(): PairHashParams {
  * peer message round-trips.
  */
 export async function awaitDesktopReady(
-  _sessionId: string,
+  sessionId: string,
   signal?: AbortSignal
 ): Promise<PhoneSessionInfo> {
   if (signal?.aborted) throw new Error('aborted');
-  const { wsUrl, desktopEnvelope, phoneToken } = parsePairHash();
+  const { wsUrl, desktopEnvelope, phoneToken, nonce } = parsePairHash();
 
   const conn = await connectAndWhoami({
     url: wsUrl,
@@ -452,6 +470,34 @@ export async function awaitDesktopReady(
   }
   const onAbort = () => conn.close();
   signal?.addEventListener('abort', onAbort);
+
+  // Kick the phone's argus scan off RIGHT NOW, before we even wait for
+  // desktop-ready. The scan needs nonce (came in the QR hash) but NOT
+  // desktopArgusSessionId/desktopKeyId — those are no longer signed
+  // into the envelope; they ship as top-level POST body fields. So the
+  // ~3s phone scan can overlap with the desktop's own scan instead of
+  // strictly following it.
+  const argus = getArgus();
+  const scanPromise = argus.run({
+    cpi: ARGUS_CPI,
+    timeoutMs: 30_000,
+    attest: {
+      purpose: ATTEST_PURPOSE,
+      ttlSeconds: ATTEST_TTL_SECONDS,
+      payload: {
+        sessionId,
+        nonce,
+        role: 'phone',
+      },
+    },
+  });
+  // Surface scan errors lazily — if no one ever awaits `scanPromise`
+  // (e.g. user closed the tab before tapping), the runtime would log
+  // an unhandled-rejection warning. This .catch keeps the rejection
+  // attached without consuming it; the eventual awaiter still sees it.
+  scanPromise.catch(() => {
+    /* surfaced by the awaiter inside submitPhoneAttestation */
+  });
 
   try {
     // Tell the desktop we're here. Server auto-includes our envelope on
@@ -476,6 +522,7 @@ export async function awaitDesktopReady(
       desktopKeyId: data.desktopKeyId,
       desktopEnvelope,
       conn,
+      scanPromise,
     };
   } finally {
     signal?.removeEventListener('abort', onAbort);
@@ -675,29 +722,17 @@ export async function submitPhoneAttestation(
   events: PairEvents = {},
   options: SubmitPhoneAttestationOptions = {}
 ): Promise<AttestResponse> {
-  const argus = getArgus();
-
   // ── Silent redeem path ─────────────────────────────────────────
   const { loadTrustToken, saveTrustToken, clearTrustToken } = await import('./device-trust');
   const trustToken = await loadTrustToken();
   if (trustToken) {
     events.onStatus?.('welcome back — verifying');
     try {
-      const run = await argus.run({
-        cpi: ARGUS_CPI,
-        timeoutMs: 30_000,
-        attest: {
-          purpose: ATTEST_PURPOSE,
-          ttlSeconds: ATTEST_TTL_SECONDS,
-          payload: {
-            sessionId,
-            nonce: info.nonce,
-            role: 'phone',
-            desktopArgusSessionId: info.desktopArgusSessionId,
-            desktopKeyId: info.desktopKeyId,
-          },
-        },
-      });
+      // Scan was kicked off at WS-connect time and has been running in
+      // parallel with the desktop's scan + the desktop-ready wait. Just
+      // await it here — typically near-instant by the time we hit this
+      // line.
+      const run = await info.scanPromise;
       if (run.attestation) {
         try {
           const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
@@ -707,6 +742,13 @@ export async function submitPhoneAttestation(
               attestation: run.attestation,
               deviceTrustToken: trustToken,
               desktopEnvelope: info.desktopEnvelope,
+              // Top-level (unsigned) cross-bindings — server validates
+              // these against the stored desktopAttestation. They no
+              // longer live inside the phone's signed envelope, which
+              // lets the scan run in parallel with the desktop scan
+              // without sacrificing the cross-binding security check.
+              desktopArgusSessionId: info.desktopArgusSessionId,
+              desktopKeyId: info.desktopKeyId,
             }),
           });
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
@@ -762,23 +804,14 @@ export async function submitPhoneAttestation(
       ? authenticateExistingPasskey(info.nonce)
       : createNewPasskey(info.nonce);
 
-  const argusPromise = argus.run({
-    cpi: ARGUS_CPI,
-    timeoutMs: 30_000,
-    attest: {
-      purpose: ATTEST_PURPOSE,
-      ttlSeconds: ATTEST_TTL_SECONDS,
-      payload: {
-        sessionId,
-        nonce: info.nonce,
-        role: 'phone',
-        desktopArgusSessionId: info.desktopArgusSessionId,
-        desktopKeyId: info.desktopKeyId,
-      },
-    },
-  });
-
-  const [webauthnSettled, runSettled] = await Promise.allSettled([webauthnPromise, argusPromise]);
+  // Argus scan was kicked off in awaitDesktopReady (at WS-connect time),
+  // running in parallel with the desktop scan + the desktop-ready wait.
+  // By the time the user has tapped the button and WebAuthn has run,
+  // this scan is usually already done — the await here is near-instant.
+  const [webauthnSettled, runSettled] = await Promise.allSettled([
+    webauthnPromise,
+    info.scanPromise,
+  ]);
 
   if (runSettled.status !== 'fulfilled') {
     throw runSettled.reason;
@@ -801,6 +834,9 @@ export async function submitPhoneAttestation(
         attestation: run.attestation,
         webauthn,
         desktopEnvelope: info.desktopEnvelope,
+        // Top-level (unsigned) cross-bindings — see silent-redeem path.
+        desktopArgusSessionId: info.desktopArgusSessionId,
+        desktopKeyId: info.desktopKeyId,
         ...(useOAuth && options.oauthResult ? { oauth: options.oauthResult } : {}),
       }),
     });

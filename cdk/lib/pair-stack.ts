@@ -271,7 +271,7 @@ export class PairStack extends cdk.Stack {
     // CFN cut over to a new version atomically and keep PC pinned to
     // the latest deploy. addAlias auto-bumps when the code hash changes.
     const pairFnAlias = pairFn.addAlias('live', {
-      provisionedConcurrentExecutions: 1,
+      provisionedConcurrentExecutions: 3,
     });
 
     // ── HTTP API ───────────────────────────────────────────────────────
@@ -390,7 +390,7 @@ export class PairStack extends cdk.Stack {
     // cold start was the second-biggest delay on the first-pair flow.
     // Cost: ~$5/mo for 512MB × 1 PC.
     const wsHandlerAlias = wsHandlerFn.addAlias('live', {
-      provisionedConcurrentExecutions: 1,
+      provisionedConcurrentExecutions: 3,
     });
 
     // ── WebSocket API ──────────────────────────────────────────────────
