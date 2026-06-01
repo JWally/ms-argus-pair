@@ -262,6 +262,18 @@ export class PairStack extends cdk.Stack {
       pairFn.addEnvironment('OAUTH_FACEBOOK_APP_SECRET_ARN', fbSecret.secretArn);
     }
 
+    // ── Provisioned concurrency for the pair Lambda ───────────────────
+    // Pinning 1 warm execution kills the ~640ms cold start that was
+    // showing up at the front of every fresh-container pair session.
+    // Cost: ~$8/mo for 768MB × 1 PC at us-east-1. Cheap insurance.
+    //
+    // Routing requests through the alias instead of the function lets
+    // CFN cut over to a new version atomically and keep PC pinned to
+    // the latest deploy. addAlias auto-bumps when the code hash changes.
+    const pairFnAlias = pairFn.addAlias('live', {
+      provisionedConcurrentExecutions: 1,
+    });
+
     // ── HTTP API ───────────────────────────────────────────────────────
     const api = new apigatewayv2.HttpApi(this, 'PairApi', {
       corsPreflight: {
@@ -270,7 +282,7 @@ export class PairStack extends cdk.Stack {
         allowHeaders: ['content-type'],
       },
     });
-    const integration = new integrations.HttpLambdaIntegration('PairInt', pairFn);
+    const integration = new integrations.HttpLambdaIntegration('PairInt', pairFnAlias);
 
     api.addRoutes({
       path: '/api/session/start',
@@ -374,18 +386,25 @@ export class PairStack extends cdk.Stack {
     wsEnvelopeSecret.grantRead(pairFn);
     pairFn.addEnvironment('WS_ENVELOPE_SECRET_ARN', wsEnvelopeSecret.secretArn);
 
+    // Provisioned concurrency for the WS handler too — the 450ms WS
+    // cold start was the second-biggest delay on the first-pair flow.
+    // Cost: ~$5/mo for 512MB × 1 PC.
+    const wsHandlerAlias = wsHandlerFn.addAlias('live', {
+      provisionedConcurrentExecutions: 1,
+    });
+
     // ── WebSocket API ──────────────────────────────────────────────────
     const wsApi = new apigatewayv2.WebSocketApi(this, 'PairWsApi', {
       apiName: `${cdk.Stack.of(this).stackName}-ws`,
       routeSelectionExpression: '$request.body.action',
       connectRouteOptions: {
-        integration: new integrations.WebSocketLambdaIntegration('ConnectInt', wsHandlerFn),
+        integration: new integrations.WebSocketLambdaIntegration('ConnectInt', wsHandlerAlias),
       },
       disconnectRouteOptions: {
-        integration: new integrations.WebSocketLambdaIntegration('DisconnectInt', wsHandlerFn),
+        integration: new integrations.WebSocketLambdaIntegration('DisconnectInt', wsHandlerAlias),
       },
       defaultRouteOptions: {
-        integration: new integrations.WebSocketLambdaIntegration('DefaultInt', wsHandlerFn),
+        integration: new integrations.WebSocketLambdaIntegration('DefaultInt', wsHandlerAlias),
       },
     });
     new apigatewayv2.WebSocketStage(this, 'PairWsStage', {

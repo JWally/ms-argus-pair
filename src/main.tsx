@@ -4,6 +4,17 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { Splash } from './components/Splash';
 import './index.css';
 
+// Globals shared with pair.ts so the controllerchange-driven SW reload
+// can defer firing while a pair session is mid-flight. See the
+// addEventListener('controllerchange', …) handler below.
+declare global {
+  interface Window {
+    __argusSessionInFlight?: boolean;
+    __argusPendingReload?: boolean;
+    __argusFlushPendingReload?: () => void;
+  }
+}
+
 // Route-split: each page lands in its own Vite chunk. Phone users
 // hitting /pair/:id download only the Pair chunk + entry, NOT the
 // raffle / leaderboard / QR generator that live in Demo. Saves
@@ -58,10 +69,36 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
         /* registration failed (private mode, no quota, etc.) — silent */
       });
     let refreshing = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
+    /**
+     * SW updates fire `controllerchange` when a new SW takes over. We
+     * reload to pick up the new bundle, UNLESS a pair session is mid-
+     * flight — reloading then drops the WebSocket, kills the QR, and
+     * forces the user to start over. The flag is set by
+     * startDesktopSession (desktop) and the Pair component (phone) and
+     * cleared when the session ends.
+     *
+     * When the flag is true at controllerchange time we set a pending
+     * marker; the session-end path checks it and reloads then. Worst
+     * case: user runs old code for one more pair, then auto-refreshes.
+     */
+    const doReload = () => {
       if (refreshing) return;
       refreshing = true;
       window.location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (window.__argusSessionInFlight) {
+        window.__argusPendingReload = true;
+        return;
+      }
+      doReload();
     });
+    // The session-end path (in pair.ts / Pair.tsx) calls this so the
+    // deferred reload fires the moment the user is no longer mid-flow.
+    window.__argusFlushPendingReload = () => {
+      if (window.__argusPendingReload && !window.__argusSessionInFlight) {
+        doReload();
+      }
+    };
   });
 }
