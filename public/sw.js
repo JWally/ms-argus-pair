@@ -49,10 +49,25 @@ const ASSET_CACHE = `pair-assets-${CACHE_VERSION}`;
 const HTML_CACHE = `pair-html-${CACHE_VERSION}`;
 
 // Stale HTML is served for this long before we block on the network.
-// 30min strikes a balance: long enough that the rapid-revisit case
-// (back button, retry, re-pair within the hour) is instant, short
-// enough that a post-deploy visitor doesn't run old code for long.
-const HTML_TTL_MS = 30 * 60 * 1000;
+// 24h: the index.html shell is structurally stable (it loads vite-
+// emitted /assets/*.js bundles whose hashes change per build, and the
+// inline splash markup rarely shifts). Returning visitors should feel
+// the YouTube-instant paint for a full day, not just half an hour.
+//
+// We can afford the longer window because the safety net under it is
+// thicker now:
+//   - background refresh on EVERY navigation pulls fresh HTML even on
+//     a cache hit, so the next visit always has up-to-date content
+//   - controllerchange in main.tsx auto-reloads the page when a new
+//     SW takes over (fires on the next navigation post-deploy)
+//   - ?fresh=1 query bypass is the manual escape
+//   - CACHE_VERSION bump is the nuclear escape
+//
+// If a critical bug ships, you have ~1 visit + a reload before the
+// user is on fresh code regardless of TTL — the TTL is what governs
+// whether the FIRST visit after a deploy blocks on the network or
+// serves stale + auto-updates.
+const HTML_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Single cache key for HTML — Vite serves the same index.html for
 // every route (SPA fallback), so caching per-URL would just duplicate
