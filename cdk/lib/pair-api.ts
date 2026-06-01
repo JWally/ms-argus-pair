@@ -352,13 +352,47 @@ function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; bucket
   return { siteHash, buckets };
 }
 
+/**
+ * USE_VALKEY_RATE_LIMITS=true switches the 5 rate-limit buckets from
+ * DDB (5 UpdateCommand / 5 GetCommand per call) to Valkey (1 pipeline
+ * of 5 INCR-or-GET commands). The Lambda must be VPC-attached with
+ * VALKEY_ENDPOINT set; otherwise the DDB path runs.
+ *
+ * Both code paths are shipped intentionally — flip the env flag to
+ * roll back without a code redeploy.
+ */
+function isValkeyRateLimitsEnabled(): boolean {
+  return process.env.USE_VALKEY_RATE_LIMITS === 'true';
+}
+
 async function peekRaffleRateLimits(inputs: RateLimitInputs): Promise<RatePeekResult> {
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const resetAt = (hour + 1) * 3600;
-  // Parallel GetItem on every bucket — saves ~40ms vs sequential when
-  // there are 5 buckets. Each is a tiny ConsistentRead=false get,
-  // perfectly safe to fire in parallel.
+
+  if (isValkeyRateLimitsEnabled()) {
+    const { getValkey } = await import('./valkey-client');
+    const valkey = getValkey();
+    const pipeline = valkey.pipeline();
+    for (const k of buckets) {
+      pipeline.get(`pair:rl:${k}:${hour}`);
+    }
+    const results = (await pipeline.exec()) ?? [];
+    let used = 0;
+    for (const [, val] of results) {
+      const n = Number(val ?? 0);
+      if (n > used) used = n;
+    }
+    return {
+      used,
+      cap: RAFFLE_BUCKET_MAX,
+      tripped: used >= RAFFLE_BUCKET_MAX,
+      resetAt,
+      siteHash,
+    };
+  }
+
+  // DDB path — fallback / rollback target.
   const reads = await Promise.all(
     buckets.map((k) =>
       ddb.send(
@@ -389,12 +423,39 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
-  // Parallel UpdateItems with allSettled — every bucket's atomic
-  // ConditionalCheck runs independently. Mixed outcomes are possible
-  // (some succeed, some trip): if any trip we 429 the caller. The
-  // small downside is the buckets that succeeded got incremented even
-  // on a 429, which is the same accept-an-off-by-one behavior the old
-  // sequential code had — just amplified to all 5 axes at once.
+
+  if (isValkeyRateLimitsEnabled()) {
+    const { getValkey } = await import('./valkey-client');
+    const valkey = getValkey();
+    // One pipelined round-trip: each EVAL atomically reads the counter,
+    // returns it unchanged if over cap, otherwise INCRs (and EXPIREs on
+    // first hit). Lua serializes the GET-check-INCR sequence so two
+    // concurrent requests can't both slip past cap. Same hard-stop
+    // semantics as the DDB ConditionalCheck path.
+    const pipeline = valkey.pipeline();
+    for (const k of buckets) {
+      pipeline.rlIncr(`pair:rl:${k}:${hour}`, RAFFLE_BUCKET_MAX, RAFFLE_BUCKET_TTL_SECONDS);
+    }
+    const results = (await pipeline.exec()) ?? [];
+    for (let i = 0; i < results.length; i++) {
+      const [err, val] = results[i];
+      if (err) throw err;
+      if (Number(val ?? 0) > RAFFLE_BUCKET_MAX) {
+        // Cap held — script returned the pre-existing over-cap value
+        // without incrementing. Same axis-naming convention as the DDB
+        // path (first 8 chars of the bucket hash).
+        return { ok: false, tripped: buckets[i].slice(0, 8), siteHash };
+      }
+      // val === RAFFLE_BUCKET_MAX is the edge case where this caller
+      // is the LAST one allowed; let it through but note that any
+      // subsequent caller for the same bucket trips.
+    }
+    return { ok: true, siteHash };
+  }
+
+  // DDB path — fallback / rollback target. allSettled keeps the loop
+  // simple: every bucket's conditional update runs independently;
+  // any one rejecting with ConditionalCheckFailed is a 429 trip.
   const results = await Promise.allSettled(
     buckets.map((k) =>
       ddb.send(
