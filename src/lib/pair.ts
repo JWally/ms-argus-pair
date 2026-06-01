@@ -259,6 +259,17 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
       phoneEnvelope = msg.fromEnvelope;
       sendReadyIfBothUp();
     } else if (data.kind === 'verdict') {
+      // The WS handler stamps `from` server-side (relayed peer messages
+      // get the sender's REAL role from their envelope; the verdict push
+      // hard-codes 'server'). Phone-side script can't forge from:'server'
+      // through the relay path — server overwrites whatever the sender
+      // claims. Only accept verdict messages with from:'server' so a
+      // compromised phone (or anyone holding the leaked QR) can't push
+      // a fake `paired` verdict at the desktop UI.
+      if ((msg as unknown as { from?: string }).from !== 'server') {
+        console.warn(`[pair] dropping verdict with from=${msg.from} (not server)`);
+        return;
+      }
       resolveResult({
         verdict: (data as { verdict: string }).verdict,
         reason: (data as { reason: string | null }).reason ?? null,

@@ -1766,6 +1766,9 @@ const lambdaHandler = async (event: {
       // socket. Replaces the desktop's /result polling on the happy
       // path; fire-and-forget — push failure does not fail the response.
       const desktopEnvelopeRaw = body.desktopEnvelope;
+      console.log(
+        `[pair] verdict-push: desktopEnvelope present=${typeof desktopEnvelopeRaw === 'string'} len=${typeof desktopEnvelopeRaw === 'string' ? desktopEnvelopeRaw.length : 0}`
+      );
       if (typeof desktopEnvelopeRaw === 'string' && desktopEnvelopeRaw.length > 0) {
         const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
         if (!mgmtEndpoint) {
@@ -1775,19 +1778,35 @@ const lambdaHandler = async (event: {
           if (!env) {
             console.warn('[pair] desktopEnvelope failed to open; skipping verdict push');
           } else if (env.sessionId !== sessionId) {
-            console.warn('[pair] desktopEnvelope sessionId mismatch; skipping verdict push');
+            console.warn(
+              `[pair] desktopEnvelope sessionId mismatch (env=${env.sessionId} path=${sessionId}); skipping verdict push`
+            );
           } else if (env.role !== 'desktop') {
-            console.warn('[pair] desktopEnvelope role != desktop; skipping verdict push');
+            console.warn(`[pair] desktopEnvelope role=${env.role} (need desktop); skipping push`);
           } else {
+            console.log(
+              `[pair] verdict-push: posting to cid=${env.connectionId} verdict=${verdict}`
+            );
+            // Wrap in the same shape the WS handler uses for relayed peer
+            // messages — `action:'message'` + `data:{kind,...}` — so the
+            // desktop's persistent fanout in src/lib/ws.ts dispatches it
+            // through onMessage exactly like phone-here / desktop-ready.
+            // Without `action:'message'` the fanout silently drops it.
             const push = await postToPeer(mgmtEndpoint, env.connectionId, {
-              kind: 'verdict',
+              action: 'message',
+              from: 'server',
               sessionId,
-              verdict,
-              reason,
-              annotations,
+              data: {
+                kind: 'verdict',
+                verdict,
+                reason,
+                annotations,
+              },
             });
-            if (!push.ok) {
-              console.warn(`[pair] verdict push failed: ${push.reason}`);
+            if (push.ok) {
+              console.log(`[pair] verdict-push: ok cid=${env.connectionId}`);
+            } else {
+              console.warn(`[pair] verdict-push failed: ${push.reason}`);
             }
           }
         }

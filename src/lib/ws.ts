@@ -98,8 +98,21 @@ export async function connectAndWhoami(opts: {
   // peer message (action='whoami', not 'message'), but the fanout only
   // dispatches action='message', so the one-shot listener below sees
   // the whoami unambiguously.
+  //
+  // API Gateway returns the body of a non-2xx Lambda WS response as a
+  // raw string back over the connection (not wrapped JSON). Watch for
+  // those too — they're how the server tells us a peer message was
+  // rejected (e.g. cross_session, envelope_expired). Silent drops here
+  // were what made the first dev-jw run look like a hang.
   const peerHandlers = new Set<(msg: PeerMessage) => void>();
   ws.addEventListener('message', (ev) => {
+    if (typeof ev.data === 'string') {
+      const trimmed = ev.data.trim();
+      if (trimmed && !trimmed.startsWith('{')) {
+        console.warn(`[ws] server error from peer route: ${trimmed}`);
+        return;
+      }
+    }
     const parsed = parseJson<PeerMessage>(ev.data);
     if (parsed && parsed.action === 'message') {
       for (const h of peerHandlers) h(parsed);

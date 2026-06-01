@@ -242,6 +242,7 @@ function ok(): WsResp {
 }
 
 function bad(body: string): WsResp {
+  console.log(`[ws] bad: ${body}`);
   return { statusCode: 400, body };
 }
 
@@ -319,8 +320,12 @@ async function handleMessage(
   }
   // Pair session must match — peers from different sessions can't talk.
   if (me.sessionId !== peer.sessionId) return bad('cross_session');
-  // Same site only.
-  if (me.origin !== peer.origin) return bad('cross_origin');
+  // NOTE: both origins were already validated against ALLOWED_ORIGINS in
+  // their respective whoami. We deliberately do NOT require me.origin ===
+  // peer.origin here: the desktop can load from an alias (qr.arcades.click)
+  // while the QR points the phone at the canonical host (captcha-…/argus.pw)
+  // so the WebAuthn rpId stays stable. That's by design. sessionId is the
+  // pairing boundary, not origin.
   // Roles must be distinct (desktop talks to phone, not desktop to desktop).
   if (me.role === peer.role) return bad('same_role');
   // Replay window.
@@ -328,6 +333,13 @@ async function handleMessage(
   if (now - me.iat > ENVELOPE_MAX_AGE_SEC || now - peer.iat > ENVELOPE_MAX_AGE_SEC) {
     return bad('envelope_expired');
   }
+  const dataKind =
+    body.data && typeof body.data === 'object' && 'kind' in (body.data as object)
+      ? (body.data as { kind?: unknown }).kind
+      : null;
+  console.log(
+    `[ws] relay from=${me.role} to=${peer.role} session=${me.sessionId} kind=${String(dataKind)} peerCid=${peer.connectionId}`
+  );
   await sendToConnection(event, peer.connectionId, {
     action: 'message',
     from: me.role,
@@ -344,14 +356,22 @@ async function handleMessage(
 
 export const handler = async (event: WsEvent): Promise<WsResp> => {
   const route = event.requestContext.routeKey;
-  if (route === '$connect') return ok();
-  if (route === '$disconnect') return ok();
+  const cid = event.requestContext.connectionId;
+  if (route === '$connect') {
+    console.log(`[ws] connect cid=${cid}`);
+    return ok();
+  }
+  if (route === '$disconnect') {
+    console.log(`[ws] disconnect cid=${cid}`);
+    return ok();
+  }
   let body: { action?: string } & Record<string, unknown> = {};
   try {
     if (event.body) body = JSON.parse(event.body) as typeof body;
   } catch {
     return bad('invalid_json');
   }
+  console.log(`[ws] action=${body.action} cid=${cid}`);
   switch (body.action) {
     case 'whoami':
       return handleWhoami(event, body as Record<string, unknown>);
