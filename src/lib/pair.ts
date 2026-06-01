@@ -187,11 +187,6 @@ interface VerdictShape {
 }
 
 export async function startDesktopSession(events: PairEvents = {}): Promise<DesktopSession> {
-  // Mark the session as in-flight so the SW controllerchange handler
-  // defers any pending page reloads until we're done. Without this, a
-  // mid-pair SW activation drops the WS and forces the user to restart.
-  if (typeof window !== 'undefined') window.__argusSessionInFlight = true;
-
   events.onStatus?.('starting session');
 
   // Race the WS TCP+TLS handshake against the /session/start HTTP
@@ -220,7 +215,6 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   ]);
   if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
     if (eagerWs) eagerWs.close();
-    if (typeof window !== 'undefined') window.__argusSessionInFlight = false;
     throw new Error('session/start did not return WebSocket bootstrap material');
   }
 
@@ -375,15 +369,6 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     }
   })();
 
-  // When the session ends (either way), clear the in-flight flag and
-  // flush any deferred SW reload that controllerchange queued during it.
-  const clearInFlight = () => {
-    if (typeof window === 'undefined') return;
-    window.__argusSessionInFlight = false;
-    window.__argusFlushPendingReload?.();
-  };
-  void result.then(clearInFlight, clearInFlight);
-
   return {
     sessionId: session.sessionId,
     pairUrl,
@@ -395,7 +380,6 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
         // Surface the still-buffered error if nothing else has resolved.
         rejectResult(scanError);
       }
-      clearInFlight();
     },
     result,
   };
