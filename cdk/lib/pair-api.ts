@@ -70,6 +70,16 @@ import {
   type OAuthVerifyResult,
 } from './oauth-providers';
 import { mintBootstrapToken, openEnvelope, postToPeer } from './ws-handler';
+import {
+  isValkeySessionsEnabled,
+  mgetSession,
+  startSessionValkey,
+  recordDesktopAttestationValkey,
+  recordPhoneAttestationValkey,
+  claimArgusValkey,
+  setRaffleHashValkey,
+  type PhoneBundle,
+} from './session-store';
 
 const TABLE = process.env.TABLE_NAME!;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -140,6 +150,9 @@ async function claimArgusSessionId(
   pairSessionId: string,
   role: 'desktop' | 'phone'
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (isValkeySessionsEnabled()) {
+    return claimArgusValkey(argusSessionId, pairSessionId, role);
+  }
   const now = Math.floor(Date.now() / 1000);
   try {
     await ddb.send(
@@ -1314,6 +1327,27 @@ async function verifyWebAuthn(
 }
 
 async function loadSession(sessionId: string): Promise<SessionItem | null> {
+  if (isValkeySessionsEnabled()) {
+    const { meta, desktop, phone, raffle } = await mgetSession(sessionId);
+    if (!meta) return null;
+    // Reassemble into the SessionItem shape so downstream callers see
+    // the same fields regardless of backend. Optional fields stay
+    // undefined when their key wasn't present.
+    return {
+      PK: `SESSION#${sessionId}`,
+      SK: 'META',
+      nonce: meta.nonce,
+      expiresAt: meta.expiresAt,
+      verdict: phone?.verdict ?? 'pending',
+      verdictReason: phone?.reason ?? undefined,
+      desktopAttestation: desktop as unknown as StoredAttestation | undefined,
+      phoneAttestation: phone?.att as unknown as StoredAttestation | undefined,
+      // raffleHash / annotations live on the row in the DDB shape too,
+      // see the cast sites in /raffle/entry and /raffle/status.
+      ...(phone?.annotations ? { annotations: phone.annotations } : {}),
+      ...(raffle ? { raffleHash: raffle.hash, raffleEnteredAt: raffle.enteredAt } : {}),
+    } as unknown as SessionItem;
+  }
   const res = await ddb.send(
     new GetCommand({ TableName: TABLE, Key: { PK: `SESSION#${sessionId}`, SK: 'META' } })
   );
@@ -1506,20 +1540,29 @@ const lambdaHandler = async (event: {
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-      const item: SessionItem = {
-        PK: `SESSION#${id}`,
-        SK: 'META',
-        nonce,
-        expiresAt,
-        verdict: 'pending',
-      };
-      await ddb.send(
-        new PutCommand({
-          TableName: TABLE,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(PK)',
-        })
-      );
+      if (isValkeySessionsEnabled()) {
+        const created = await startSessionValkey(id, { nonce, expiresAt });
+        if (!created) {
+          // UUIDv4 collision — vanishingly rare, but mirrors the
+          // DDB ConditionExpression rejection so the caller can retry.
+          return jsonResp(409, { error: 'session_id_collision' });
+        }
+      } else {
+        const item: SessionItem = {
+          PK: `SESSION#${id}`,
+          SK: 'META',
+          nonce,
+          expiresAt,
+          verdict: 'pending',
+        };
+        await ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(PK)',
+          })
+        );
+      }
       // Bootstrap WebSocket tokens — one per role. Client opens WSS,
       // sends whoami with the matching token, server returns an AES-
       // sealed connection-identity envelope. See cdk/lib/ws-handler.ts.
@@ -1592,15 +1635,28 @@ const lambdaHandler = async (event: {
         receivedAt: Math.floor(Date.now() / 1000),
         envelopeDecoded: v.decoded,
       };
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-          UpdateExpression: 'SET desktopAttestation = :d',
-          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(desktopAttestation)',
-          ExpressionAttributeValues: { ':d': stored },
-        })
-      );
+      if (isValkeySessionsEnabled()) {
+        const claimed = await recordDesktopAttestationValkey(
+          sessionId!,
+          stored as unknown as Record<string, unknown>
+        );
+        if (!claimed) {
+          // Lost the race — another desktop-attest beat us. Mirrors the
+          // DDB conditional-write rejection.
+          return jsonResp(409, { error: 'already_attested' });
+        }
+      } else {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
+            UpdateExpression: 'SET desktopAttestation = :d',
+            ConditionExpression:
+              'attribute_exists(PK) AND attribute_not_exists(desktopAttestation)',
+            ExpressionAttributeValues: { ':d': stored },
+          })
+        );
+      }
 
       // Optimistic desktop classification — purely for the "APPROVED, no QR
       // needed in production" UX hint. Real verdict still runs in
@@ -1853,57 +1909,95 @@ const lambdaHandler = async (event: {
         annotations.phone_device_trust_redeemed = true;
       }
 
-      try {
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-            UpdateExpression:
-              'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
-            ConditionExpression:
-              'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
-            ExpressionAttributeValues: {
-              ':p': stored,
-              ':v': verdict,
-              ':r': reason,
-              ':a': annotations,
-            },
-          })
-        );
-      } catch (writeErr: unknown) {
-        // Two concurrent phone-attest POSTs can race past the read-time
-        // `s.phoneAttestation` check (both read pre-write state, both
-        // proceed). The loser's conditional write throws
-        // ConditionalCheckFailedException. Make this endpoint idempotent
-        // by reading the winner's stored verdict and returning that —
-        // semantically the device DID pair, the only question is which
-        // of two identical attempts gets credit.
-        const isConflict =
-          (writeErr as { name?: string })?.name === 'ConditionalCheckFailedException';
-        if (!isConflict) throw writeErr;
-        const existing = await loadSession(sessionId!);
-        // Same-device retry (same pubkey) → idempotent success: return
-        // the winner's verdict. Different-device second scanner → tell
-        // them the session is paired with someone else so their UI
-        // doesn't falsely claim success.
-        const sameDevice = existing?.phoneAttestation?.publicKey === att.publicKey;
-        if (existing && sameDevice && existing.verdict && existing.verdict !== 'pending') {
-          return jsonResp(200, {
-            verdict: existing.verdict,
-            reason: existing.verdictReason ?? null,
-            annotations:
-              (existing as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
-            nextDeviceTrust: null,
-            concurrent_loser: true,
-          });
+      if (isValkeySessionsEnabled()) {
+        // Single atomic SET NX commits phone att + verdict + reason +
+        // annotations in one shot — no separate "set then update verdict"
+        // step, no Lua, no race window between the claim and the
+        // verdict-record.
+        const bundle: PhoneBundle = {
+          att: stored as unknown as Record<string, unknown>,
+          verdict,
+          reason,
+          annotations,
+        };
+        const r = await recordPhoneAttestationValkey(sessionId!, bundle);
+        if (!r.ok) {
+          // Lost the race. Idempotency mirror of the DDB catch path
+          // below: same-device retry → return winning verdict, other-
+          // device scanner → 409 session_paired_with_other_device.
+          const winningAttPub = (r.existing?.att as { publicKey?: string } | undefined)?.publicKey;
+          const sameDevice = winningAttPub === att.publicKey;
+          if (r.existing && sameDevice && r.existing.verdict && r.existing.verdict !== 'pending') {
+            return jsonResp(200, {
+              verdict: r.existing.verdict,
+              reason: r.existing.reason ?? null,
+              annotations: r.existing.annotations ?? {},
+              nextDeviceTrust: null,
+              concurrent_loser: true,
+            });
+          }
+          if (r.existing?.att && !sameDevice) {
+            return jsonResp(409, {
+              error: 'session_paired_with_other_device',
+              reason: 'This QR code is already paired with a different device.',
+            });
+          }
+          return jsonResp(409, { error: 'write_conflict' });
         }
-        if (existing?.phoneAttestation && !sameDevice) {
-          return jsonResp(409, {
-            error: 'session_paired_with_other_device',
-            reason: 'This QR code is already paired with a different device.',
-          });
+      } else {
+        try {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: TABLE,
+              Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
+              UpdateExpression:
+                'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
+              ConditionExpression:
+                'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
+              ExpressionAttributeValues: {
+                ':p': stored,
+                ':v': verdict,
+                ':r': reason,
+                ':a': annotations,
+              },
+            })
+          );
+        } catch (writeErr: unknown) {
+          // Two concurrent phone-attest POSTs can race past the read-time
+          // `s.phoneAttestation` check (both read pre-write state, both
+          // proceed). The loser's conditional write throws
+          // ConditionalCheckFailedException. Make this endpoint idempotent
+          // by reading the winner's stored verdict and returning that —
+          // semantically the device DID pair, the only question is which
+          // of two identical attempts gets credit.
+          const isConflict =
+            (writeErr as { name?: string })?.name === 'ConditionalCheckFailedException';
+          if (!isConflict) throw writeErr;
+          const existing = await loadSession(sessionId!);
+          // Same-device retry (same pubkey) → idempotent success: return
+          // the winner's verdict. Different-device second scanner → tell
+          // them the session is paired with someone else so their UI
+          // doesn't falsely claim success.
+          const sameDevice = existing?.phoneAttestation?.publicKey === att.publicKey;
+          if (existing && sameDevice && existing.verdict && existing.verdict !== 'pending') {
+            return jsonResp(200, {
+              verdict: existing.verdict,
+              reason: existing.verdictReason ?? null,
+              annotations:
+                (existing as unknown as { annotations?: Record<string, unknown> }).annotations ??
+                {},
+              nextDeviceTrust: null,
+              concurrent_loser: true,
+            });
+          }
+          if (existing?.phoneAttestation && !sameDevice) {
+            return jsonResp(409, {
+              error: 'session_paired_with_other_device',
+              reason: 'This QR code is already paired with a different device.',
+            });
+          }
+          return jsonResp(409, { error: 'write_conflict' });
         }
-        return jsonResp(409, { error: 'write_conflict' });
       }
       // WS push: when the phone arrived via the QR'd hash fragment it
       // also carries the desktop's sealed connection envelope. Decrypt,
@@ -2055,25 +2149,33 @@ const lambdaHandler = async (event: {
 
       // Atomically claim the session for this hash. Concurrent submits
       // for the same sessionId: loser gets 409 here.
-      try {
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { PK: `SESSION#${sid}`, SK: 'META' },
-            UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
-            ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(raffleHash)',
-            ExpressionAttributeValues: {
-              ':h': hash,
-              ':t': Math.floor(Date.now() / 1000),
-            },
-          })
-        );
-      } catch (err: unknown) {
-        const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-        if (isConflict) {
+      const enteredAt = Math.floor(Date.now() / 1000);
+      if (isValkeySessionsEnabled()) {
+        const claimed = await setRaffleHashValkey(sid, hash, enteredAt);
+        if (!claimed) {
           return jsonResp(409, { error: 'session_already_entered' });
         }
-        throw err;
+      } else {
+        try {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: TABLE,
+              Key: { PK: `SESSION#${sid}`, SK: 'META' },
+              UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
+              ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(raffleHash)',
+              ExpressionAttributeValues: {
+                ':h': hash,
+                ':t': enteredAt,
+              },
+            })
+          );
+        } catch (err: unknown) {
+          const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+          if (isConflict) {
+            return jsonResp(409, { error: 'session_already_entered' });
+          }
+          throw err;
+        }
       }
 
       const updated = await ddb.send(

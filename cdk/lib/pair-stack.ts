@@ -211,6 +211,14 @@ export class PairStack extends cdk.Stack {
         VALKEY_ENDPOINT: valkeyEndpoint,
         VALKEY_PORT: '6379',
         USE_VALKEY_RATE_LIMITS: 'true',
+        // Valkey session-state backend. USE_VALKEY_SESSIONS=true routes
+        // session/start, desktop-attest, phone-attest, argus claims,
+        // and raffle-hash claims through per-key SET NX EX commands
+        // instead of DDB Put/UpdateCommand. Both code paths ship; flip
+        // the env to roll back without a code redeploy. Live on dev-jw
+        // after smoke-testing /session/start and /info through the
+        // Valkey backend.
+        USE_VALKEY_SESSIONS: 'true',
         // Merchant-API access for the verdict-time scan lookup. When these
         // are absent the verdict logic degrades to "skipped" rather than
         // blocking on Argus availability.
