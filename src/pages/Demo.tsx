@@ -58,38 +58,46 @@ function ScoreboardRow({
 }
 
 /**
- * Pre-arrival placeholder: a real QR generated from a dummy URL,
- * rendered heavily blurred. When the real session QR arrives the
- * `qr-resolving` class is removed and CSS transitions the blur to
- * zero — looks like the QR "comes into focus" instead of swapping.
- *
- * The placeholder QR's content doesn't matter (it's blurred beyond
- * recognition) — what matters is that the silhouette is dense,
- * QR-shaped, and the same SVG node-shape as the real one so the swap
- * is just a body-content change with no layout shift.
+ * Pre-arrival loading state: the argus.pair wordmark bounces around
+ * the QR slot DVD-screensaver style. X and Y on non-commensurate
+ * periods so the path never repeats. Random starting position per
+ * mount via negative animation-delay — looks fresh every load
+ * instead of always starting from the top-left corner.
  */
-const PLACEHOLDER_QR_SVG = new QRCode({
-  content: 'https://argus.pw/loading',
-  padding: 0,
-  width: 256,
-  height: 256,
-  color: 'currentColor',
-  background: 'transparent',
-  ecl: 'M',
-  join: true,
-  pretty: false,
-}).svg();
+function QrLoadingGlyphs() {
+  // Negative animation-delay sampled inside each animation's full
+  // period — picks a random phase so the wordmark starts mid-flight
+  // somewhere inside the slot rather than always from (0,0). Lazy
+  // useState initializer keeps the values stable across re-renders
+  // while staying per-mount-random; it's the React-idiomatic way to
+  // do "compute once on first render" without tripping the
+  // react-hooks lint rules around purity or ref-reads.
+  const [starts] = useState(() => ({
+    x: `-${(Math.random() * 7.3).toFixed(2)}s`,
+    y: `-${(Math.random() * 5.1).toFixed(2)}s`,
+  }));
+  return (
+    <div className="qr-dvd-stage relative aspect-square w-full overflow-hidden" aria-hidden>
+      <div className="qr-dvd-x" style={{ animationDelay: starts.x }}>
+        <div className="qr-dvd-y" style={{ animationDelay: starts.y }}>
+          argus.pair
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function QrPanel({ svg }: { svg: string | null }) {
-  const resolved = svg !== null;
   return (
     <div className="qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
-      <div
-        className={`qr-svg block aspect-square w-full text-white/85 ${
-          resolved ? '' : 'qr-resolving'
-        }`}
-        dangerouslySetInnerHTML={{ __html: svg ?? PLACEHOLDER_QR_SVG }}
-      />
+      {svg ? (
+        <div
+          className="qr-svg qr-arrived block aspect-square w-full text-white/90"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      ) : (
+        <QrLoadingGlyphs />
+      )}
     </div>
   );
 }
