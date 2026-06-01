@@ -23,6 +23,8 @@ import { Certificate, CertificateValidation } from 'aws-cdk-lib/aws-certificatem
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaRuntime from 'aws-cdk-lib/aws-lambda';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -162,6 +164,29 @@ export class PairStack extends cdk.Stack {
       nonKeyAttributes: ['code', 'lastEntryAt'],
     });
 
+    // ── Shared infra (VPC + Valkey) from ms-argus-infra via SSM ───────
+    // VPC lookup is a synth-time context resolution (cached in
+    // cdk.context.json). The other params are runtime-resolved tokens.
+    // Stage is derived from the stack name suffix — `ms-argus-pair-dev-jw`
+    // → `dev-jw`, matching the SSM path ms-argus-infra exports under
+    // /argus/{stage}/*.
+    const sharedStage = cdk.Stack.of(this).stackName.replace(/^ms-argus-pair-/, '');
+    const vpcId = ssm.StringParameter.valueFromLookup(this, `/argus/${sharedStage}/vpc-id`);
+    const sharedVpc = ec2.Vpc.fromLookup(this, 'SharedVpc', { vpcId });
+    const sharedLambdaSgId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/argus/${sharedStage}/lambda-security-group-id`
+    );
+    const sharedLambdaSg = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      'SharedLambdaSg',
+      sharedLambdaSgId
+    );
+    const valkeyEndpoint = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/argus/${sharedStage}/valkey-endpoint`
+    );
+
     // ── Pair API Lambda ────────────────────────────────────────────────
     const pairFn = new lambda.NodejsFunction(this, 'PairApiFn', {
       entry: path.join(__dirname, 'pair-api.ts'),
@@ -170,10 +195,22 @@ export class PairStack extends cdk.Stack {
       architecture: lambdaRuntime.Architecture.ARM_64,
       memorySize: 768,
       timeout: cdk.Duration.seconds(10),
+      // VPC-attached so the rate-limit path can reach Valkey on 6379.
+      // The shared lambda SG (from ms-argus-infra) is already authorized
+      // by Valkey's ingress rule, no per-stack SG plumbing needed.
+      vpc: sharedVpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [sharedLambdaSg],
       environment: {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: allOrigins.join(','),
         DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
+        // Valkey rate-limit backend. USE_VALKEY_RATE_LIMITS=true switches
+        // peek/check from 5 DDB calls to 1 pipelined Valkey round-trip.
+        // Both code paths ship — flip the env to roll back without code.
+        VALKEY_ENDPOINT: valkeyEndpoint,
+        VALKEY_PORT: '6379',
+        USE_VALKEY_RATE_LIMITS: 'true',
         // Merchant-API access for the verdict-time scan lookup. When these
         // are absent the verdict logic degrades to "skipped" rather than
         // blocking on Argus availability.
@@ -230,6 +267,13 @@ export class PairStack extends cdk.Stack {
     api.addRoutes({
       path: '/api/session/start',
       methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      // Temporary diagnostic — DNS+TCP+TLS reachability check against
+      // the Valkey endpoint, for debugging the post-migration timeouts.
+      path: '/api/_valkey-debug',
+      methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
     api.addRoutes({

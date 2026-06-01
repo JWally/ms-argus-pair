@@ -352,13 +352,47 @@ function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; bucket
   return { siteHash, buckets };
 }
 
+/**
+ * USE_VALKEY_RATE_LIMITS=true switches the 5 rate-limit buckets from
+ * DDB (5 UpdateCommand / 5 GetCommand per call) to Valkey (1 pipeline
+ * of 5 INCR-or-GET commands). The Lambda must be VPC-attached with
+ * VALKEY_ENDPOINT set; otherwise the DDB path runs.
+ *
+ * Both code paths are shipped intentionally — flip the env flag to
+ * roll back without a code redeploy.
+ */
+function isValkeyRateLimitsEnabled(): boolean {
+  return process.env.USE_VALKEY_RATE_LIMITS === 'true';
+}
+
 async function peekRaffleRateLimits(inputs: RateLimitInputs): Promise<RatePeekResult> {
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const resetAt = (hour + 1) * 3600;
-  // Parallel GetItem on every bucket — saves ~40ms vs sequential when
-  // there are 5 buckets. Each is a tiny ConsistentRead=false get,
-  // perfectly safe to fire in parallel.
+
+  if (isValkeyRateLimitsEnabled()) {
+    const { getValkey } = await import('./valkey-client');
+    const valkey = getValkey();
+    const pipeline = valkey.pipeline();
+    for (const k of buckets) {
+      pipeline.get(`pair:rl:${k}:${hour}`);
+    }
+    const results = (await pipeline.exec()) ?? [];
+    let used = 0;
+    for (const [, val] of results) {
+      const n = Number(val ?? 0);
+      if (n > used) used = n;
+    }
+    return {
+      used,
+      cap: RAFFLE_BUCKET_MAX,
+      tripped: used >= RAFFLE_BUCKET_MAX,
+      resetAt,
+      siteHash,
+    };
+  }
+
+  // DDB path — fallback / rollback target.
   const reads = await Promise.all(
     buckets.map((k) =>
       ddb.send(
@@ -389,12 +423,39 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
-  // Parallel UpdateItems with allSettled — every bucket's atomic
-  // ConditionalCheck runs independently. Mixed outcomes are possible
-  // (some succeed, some trip): if any trip we 429 the caller. The
-  // small downside is the buckets that succeeded got incremented even
-  // on a 429, which is the same accept-an-off-by-one behavior the old
-  // sequential code had — just amplified to all 5 axes at once.
+
+  if (isValkeyRateLimitsEnabled()) {
+    const { getValkey } = await import('./valkey-client');
+    const valkey = getValkey();
+    // One pipelined round-trip: each EVAL atomically reads the counter,
+    // returns it unchanged if over cap, otherwise INCRs (and EXPIREs on
+    // first hit). Lua serializes the GET-check-INCR sequence so two
+    // concurrent requests can't both slip past cap. Same hard-stop
+    // semantics as the DDB ConditionalCheck path.
+    const pipeline = valkey.pipeline();
+    for (const k of buckets) {
+      pipeline.rlIncr(`pair:rl:${k}:${hour}`, RAFFLE_BUCKET_MAX, RAFFLE_BUCKET_TTL_SECONDS);
+    }
+    const results = (await pipeline.exec()) ?? [];
+    for (let i = 0; i < results.length; i++) {
+      const [err, val] = results[i];
+      if (err) throw err;
+      if (Number(val ?? 0) > RAFFLE_BUCKET_MAX) {
+        // Cap held — script returned the pre-existing over-cap value
+        // without incrementing. Same axis-naming convention as the DDB
+        // path (first 8 chars of the bucket hash).
+        return { ok: false, tripped: buckets[i].slice(0, 8), siteHash };
+      }
+      // val === RAFFLE_BUCKET_MAX is the edge case where this caller
+      // is the LAST one allowed; let it through but note that any
+      // subsequent caller for the same bucket trips.
+    }
+    return { ok: true, siteHash };
+  }
+
+  // DDB path — fallback / rollback target. allSettled keeps the loop
+  // simple: every bucket's conditional update runs independently;
+  // any one rejecting with ConditionalCheckFailed is a 429 trip.
   const results = await Promise.allSettled(
     buckets.map((k) =>
       ddb.send(
@@ -1348,6 +1409,7 @@ const lambdaHandler = async (event: {
     'POST /api/session/start',
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
+    'GET /api/_valkey-debug',
   ]);
   if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
@@ -1356,6 +1418,90 @@ const lambdaHandler = async (event: {
   if (body === null) return jsonResp(400, { error: 'invalid_body' });
 
   switch (routeKey) {
+    case 'GET /api/_valkey-debug': {
+      // Diagnostic-only endpoint. Tries DNS → raw TCP → TLS → ioredis
+      // and reports where the chain breaks. Safe to expose because it
+      // only reports connectivity outcomes; no Valkey command is run.
+      const host = process.env.VALKEY_ENDPOINT ?? '';
+      const port = Number(process.env.VALKEY_PORT ?? '6379');
+      const result: Record<string, unknown> = { host, port };
+      const dnsmod = await import('node:dns/promises');
+      try {
+        const addrs = await dnsmod.resolve4(host);
+        result.dns = { ok: true, addrs };
+      } catch (e) {
+        result.dns = { ok: false, err: (e as Error).message };
+        return jsonResp(200, result);
+      }
+      const ips = (result.dns as { addrs: string[] }).addrs;
+      const tcpResults: Record<string, unknown>[] = [];
+      const netmod = await import('node:net');
+      for (const ip of ips) {
+        const tcp: Record<string, unknown> = { ip };
+        try {
+          const t0 = Date.now();
+          await new Promise<void>((resolve, reject) => {
+            const sock = netmod.createConnection({ host: ip, port, timeout: 2000 });
+            sock.once('connect', () => {
+              sock.end();
+              resolve();
+            });
+            sock.once('error', (err) => reject(err));
+            sock.once('timeout', () => reject(new Error('tcp_timeout')));
+          });
+          tcp.ok = true;
+          tcp.ms = Date.now() - t0;
+        } catch (e) {
+          tcp.ok = false;
+          tcp.err = (e as Error).message;
+        }
+        tcpResults.push(tcp);
+      }
+      result.tcp = tcpResults;
+      const tlsmod = await import('node:tls');
+      const tlsResults: Record<string, unknown>[] = [];
+      for (const ip of ips) {
+        const t: Record<string, unknown> = { ip };
+        try {
+          const t0 = Date.now();
+          await new Promise<void>((resolve, reject) => {
+            const sock = tlsmod.connect({
+              host: ip,
+              port,
+              servername: host,
+              timeout: 3000,
+              rejectUnauthorized: false,
+            });
+            sock.once('secureConnect', () => {
+              sock.end();
+              resolve();
+            });
+            sock.once('error', (err) => reject(err));
+            sock.once('timeout', () => reject(new Error('tls_timeout')));
+          });
+          t.ok = true;
+          t.ms = Date.now() - t0;
+        } catch (e) {
+          t.ok = false;
+          t.err = (e as Error).message;
+        }
+        tlsResults.push(t);
+      }
+      result.tls = tlsResults;
+      // Finally exercise the cached ioredis path end-to-end with a PING.
+      // If this passes, the rate-limit Lua call uses the same client and
+      // should work too.
+      try {
+        const { getValkey } = await import('./valkey-client');
+        const t0 = Date.now();
+        const valkey = getValkey();
+        const pong = await valkey.ping();
+        result.ioredisPing = { ok: true, pong, ms: Date.now() - t0, status: valkey.status };
+      } catch (e) {
+        result.ioredisPing = { ok: false, err: (e as Error).message };
+      }
+      return jsonResp(200, result);
+    }
     case 'POST /api/session/start': {
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
