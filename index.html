@@ -23,6 +23,20 @@
           transform: rotate(360deg);
         }
       }
+      /* Inline body background so the page doesn't flash white in the
+         window between HTML parse and tailwind CSS load. The Tailwind
+         `bg-bg text-white` utilities on <body> only apply once
+         /assets/*.css arrives — without this fallback, a bright white
+         margin shows around the splash on slow paints and again
+         during any SW-driven reload (FOUC). Belt-and-suspenders since
+         the inline #root splash already covers 100dvh, but margins,
+         scrollbars, and any html-level overflow can still leak. */
+      html,
+      body {
+        background: #0a0a0a;
+        color: rgba(255, 255, 255, 0.92);
+        margin: 0;
+      }
     </style>
   </head>
   <body class="bg-bg text-white font-mono">

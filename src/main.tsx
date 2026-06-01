@@ -58,9 +58,47 @@ createRoot(rootElement).render(
 //      from network. Manual escape for stuck clients.
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => {
+    let refreshing = false;
+    /**
+     * Auto-refresh on a TRUE SW update — i.e. the page was being
+     * controlled by an OLD SW and a NEW SW just took over. Skips the
+     * first-install case where `controllerchange` fires only because
+     * there was no controller before; reloading then is wasted and
+     * shows as a "pre-flash" on the demo. Tracks the update via
+     * `updatefound` + the new worker's `statechange` so we only reload
+     * when we have unambiguous evidence of an actual update.
+     */
+    const doReload = () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    };
+    const maybeReload = () => {
+      if (window.__argusSessionInFlight) {
+        window.__argusPendingReload = true;
+        return;
+      }
+      doReload();
+    };
     void navigator.serviceWorker
       .register('/sw.js')
       .then((registration) => {
+        const handleNewWorker = (worker: ServiceWorker | null) => {
+          if (!worker) return;
+          worker.addEventListener('statechange', () => {
+            if (worker.state === 'activated' && navigator.serviceWorker.controller) {
+              // Genuine update: there was a prior controller and a new
+              // SW has just activated to replace it.
+              maybeReload();
+            }
+          });
+        };
+        registration.addEventListener('updatefound', () => {
+          handleNewWorker(registration.installing);
+        });
+        // Browsers already revalidate sw.js on navigation; explicit
+        // update() here is belt-and-suspenders for SPAs that don't
+        // navigate often. Failure is non-fatal.
         registration.update().catch(() => {
           /* update check failed — non-fatal, browser retries on next nav */
         });
@@ -68,31 +106,6 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
       .catch(() => {
         /* registration failed (private mode, no quota, etc.) — silent */
       });
-    let refreshing = false;
-    /**
-     * SW updates fire `controllerchange` when a new SW takes over. We
-     * reload to pick up the new bundle, UNLESS a pair session is mid-
-     * flight — reloading then drops the WebSocket, kills the QR, and
-     * forces the user to start over. The flag is set by
-     * startDesktopSession (desktop) and the Pair component (phone) and
-     * cleared when the session ends.
-     *
-     * When the flag is true at controllerchange time we set a pending
-     * marker; the session-end path checks it and reloads then. Worst
-     * case: user runs old code for one more pair, then auto-refreshes.
-     */
-    const doReload = () => {
-      if (refreshing) return;
-      refreshing = true;
-      window.location.reload();
-    };
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (window.__argusSessionInFlight) {
-        window.__argusPendingReload = true;
-        return;
-      }
-      doReload();
-    });
     // The session-end path (in pair.ts / Pair.tsx) calls this so the
     // deferred reload fires the moment the user is no longer mid-flow.
     window.__argusFlushPendingReload = () => {

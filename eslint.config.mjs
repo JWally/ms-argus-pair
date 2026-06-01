@@ -48,6 +48,7 @@ export default [
         Event: 'readonly',
         ErrorEvent: 'readonly',
         MessageEvent: 'readonly',
+        ServiceWorker: 'readonly',
         AbortSignal: 'readonly',
         queueMicrotask: 'readonly',
         indexedDB: 'readonly',
