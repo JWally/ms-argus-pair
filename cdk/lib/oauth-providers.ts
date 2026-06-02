@@ -126,7 +126,7 @@ function b64urlToBuf(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
 }
 
-export async function verifyGoogle(input: VerifyInput): Promise<OAuthVerifyResult> {
+async function verifyGoogle(input: VerifyInput): Promise<OAuthVerifyResult> {
   const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID;
   if (!clientId) return { ok: false, reason: 'google_not_configured' };
 
@@ -209,7 +209,7 @@ export async function verifyGoogle(input: VerifyInput): Promise<OAuthVerifyResul
  * residential phone running clean Argus is required as well. Token
  * theft alone isn't enough.
  */
-export async function verifyGithub(input: VerifyInput): Promise<OAuthVerifyResult> {
+async function verifyGithub(input: VerifyInput): Promise<OAuthVerifyResult> {
   // State binding is enforced client-side, but the parameter stays in
   // the contract for symmetry with the other verifiers.
   void input.expectedNonce;
@@ -254,7 +254,7 @@ export async function verifyGithub(input: VerifyInput): Promise<OAuthVerifyResul
  * `debug_token` also returns `is_valid` and the app-scoped user_id.
  * Cross-app token replay is blocked because `app_id !== ours` fails.
  */
-export async function verifyFacebook(input: VerifyInput): Promise<OAuthVerifyResult> {
+async function verifyFacebook(input: VerifyInput): Promise<OAuthVerifyResult> {
   void input.expectedNonce; // state-bound client-side, same as GitHub
 
   const appId = process.env.OAUTH_FACEBOOK_APP_ID;
