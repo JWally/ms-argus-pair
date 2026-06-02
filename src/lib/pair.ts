@@ -587,6 +587,17 @@ export function hasPasskeyHint(): boolean {
   }
 }
 
+/**
+ * Clear the passkey hint so the next button screen offers CREATE
+ * PASSKEY instead of USE PASSKEY. Called from Pair.tsx when the
+ * server reports the stored credential isn't recognized server-side
+ * (the classic stuck-hint failure mode after a registration-time
+ * rpId mismatch).
+ */
+export function clearPasskeyHint(): void {
+  writePasskeyHint(null);
+}
+
 function readCredentialId(): string | null {
   try {
     return window.localStorage.getItem(PASSKEY_CRED_ID_KEY);
@@ -684,16 +695,16 @@ async function createNewPasskey(nonceB64Url: string): Promise<unknown | { error:
         timeout: 60_000,
       },
     });
-    // Optimistically remember the credentialId. If the server rejects
-    // the response on POST, next visit's authentication will fail and
-    // clear it (recovery path inside authenticateExistingPasskey).
-    if (
-      result &&
-      typeof result === 'object' &&
-      typeof (result as { id?: unknown }).id === 'string'
-    ) {
-      writePasskeyHint((result as { id: string }).id);
-    }
+    // We DELIBERATELY do not write the passkey hint here. Earlier
+    // versions optimistically wrote it the moment WebAuthn.create()
+    // returned a credential, before the server confirmed it stored
+    // the registration. When server-side registration failed (rpId
+    // mismatch from a mis-deployed QR origin), the hint stuck and
+    // every future visit hit USE PASSKEY against a credential the
+    // server never stored → permanent credential_not_registered loop.
+    //
+    // Now the hint is written by the caller AFTER a paired verdict —
+    // see submitPhoneAttestation's post-response branch.
     return result;
   } catch (e) {
     return { error: (e as Error).message };
@@ -860,6 +871,20 @@ export async function submitPhoneAttestation(
       }),
     });
     if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
+    // Server confirmed registration AND the pair succeeded. Now safe
+    // to remember the credentialId so future visits offer USE PASSKEY.
+    // We only do this on the passkey-create path — passkey-auth was
+    // using an existing hint already; OAuth doesn't manage one.
+    if (
+      r.verdict === 'paired' &&
+      passkeyMode === 'passkey-create' &&
+      webauthnSettled.status === 'fulfilled'
+    ) {
+      const wa = webauthnSettled.value;
+      if (wa && typeof wa === 'object' && typeof (wa as { id?: unknown }).id === 'string') {
+        writePasskeyHint((wa as { id: string }).id);
+      }
+    }
     return r;
   } catch (e) {
     // Session is already paired (a prior request from this device succeeded
