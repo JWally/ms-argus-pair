@@ -234,9 +234,28 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
 
   // QR points at the canonical argus host (env-pinned at build time via
   // VITE_PAIR_URL_BASE). Phone-side WebAuthn rpId stays stable across
-  // alias domains. Falls back to window.location.origin for local dev.
-  const pairOrigin =
-    (import.meta.env.VITE_PAIR_URL_BASE as string | undefined) ?? window.location.origin;
+  // alias domains.
+  //
+  // In production we REFUSE to fall back to window.location.origin —
+  // that fallback silently produces a QR pointing at whatever alias
+  // domain the desktop happened to be loaded from (e.g. qr.arcades.click
+  // instead of captcha-dev-jw.argus.pw). Two prior incidents shipped
+  // bad bundles because VITE_PAIR_URL_BASE didn't make it through the
+  // deploy chain; failing loud here means a busted deploy is visible
+  // instead of producing scannable-but-wrong QRs.
+  //
+  // Dev (vite dev / pre-push lint builds) keeps the fallback — the
+  // build-time guard in vite.config.ts already short-circuits this when
+  // PAIR_ALLOW_ORIGIN_FALLBACK=1 is acknowledged.
+  const bakedOrigin = import.meta.env.VITE_PAIR_URL_BASE as string | undefined;
+  if (import.meta.env.PROD && !bakedOrigin) {
+    throw new Error(
+      'pair: VITE_PAIR_URL_BASE is not baked into this build. QR would ' +
+        'point at window.location.origin (alias-leak risk). Rebuild via ' +
+        '`npm run deploy` so the env var is set from cdk/bin/print-pair-host.mjs.'
+    );
+  }
+  const pairOrigin = bakedOrigin ?? window.location.origin;
   // Forward the desktop's `?debug=true` query param through the QR so
   // the phone-side flow can disable its silent-reauth auto-pass. Debug
   // mode is UI-only; does not relax server-side verification.

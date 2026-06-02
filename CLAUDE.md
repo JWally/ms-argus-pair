@@ -32,6 +32,51 @@ Recorded after we shipped the Google OAuth path and the Lambda came up
 without `OAUTH_GOOGLE_CLIENT_ID` because `bin/app.ts` wasn't reading the
 context flag we'd passed.
 
+## Deploys: the QR url-base MUST be baked at build time — verify it landed
+
+The QR code URL the desktop hands to the phone is built from
+`import.meta.env.VITE_PAIR_URL_BASE`, baked at **build time** by Vite.
+If that env var isn't present when `vite build` runs, the runtime falls
+back to `window.location.origin`, and the desktop ends up handing out
+QRs pointing at whichever **alias domain** it was loaded from
+(`qr.arcades.click`, `cool-stuff.io`, etc.) instead of the canonical
+`captcha-dev-jw.argus.pw`. Phone arrives at the wrong origin →
+WebAuthn rpId mismatch, WS handshake against the wrong API, the works.
+
+This has bitten us **twice** under the same root cause:
+`VITE_PAIR_URL_BASE` didn't make it through the deploy chain (likely a
+shell-quoting or `source .env` quirk on a fresh shell). Three defenses
+are in place — keep all three.
+
+1. **Runtime guard in `src/lib/pair.ts`.** In production builds, if
+   `VITE_PAIR_URL_BASE` is unset we **throw** before rendering the QR.
+   The desktop demo crashes loudly instead of producing scannable-but-
+   wrong QRs. Dev (vite dev) keeps the fallback so localhost still
+   works.
+2. **Build-time guard in `vite.config.ts`.** Vite refuses to build
+   without `VITE_PAIR_URL_BASE` unless `PAIR_ALLOW_ORIGIN_FALLBACK=1`
+   is set (pre-push lint builds use that escape hatch).
+3. **Post-build assertion in `cdk/bin/assert-baked-host.mjs`.** The
+   `deploy` script greps `dist/assets/*.js` for the expected host
+   string after `vite build` and **before** `cdk deploy`. If the
+   string isn't there, the deploy aborts. Catches the case where the
+   env var didn't propagate to Vite even though it looked set.
+
+If you ever see the QR pointing at the wrong host:
+
+- Confirm `npm run deploy` (not a manual `vite build` + `cdk deploy`).
+- Check `.env` is readable and `source .env` runs in your shell.
+- Check `npm config get script-shell` returns `/bin/bash` (POSIX `sh`
+  has no `source` builtin → `source .env` silently no-ops).
+- Run `node cdk/bin/print-pair-host.mjs` directly; it should print
+  `captcha-dev-jw.argus.pw` (or your stack's canonical host).
+- Run `node cdk/bin/assert-baked-host.mjs captcha-dev-jw.argus.pw`
+  against the local `dist/` to confirm what was just built.
+
+Last incident: 2026-06-02. Both fix branches kept the file at
+`src/lib/pair.ts` around the `pairOrigin` build — that's the choke
+point where the bug surfaces.
+
 ## Deploys: the deploy script sources `.env` and uses `--all`
 
 `npm run deploy` runs:
