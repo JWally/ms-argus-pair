@@ -9,11 +9,13 @@ import {
 import { loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
 import { Wordmark } from '../components/Brand';
+import { Dialpad } from '../components/Dialpad';
 import { IconCheck, IconX, IconShield } from '../components/Icons';
 
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
+  | 'dialpad'
   | 'returning'
   | 'pairing'
   | 'paired'
@@ -38,6 +40,7 @@ export function Pair() {
   const [verdict, setVerdict] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hasTrust, setHasTrust] = useState(false);
+  const [nonce, setNonce] = useState<string | null>(null);
   const infoRef = useRef<PhoneSessionInfo | null>(null);
   const inflightRef = useRef(false);
 
@@ -58,14 +61,20 @@ export function Pair() {
         ]);
         if (ctl.signal.aborted) return;
         infoRef.current = info;
+        setNonce(info.nonce);
         const remembered = !!trustToken;
         setHasTrust(remembered);
         // Remembered device → silent reauth, unless we're in debug mode
         // (forced via desktop's ?debug=true → QR → here). Debug always
         // lands on the buttons so the ceremony is visible.
         if (remembered && !isDebugMode()) {
-          setPhase('returning');
-          await pair();
+          // Held-confirmation step: render the late-80s CRT dialpad and
+          // wait for the user to dial the displayed code + tap SEND.
+          // The argus scan is already running in the background (kicked
+          // off by awaitDesktopReady); when SEND fires we'll await the
+          // scan promise (typically already resolved) and POST. Net
+          // user-perceived latency = max(user-dial, server-work).
+          setPhase('dialpad');
         } else {
           setPhase('ready');
         }
@@ -89,9 +98,6 @@ export function Pair() {
       // the phone has no further use for the socket.
       infoRef.current?.conn.close();
     };
-    // pair / pairWithGoogle are closure-stable; we want this effect to
-    // run once per sessionId mount, not on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // Auto-close the phone tab once the verdict is in. Paired closes
@@ -174,6 +180,21 @@ export function Pair() {
     } finally {
       inflightRef.current = false;
     }
+  }
+
+  // Full-bleed render for the dialpad phase — no Wordmark/pill chrome,
+  // no constrained max-w-sm wrapper. The dialer takes the whole viewport
+  // for the iPhone Phone-app silhouette to read correctly.
+  if (phase === 'dialpad' && nonce) {
+    return (
+      <Dialpad
+        nonce={nonce}
+        onSend={() => {
+          setPhase('returning');
+          void pair();
+        }}
+      />
+    );
   }
 
   return (

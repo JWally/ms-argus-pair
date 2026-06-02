@@ -420,3 +420,328 @@
 .pulse-fade {
   animation: pulse-fade 1.8s ease-in-out infinite;
 }
+
+/* ────────────────────────────────────────────────────────────────────
+   Dialer — iPhone Phone-app silhouette in site-purple neon. Shown on
+   the silent-reauth path as the held-confirmation step. Pure black
+   bg, purple rounded-square keypad with phone-letters under each
+   digit, full-width SEND button. On-theme with the rest of the site
+   (accent #4d1979 / #a855f7).
+   ──────────────────────────────────────────────────────────────────── */
+
+.dialer {
+  --accent: #a855f7;
+  --accent-bright: #c084fc;
+  --accent-dim: rgba(168, 85, 247, 0.55);
+  --accent-faint: rgba(168, 85, 247, 0.18);
+  --accent-key-fill: rgba(168, 85, 247, 0.06);
+  --accent-glow: rgba(168, 85, 247, 0.6);
+  --accent-glow-soft: rgba(168, 85, 247, 0.25);
+
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  margin: 0;
+  background: #000;
+  padding: max(env(safe-area-inset-top), 1rem) 1rem max(env(safe-area-inset-bottom), 1rem);
+  gap: 1.25rem;
+}
+
+.dialer-screen {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+}
+
+.dialer-prompt {
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 6px var(--accent-glow),
+    0 0 16px var(--accent-glow);
+}
+
+.dialer-display-row {
+  display: grid;
+  grid-template-columns: 2.6rem 1fr 2.6rem;
+  align-items: center;
+}
+
+.dialer-display-spacer {
+  display: block;
+}
+
+.dialer-display {
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 2.8rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 6px var(--accent-glow),
+    0 0 22px var(--accent-glow),
+    0 0 42px var(--accent-glow-soft);
+  min-height: 3.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dialer-display-hint {
+  color: var(--accent-faint);
+  letter-spacing: 0.32em;
+  text-shadow: 0 0 4px var(--accent-glow-soft);
+}
+
+/* Each digit of the target code is rendered as its own span so we can
+   light it up as the user dials. dialer-digit-on = already entered
+   (bright); dialer-digit-next = the digit they should tap next (medium,
+   cursor pulse); dialer-digit-pending = future digits (faint). */
+.dialer-digit {
+  display: inline-block;
+  margin: 0 0.18em;
+  transition:
+    color 160ms ease-out,
+    text-shadow 160ms ease-out;
+}
+.dialer-digit-on {
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 6px var(--accent-glow),
+    0 0 22px var(--accent-glow),
+    0 0 42px var(--accent-glow-soft);
+}
+.dialer-digit-next {
+  color: var(--accent);
+  text-shadow:
+    0 0 6px var(--accent-glow),
+    0 0 14px var(--accent-glow-soft);
+  animation: dialer-cursor 0.95s steps(2, end) infinite;
+}
+.dialer-digit-pending {
+  color: var(--accent-faint);
+  text-shadow: 0 0 4px var(--accent-glow-soft);
+}
+
+.dialer-shake {
+  animation: dialer-shake 180ms ease-out;
+}
+
+@keyframes dialer-cursor {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes dialer-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-7px);
+  }
+  40% {
+    transform: translateX(7px);
+  }
+  60% {
+    transform: translateX(-4px);
+  }
+  80% {
+    transform: translateX(4px);
+  }
+}
+
+.dialer-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+  flex: 1 1 auto;
+  align-content: center;
+  transition: opacity 280ms ease-out;
+}
+
+.dialer-keypad-muted {
+  opacity: 0.18;
+  pointer-events: none;
+  filter: saturate(0.4);
+}
+
+.dialer-key {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  border: 1.5px solid var(--accent);
+  background: var(--accent-key-fill);
+  border-radius: 14px;
+  aspect-ratio: 1.35 / 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow:
+    0 0 0 1px rgba(168, 85, 247, 0.18),
+    0 0 16px var(--accent-glow-soft),
+    inset 0 0 10px rgba(168, 85, 247, 0.08);
+  transition:
+    background 100ms ease-out,
+    transform 60ms ease-out,
+    box-shadow 120ms ease-out;
+}
+.dialer-key:active {
+  background: rgba(168, 85, 247, 0.22);
+  transform: translateY(1px);
+  box-shadow:
+    0 0 0 1px rgba(168, 85, 247, 0.4),
+    0 0 24px var(--accent-glow),
+    inset 0 0 14px rgba(168, 85, 247, 0.2);
+}
+
+.dialer-key-digit {
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 1.65rem;
+  font-weight: 500;
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 4px var(--accent-glow),
+    0 0 12px var(--accent-glow);
+  line-height: 1;
+}
+
+.dialer-key-letters {
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: var(--accent-dim);
+  text-shadow: 0 0 4px var(--accent-glow-soft);
+  min-height: 0.8rem;
+}
+
+.dialer-send {
+  appearance: none;
+  display: block;
+  width: 100%;
+  border: 1.5px solid var(--accent-faint);
+  background: rgba(168, 85, 247, 0.04);
+  color: rgba(168, 85, 247, 0.32);
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.46em;
+  padding: 1.1rem 0;
+  border-radius: 16px;
+  cursor: not-allowed;
+  text-shadow: none;
+  text-indent: 0.46em; /* compensate letter-spacing right-shift */
+  box-shadow: none;
+  transition:
+    color 280ms ease-out,
+    border-color 280ms ease-out,
+    background 280ms ease-out,
+    box-shadow 280ms ease-out,
+    transform 80ms ease-out;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dialer-send-armed {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(168, 85, 247, 0.28), rgba(168, 85, 247, 0.1));
+  color: var(--accent-bright);
+  text-shadow:
+    0 0 6px var(--accent-glow),
+    0 0 18px var(--accent-glow);
+  box-shadow:
+    0 0 0 1px rgba(168, 85, 247, 0.5),
+    0 0 28px var(--accent-glow);
+  cursor: pointer;
+  animation: dialer-send-pulse 1.5s ease-in-out infinite;
+}
+.dialer-send-armed:active {
+  transform: translateY(1px) scale(0.995);
+}
+
+.dialer-backspace {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  background: transparent;
+  border: none;
+  color: rgba(168, 85, 247, 0.18);
+  cursor: not-allowed;
+  transition: color 180ms ease-out;
+  -webkit-tap-highlight-color: transparent;
+  justify-self: end;
+}
+.dialer-backspace-on {
+  color: var(--accent-dim);
+  cursor: pointer;
+}
+.dialer-backspace-on:active {
+  color: var(--accent-bright);
+}
+.dialer-backspace-icon {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+@keyframes dialer-send-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(168, 85, 247, 0.5),
+      0 0 28px var(--accent-glow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(168, 85, 247, 0.7),
+      0 0 42px var(--accent-glow);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialer-send-armed {
+    animation: none;
+  }
+}
