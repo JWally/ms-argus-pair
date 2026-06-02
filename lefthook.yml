@@ -20,3 +20,10 @@ pre-push:
       # sets VITE_PAIR_URL_BASE explicitly so the guard fires only when
       # someone runs cdk deploy directly without sourcing env.
       run: PAIR_ALLOW_ORIGIN_FALLBACK=1 npm run build
+    dead-code:
+      # knip — unused exports / files / dependencies. Ratchet baseline
+      # as of branch chore/add-quality-gates: clean. Any new unused
+      # export, file, or package dependency blocks the push. Grandfather
+      # intentional latent code (e.g. OAuth provider scaffolds) with a
+      # `@public` JSDoc tag on the export.
+      run: npm run dead-code

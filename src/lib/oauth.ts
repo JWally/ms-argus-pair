@@ -29,7 +29,7 @@
 
 export type OAuthProvider = 'google' | 'github' | 'facebook';
 
-export interface OAuthResult {
+interface OAuthResult {
   provider: OAuthProvider;
   token: string;
 }
@@ -215,6 +215,9 @@ async function sha256B64Url(input: string): Promise<string> {
  * SCAFFOLD: the popup wiring + callback page are TODO. This stub
  * returns `scaffold_not_wired_yet` so the rest of the pipeline can
  * be exercised with fake providers in tests.
+ *
+ * @public — intentional provider-API surface, wired via runOAuthProofOfLife
+ * dispatch when a future caller switches providers.
  */
 export async function runGithubProofOfLife(nonce: string): Promise<OAuthOutcome> {
   if (!PROVIDERS_CONFIGURED.github) {
@@ -250,6 +253,9 @@ export async function runGithubProofOfLife(nonce: string): Promise<OAuthOutcome>
  * we hand to the backend; backend verifies via /debug_token.
  *
  * SCAFFOLD: SDK init + FB.login() invocation are TODO.
+ *
+ * @public — intentional provider-API surface, wired via runOAuthProofOfLife
+ * dispatch when a future caller switches providers.
  */
 export async function runFacebookProofOfLife(nonce: string): Promise<OAuthOutcome> {
   if (!PROVIDERS_CONFIGURED.facebook) {
@@ -267,6 +273,11 @@ export async function runFacebookProofOfLife(nonce: string): Promise<OAuthOutcom
 // Dispatch
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * @public — provider-agnostic dispatch entry, used by future callers
+ * that want to pick provider at runtime instead of importing one of
+ * the run*ProofOfLife functions directly.
+ */
 export function runOAuthProofOfLife(provider: OAuthProvider, nonce: string): Promise<OAuthOutcome> {
   switch (provider) {
     case 'google':

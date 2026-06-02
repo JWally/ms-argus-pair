@@ -3,7 +3,7 @@
  * Used as the wordmark for the captcha; deliberately neutral, not
  * branded as the underlying detection service.
  */
-export function BrandMark({ className = 'h-6 w-6' }: { className?: string }) {
+function BrandMark({ className = 'h-6 w-6' }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" className={className} aria-hidden>
       <defs>
@@ -13,10 +13,7 @@ export function BrandMark({ className = 'h-6 w-6' }: { className?: string }) {
         </linearGradient>
       </defs>
       <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#brand-grad)" />
-      <path
-        d="M11 9h7a5 5 0 0 1 0 10h-3v4h-4V9zm4 3v4h3a2 2 0 0 0 0-4h-3z"
-        fill="#fff"
-      />
+      <path d="M11 9h7a5 5 0 0 1 0 10h-3v4h-4V9zm4 3v4h3a2 2 0 0 0 0-4h-3z" fill="#fff" />
     </svg>
   );
 }

@@ -16,7 +16,7 @@
  * message in a session establishes the back-channel both directions.
  */
 
-export interface PeerMessage {
+interface PeerMessage {
   action: 'message';
   from: 'desktop' | 'phone';
   /** The sender's sealed envelope — recipient stores it to reply later. */
