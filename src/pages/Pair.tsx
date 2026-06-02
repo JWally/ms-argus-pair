@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   awaitDesktopReady,
+  clearPasskeyHint,
   hasPasskeyHint,
   submitPhoneAttestation,
   type PhoneSessionInfo,
@@ -133,6 +134,22 @@ export function Pair() {
         { mode: passkeyMode }
       );
       setVerdict(r.verdict);
+      // Self-heal a stuck passkey hint. The client optimistically
+      // writes the hint when WebAuthn.create() returns a credential,
+      // before the server-side registration is confirmed. If
+      // registration failed at the time (e.g. rpId mismatch from a
+      // mis-deployed QR origin), the hint sticks and every future
+      // visit hits USE PASSKEY against a credential the server never
+      // stored. Detect that exact server error and clear the hint so
+      // the next button screen offers CREATE PASSKEY by default.
+      const webauthnError = (r.annotations as { phone_webauthn_error?: unknown } | undefined)
+        ?.phone_webauthn_error;
+      if (
+        r.verdict !== 'paired' &&
+        (webauthnError === 'credential_not_registered' || webauthnError === 'not_verified')
+      ) {
+        clearPasskeyHint();
+      }
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
