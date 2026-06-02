@@ -29,29 +29,12 @@ createRoot(rootElement).render(
   </StrictMode>
 );
 
-// Service worker is deliberately NOT registered here. We had one that
-// cached assets + HTML for a 24h stale-while-revalidate window, but
-// Safari + stale bundles + an in-flight argus scan turned out to be a
-// long tail of "why did desktop hang?" reports. The win (a few hundred
-// ms on cellular cold-load) wasn't worth the debugging tax.
-//
-// For visitors who already installed the old SW: nuke it. The /sw.js
-// file in this build is a self-uninstaller that deletes its own caches
-// and unregisters itself. Belt-and-suspenders, we also drive the
-// unregister from here so the SW never even runs on this page load.
-if ('serviceWorker' in navigator) {
-  void navigator.serviceWorker.getRegistrations().then((regs) => {
-    regs.forEach((r) => {
-      void r.unregister();
-    });
-  });
-  if ('caches' in window) {
-    void window.caches.keys().then((keys) => {
-      keys
-        .filter((k) => k.startsWith('pair-'))
-        .forEach((k) => {
-          void window.caches.delete(k);
-        });
-    });
-  }
-}
+// No service worker registration or cleanup runs here. The old SW
+// cached HTML + assets and produced enough Safari-reload + stale-
+// bundle pain that we retired it. `public/sw.js` remains as a
+// permanent self-uninstaller for any rare returning client that
+// still has the old worker registered — the browser fetches it on
+// its next update check, activates it, and the new worker deletes
+// its own caches and calls registration.unregister() to remove
+// itself. That file MUST stay shipped (deleting it would 404 the
+// update probe and orphan those clients on the old code path).
