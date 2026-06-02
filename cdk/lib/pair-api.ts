@@ -1906,6 +1906,28 @@ const lambdaHandler = async (event: {
         annotations = { ...computed.annotations, ...webauthnResult };
       }
 
+      // Always log the verdict reason + the proof-of-life sub-error so
+      // a fail-pattern is debuggable from CloudWatch without reading
+      // the WS-pushed annotations off the desktop screen. The webauthn
+      // result already ships to the client; logging it server-side is
+      // pure operational visibility.
+      if (verdict !== 'paired') {
+        const wa = webauthnResult as WebAuthnAnnotations & {
+          phone_webauthn_error?: string;
+        };
+        const oa = webauthnResult as OAuthAnnotations & {
+          phone_oauth_error?: string;
+        };
+        console.warn(
+          `[pair] verdict=${verdict} reason=${reason} ` +
+            `proofOfLife=${proofOfLife} ` +
+            `phone_webauthn_attested=${(webauthnResult as WebAuthnAnnotations).phone_webauthn_attested} ` +
+            `phone_webauthn_error=${wa.phone_webauthn_error ?? 'none'} ` +
+            `phone_oauth_error=${oa.phone_oauth_error ?? 'none'} ` +
+            `trust_redeemed=${!!trustResult?.ok}`
+        );
+      }
+
       // Mint a fresh device-trust token if this phone just passed fresh
       // WebAuthn (not a redeem). The next pairing within 12h from the
       // same IP can skip the biometric prompt.
