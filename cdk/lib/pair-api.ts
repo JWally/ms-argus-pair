@@ -37,7 +37,7 @@
  *   5. ECDSA-P256-SHA-256 verify(signature, raw envelope bytes, publicKey)
  *   6. then app-level: payload.sessionId === session id, payload.nonce === nonce
  */
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
@@ -46,7 +46,6 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type {
   AuthenticationResponseJSON,
@@ -74,12 +73,17 @@ import {
 } from './session-store';
 import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
 import {
-  b64urlToBuf,
   validateAttestInput,
   verifyAttestation,
   type AttestationInput,
   type EnvelopeDecoded,
 } from './pair-api/attestation/envelope';
+import {
+  getTrustSecret,
+  mintDeviceTrust,
+  verifyDeviceTrust,
+  type DeviceTrustVerifyResult,
+} from './pair-api/attestation/trust';
 
 const TABLE = process.env.TABLE_NAME!;
 
@@ -100,29 +104,6 @@ const TOTAL_SCORE_LIMIT = 50;
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
-
-// Device-trust token. Once a phone passes WebAuthn we mint an HMAC-signed
-// blob containing (pubkey, ip, exp). On the NEXT visit within the TTL,
-// from the same IP, the phone presents the token instead of running the
-// biometric ceremony again. Strict IP-pin: any drift forces fresh
-// WebAuthn. The HMAC secret lives in Secrets Manager so it survives
-// Lambda redeploys (otherwise every deploy would invalidate every token).
-const DEVICE_TRUST_SECRET_ARN = process.env.DEVICE_TRUST_SECRET_ARN || '';
-const DEVICE_TRUST_TTL_SECONDS = 12 * 3600;
-const sm = new SecretsManagerClient({});
-let cachedTrustSecret: string | null = null;
-async function getTrustSecret(): Promise<string | null> {
-  if (cachedTrustSecret) return cachedTrustSecret;
-  if (!DEVICE_TRUST_SECRET_ARN) return null;
-  try {
-    const r = await sm.send(new GetSecretValueCommand({ SecretId: DEVICE_TRUST_SECRET_ARN }));
-    cachedTrustSecret = r.SecretString || null;
-    return cachedTrustSecret;
-  } catch (e) {
-    console.warn(`[pair] getTrustSecret failed: ${(e as Error).message}`);
-    return null;
-  }
-}
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -791,77 +772,6 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
     reason: annotations.phone_to_phone ? 'paired_phone_to_phone' : 'paired_desktop_and_phone',
     annotations,
   };
-}
-
-// ── Device-trust token (silent re-auth after first WebAuthn) ──────────────
-
-interface DeviceTrustPayload {
-  v: 1;
-  pubkey: string; // SPKI base64, matches the SDK device key
-  keyId: string;
-  ip: string; // strict — any drift forces re-WebAuthn
-  iat: number;
-  exp: number;
-}
-
-function b64urlEncodeBytes(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function mintDeviceTrust(pubkey: string, keyId: string, ip: string): Promise<string | null> {
-  const secret = await getTrustSecret();
-  if (!secret || !ip) return null;
-  const iat = Math.floor(Date.now() / 1000);
-  const payload: DeviceTrustPayload = {
-    v: 1,
-    pubkey,
-    keyId,
-    ip,
-    iat,
-    exp: iat + DEVICE_TRUST_TTL_SECONDS,
-  };
-  const body = b64urlEncodeBytes(Buffer.from(JSON.stringify(payload), 'utf8'));
-  const mac = createHmac('sha256', secret).update(body).digest('base64url');
-  return `${body}.${mac}`;
-}
-
-interface DeviceTrustVerifyResult {
-  ok: boolean;
-  reason?: string;
-  payload?: DeviceTrustPayload;
-}
-
-async function verifyDeviceTrust(
-  token: string,
-  requesterIp: string,
-  expectedPubKey: string
-): Promise<DeviceTrustVerifyResult> {
-  if (typeof token !== 'string' || !token.includes('.')) {
-    return { ok: false, reason: 'malformed' };
-  }
-  const [body, mac] = token.split('.', 2);
-  if (!body || !mac) return { ok: false, reason: 'malformed' };
-  const secret = await getTrustSecret();
-  if (!secret) return { ok: false, reason: 'no_secret' };
-  const expected = createHmac('sha256', secret).update(body).digest('base64url');
-  const a = Buffer.from(mac);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
-    return { ok: false, reason: 'hmac' };
-  }
-  let payload: DeviceTrustPayload;
-  try {
-    payload = JSON.parse(b64urlToBuf(body).toString('utf8')) as DeviceTrustPayload;
-  } catch {
-    return { ok: false, reason: 'not_json' };
-  }
-  if (payload.v !== 1) return { ok: false, reason: 'version' };
-  const now = Math.floor(Date.now() / 1000);
-  if (now > payload.exp) return { ok: false, reason: 'expired' };
-  if (!requesterIp) return { ok: false, reason: 'no_requester_ip' };
-  if (payload.ip !== requesterIp) return { ok: false, reason: 'ip_changed' };
-  if (payload.pubkey !== expectedPubKey) return { ok: false, reason: 'pubkey_mismatch' };
-  return { ok: true, payload };
 }
 
 /**
