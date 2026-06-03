@@ -80,9 +80,9 @@ import {
   setRaffleHashValkey,
   type PhoneBundle,
 } from './session-store';
+import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
 
 const TABLE = process.env.TABLE_NAME!;
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 
 const MERCHANT_API_URL = process.env.MERCHANT_API_URL || '';
 const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
@@ -91,7 +91,6 @@ const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 const SESSION_TTL_SECONDS = 300; // 5 minutes
 const CLOCK_SKEW_SECONDS = 30;
 const EXPECTED_PURPOSE = 'argus-pair-v1';
-const MAX_BODY_BYTES = 16 * 1024;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // Verdict thresholds (per spec). Individual = max(automation, device_tampering,
@@ -531,31 +530,6 @@ interface SessionItem {
   verdictReason?: string;
 }
 
-function jsonResp(statusCode: number, body: unknown) {
-  return {
-    statusCode,
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-    },
-    body: JSON.stringify(body),
-  };
-}
-
-function originAllowed(event: { headers?: Record<string, string | undefined> }): boolean {
-  if (ALLOWED_ORIGINS.length === 0) return true; // dev
-  const o = event.headers?.origin || event.headers?.Origin;
-  // Same-origin GET requests in some browsers (Chrome) omit the Origin
-  // header entirely. Rejecting on missing Origin would block legitimate
-  // polling from the SPA, and CloudFront would then rewrite the 403 to
-  // the SPA HTML (errorResponses[403] needed for client-side routing) —
-  // which the JSON parser blows up on. So: allow if Origin is absent
-  // (browser couldn't have set it for a cross-origin call), reject only
-  // when it's explicitly wrong. CORS preflight handles the rest.
-  if (!o) return true;
-  return ALLOWED_ORIGINS.includes(o);
-}
-
 function b64urlToBuf(s: string): Buffer {
   const pad = '='.repeat((4 - (s.length % 4)) % 4);
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
@@ -650,17 +624,6 @@ function verifyAttestation(a: AttestationInput): VerifyResult {
   if (!sigOk) return { ok: false, reason: 'signature_verify_failed' };
 
   return { ok: true, decoded };
-}
-
-function parseBody(raw: string | undefined): Record<string, unknown> | null {
-  if (!raw) return {};
-  if (raw.length > MAX_BODY_BYTES) return null;
-  try {
-    const v = JSON.parse(raw);
-    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 function validateAttestInput(body: Record<string, unknown>): AttestationInput | null {
@@ -1044,26 +1007,6 @@ async function verifyDeviceTrust(
  * earlier version of this comment claimed). Either field is reliable for
  * device-trust IP-pinning; we prefer the header for explicitness.
  */
-function getViewerIp(event: {
-  headers?: Record<string, string | undefined>;
-  requestContext?: { http?: { sourceIp?: string }; identity?: { sourceIp?: string } };
-}): string {
-  const headers = event.headers || {};
-  const raw = headers['cloudfront-viewer-address'] || headers['CloudFront-Viewer-Address'] || '';
-  if (raw) {
-    // IPv6: "[2001:db8::1]:12345"
-    if (raw.startsWith('[')) {
-      const close = raw.indexOf(']');
-      if (close > 0) return raw.slice(1, close);
-    }
-    // IPv4: "1.2.3.4:54321"
-    const lastColon = raw.lastIndexOf(':');
-    if (lastColon > 0) return raw.slice(0, lastColon);
-    return raw;
-  }
-  return event.requestContext?.http?.sourceIp ?? event.requestContext?.identity?.sourceIp ?? '';
-}
-
 // ── WebAuthn proof-of-life verification ────────────────────────────────────
 
 interface WebAuthnAnnotations {
