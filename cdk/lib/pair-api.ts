@@ -37,15 +37,7 @@
  *   5. ECDSA-P256-SHA-256 verify(signature, raw envelope bytes, publicKey)
  *   6. then app-level: payload.sessionId === session id, payload.nonce === nonce
  */
-import {
-  createHash,
-  createHmac,
-  createPublicKey,
-  createVerify,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
@@ -81,6 +73,13 @@ import {
   type PhoneBundle,
 } from './session-store';
 import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
+import {
+  b64urlToBuf,
+  validateAttestInput,
+  verifyAttestation,
+  type AttestationInput,
+  type EnvelopeDecoded,
+} from './pair-api/attestation/envelope';
 
 const TABLE = process.env.TABLE_NAME!;
 
@@ -89,8 +88,6 @@ const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
 const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
-const CLOCK_SKEW_SECONDS = 30;
-const EXPECTED_PURPOSE = 'argus-pair-v1';
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // Verdict thresholds (per spec). Individual = max(automation, device_tampering,
@@ -499,24 +496,10 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
 
 type Verdict = 'pending' | 'paired' | 'failed';
 
-interface AttestationInput {
-  envelope: string;
-  signature: string;
-  publicKey: string;
-  keyId: string;
-}
-
 interface StoredAttestation extends AttestationInput {
   argusSessionId: string;
   receivedAt: number;
-  envelopeDecoded: {
-    v: number;
-    purpose: string;
-    payload: Record<string, unknown>;
-    iat: number;
-    exp: number;
-    keyId: string;
-  };
+  envelopeDecoded: EnvelopeDecoded;
 }
 
 interface SessionItem {
@@ -528,120 +511,6 @@ interface SessionItem {
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
   verdictReason?: string;
-}
-
-function b64urlToBuf(s: string): Buffer {
-  const pad = '='.repeat((4 - (s.length % 4)) % 4);
-  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
-}
-
-function p1363ToDer(sig: Buffer): Buffer {
-  // ECDSA-P-256 IEEE-P1363 → DER. WebCrypto signs in P1363 (r||s, 64 bytes);
-  // Node's crypto.verify wants DER unless dsaEncoding: 'ieee-p1363' is set,
-  // but the option name needed Node 16+ and was buggy on some platforms.
-  // Convert explicitly to avoid surprises.
-  if (sig.length !== 64) throw new Error('signature: expected 64 bytes for P-256');
-  const r = sig.subarray(0, 32);
-  const s = sig.subarray(32, 64);
-  const rTrim = trimLeadZero(r);
-  const sTrim = trimLeadZero(s);
-  const rDer = Buffer.concat([Buffer.from([0x02, rTrim.length]), rTrim]);
-  const sDer = Buffer.concat([Buffer.from([0x02, sTrim.length]), sTrim]);
-  const seq = Buffer.concat([rDer, sDer]);
-  return Buffer.concat([Buffer.from([0x30, seq.length]), seq]);
-}
-
-function trimLeadZero(b: Buffer): Buffer {
-  let i = 0;
-  while (i < b.length - 1 && b[i] === 0) i++;
-  // If high bit set, prepend 0x00 (DER positive-integer convention).
-  if (b[i] & 0x80) return Buffer.concat([Buffer.from([0]), b.subarray(i)]);
-  return b.subarray(i);
-}
-
-interface VerifyResult {
-  ok: boolean;
-  reason?: string;
-  decoded?: StoredAttestation['envelopeDecoded'];
-}
-
-function verifyAttestation(a: AttestationInput): VerifyResult {
-  // 1. Decode envelope.
-  let json: string;
-  try {
-    json = b64urlToBuf(a.envelope).toString('utf8');
-  } catch {
-    return { ok: false, reason: 'envelope_not_base64url' };
-  }
-  let decoded: StoredAttestation['envelopeDecoded'];
-  try {
-    decoded = JSON.parse(json);
-  } catch {
-    return { ok: false, reason: 'envelope_not_json' };
-  }
-  if (decoded.v !== 1) return { ok: false, reason: 'envelope_version' };
-  if (typeof decoded.purpose !== 'string' || decoded.purpose !== EXPECTED_PURPOSE) {
-    return { ok: false, reason: 'envelope_purpose_mismatch' };
-  }
-  const now = Math.floor(Date.now() / 1000);
-  if (now < decoded.iat - CLOCK_SKEW_SECONDS) {
-    return { ok: false, reason: 'envelope_not_yet_valid' };
-  }
-  if (now > decoded.exp + CLOCK_SKEW_SECONDS) {
-    return { ok: false, reason: 'envelope_expired' };
-  }
-
-  // 2. keyId is sha256(SPKI)[0..16] hex; check it matches both the envelope's
-  //    claimed keyId and the top-level attestation.keyId.
-  const pkBytes = Buffer.from(a.publicKey, 'base64');
-  const derivedKeyId = createHash('sha256').update(pkBytes).digest('hex').slice(0, 16);
-  if (derivedKeyId !== decoded.keyId || derivedKeyId !== a.keyId) {
-    return { ok: false, reason: 'keyId_mismatch' };
-  }
-
-  // 3. Verify signature over the raw envelope bytes (the base64url string itself).
-  let pubKey;
-  try {
-    pubKey = createPublicKey({ key: pkBytes, format: 'der', type: 'spki' });
-  } catch {
-    return { ok: false, reason: 'publicKey_not_spki' };
-  }
-  let sigBuf: Buffer;
-  try {
-    sigBuf = Buffer.from(a.signature, 'base64');
-  } catch {
-    return { ok: false, reason: 'signature_not_base64' };
-  }
-  let sigDer: Buffer;
-  try {
-    sigDer = p1363ToDer(sigBuf);
-  } catch (e) {
-    return { ok: false, reason: `signature_shape: ${(e as Error).message}` };
-  }
-  const verifier = createVerify('SHA256');
-  verifier.update(a.envelope, 'utf8');
-  const sigOk = verifier.verify(pubKey, sigDer);
-  if (!sigOk) return { ok: false, reason: 'signature_verify_failed' };
-
-  return { ok: true, decoded };
-}
-
-function validateAttestInput(body: Record<string, unknown>): AttestationInput | null {
-  const att = body.attestation as Record<string, unknown> | undefined;
-  if (!att) return null;
-  if (
-    typeof att.envelope !== 'string' ||
-    typeof att.signature !== 'string' ||
-    typeof att.publicKey !== 'string' ||
-    typeof att.keyId !== 'string'
-  )
-    return null;
-  return {
-    envelope: att.envelope,
-    signature: att.signature,
-    publicKey: att.publicKey,
-    keyId: att.keyId,
-  };
 }
 
 // ── Verdict pipeline ───────────────────────────────────────────────────────
