@@ -15,17 +15,31 @@ import { useEffect, useMemo, useState } from 'react';
  */
 export interface DialpadProps {
   nonce: string;
+  challengeIndex?: number;
+  actionLabel?: string;
   onSend(): void;
 }
 
-const CODE_LEN = 3;
+interface Challenge {
+  left: number;
+  right: number;
+  answer: string;
+}
 
-function codeFromNonce(nonce: string): string {
-  let hex = nonce.replace(/[^0-9a-f]/gi, '').slice(0, 14);
-  if (hex.length < 14) hex = hex.padEnd(14, '0');
-  const n = BigInt('0x' + hex);
-  const three = Number(n % 1000n);
-  return three.toString().padStart(CODE_LEN, '0');
+function hashChallenge(nonce: string, challengeIndex: number): number {
+  let h = 2166136261;
+  for (const ch of `${nonce}:${challengeIndex}`) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function challengeFromNonce(nonce: string, challengeIndex: number): Challenge {
+  const h = hashChallenge(nonce, challengeIndex);
+  const left = 2 + (h % 8);
+  const right = 2 + (Math.floor(h / 11) % 8);
+  return { left, right, answer: String(left * right) };
 }
 
 interface Key {
@@ -65,8 +79,12 @@ function BackspaceIcon({ className }: { className?: string }) {
   );
 }
 
-export function Dialpad({ nonce, onSend }: DialpadProps) {
-  const target = useMemo(() => codeFromNonce(nonce), [nonce]);
+export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'SEND', onSend }: DialpadProps) {
+  const challenge = useMemo(
+    () => challengeFromNonce(nonce, challengeIndex),
+    [nonce, challengeIndex]
+  );
+  const target = challenge.answer;
   const [entered, setEntered] = useState('');
   const [shake, setShake] = useState(false);
   const complete = entered === target;
@@ -117,18 +135,14 @@ export function Dialpad({ nonce, onSend }: DialpadProps) {
   return (
     <div className="dialer">
       <div className="dialer-screen">
-        <div className="dialer-prompt">Enter this code</div>
+        <div className="dialer-prompt">Solve this</div>
         <div className="dialer-display-row">
           <span className="dialer-display-spacer" aria-hidden />
           <div className={'dialer-display' + (shake ? ' dialer-shake' : '')}>
-            {Array.from(target, (d, i) => {
-              const state = i < entered.length ? 'on' : i === entered.length ? 'next' : 'pending';
-              return (
-                <span key={i} className={`dialer-digit dialer-digit-${state}`}>
-                  {d}
-                </span>
-              );
-            })}
+            <span className="dialer-equation">
+              {challenge.left} x {challenge.right} = {entered}
+              {!complete && <span className="dialer-caret" aria-hidden />}
+            </span>
           </div>
           <button
             type="button"
@@ -149,7 +163,10 @@ export function Dialpad({ nonce, onSend }: DialpadProps) {
           <button
             key={k.digit}
             type="button"
-            className="dialer-key"
+            className={
+              'dialer-key' +
+              (!complete && k.digit === target[entered.length] ? ' dialer-key-target' : '')
+            }
             onClick={() => press(k.digit)}
             aria-label={`Dial ${k.digit}`}
             disabled={complete}
@@ -166,7 +183,7 @@ export function Dialpad({ nonce, onSend }: DialpadProps) {
         onClick={onSend}
         className={'dialer-send' + (complete ? ' dialer-send-armed' : '')}
       >
-        SEND
+        {actionLabel}
       </button>
     </div>
   );

@@ -1,24 +1,26 @@
 /* eslint-disable no-undef */
 /**
- * Self-uninstalling service worker.
+ * Tiny app-shell service worker.
  *
- * The previous SW cached assets + HTML for fast returning-visit paints,
- * but a stale-bundle window on top of Safari + an in-flight argus scan
- * produced enough "why did this hang?" reports to retire the whole
- * mechanism. See main.tsx for the rationale.
+ * Scope is deliberately narrow:
+ * - cache same-origin static app assets for fast repeat phone paints
+ * - leave navigations network-only so HTML always points at the latest
+ *   hashed bundles
+ * - never intercept /api, mutation requests, or third-party SDK traffic
  *
- * This file exists solely so that browsers which still have the old
- * worker registered fetch a NEW worker (this one), activate it, and
- * watch it unregister itself + delete every cache it created.
- *
- * Keep this file in place for at least one HTML_TTL_MS window
- * (~24h after the previous SW shipped) and ideally indefinitely —
- * any client that hasn't visited in that window still has the old
- * SW until it fetches /sw.js again. Deleting this file would 404
- * the update probe and orphan those clients on the old code path.
+ * Do not add API routes here. The pair/auth ceremony must always see
+ * fresh network state.
  */
+const CACHE = 'pair-shell-v20260603-3';
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(self.skipWaiting());
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE);
+      await cache.addAll(['/favicon.svg']).catch(() => {});
+      await self.skipWaiting();
+    })()
+  );
 });
 
 self.addEventListener('activate', (event) => {
@@ -26,18 +28,47 @@ self.addEventListener('activate', (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(
-        keys.filter((k) => k.startsWith('pair-')).map((k) => caches.delete(k))
+        keys.filter((k) => k.startsWith('pair-') && k !== CACHE).map((k) => caches.delete(k))
       );
-      // Unregister, then leave the client alone. With no fetch handler
-      // on this worker, network requests already fall through to the
-      // browser starting NOW; the actual deregistration completes when
-      // there are no controlled clients left (i.e. on next navigation).
-      // We deliberately do NOT force a reload — the previous build's
-      // controllerchange-driven reload was the source of Safari's
-      // "page reloads after validate" misbehaviour.
-      await self.registration.unregister().catch(() => {});
+      await self.clients.claim();
     })()
   );
 });
 
-// No fetch handler. All requests fall through to the network.
+function isApiRequest(url) {
+  return url.origin === self.location.origin && url.pathname.startsWith('/api/');
+}
+
+function isStaticAsset(url) {
+  if (url.origin !== self.location.origin) return false;
+  return (
+    url.pathname.startsWith('/assets/') ||
+    url.pathname === '/favicon.svg' ||
+    url.pathname === '/manifest.webmanifest'
+  );
+}
+
+async function cacheFirst(request) {
+  const cache = await caches.open(CACHE);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  const response = await fetch(request);
+  if (response.ok) {
+    cache.put(request, response.clone()).catch(() => {});
+  }
+  return response;
+}
+
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+
+  const url = new URL(request.url);
+  if (isApiRequest(url)) return;
+  if (request.mode === 'navigate') return;
+
+  if (isStaticAsset(url)) {
+    event.respondWith(cacheFirst(request));
+  }
+});
