@@ -37,15 +37,7 @@
  *   5. ECDSA-P256-SHA-256 verify(signature, raw envelope bytes, publicKey)
  *   6. then app-level: payload.sessionId === session id, payload.nonce === nonce
  */
-import {
-  createHash,
-  createHmac,
-  createPublicKey,
-  createVerify,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
@@ -54,7 +46,6 @@ import {
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type {
   AuthenticationResponseJSON,
@@ -80,18 +71,27 @@ import {
   setRaffleHashValkey,
   type PhoneBundle,
 } from './session-store';
+import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
+import {
+  validateAttestInput,
+  verifyAttestation,
+  type AttestationInput,
+  type EnvelopeDecoded,
+} from './pair-api/attestation/envelope';
+import {
+  getTrustSecret,
+  mintDeviceTrust,
+  verifyDeviceTrust,
+  type DeviceTrustVerifyResult,
+} from './pair-api/attestation/trust';
 
 const TABLE = process.env.TABLE_NAME!;
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 
 const MERCHANT_API_URL = process.env.MERCHANT_API_URL || '';
 const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
 const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
-const CLOCK_SKEW_SECONDS = 30;
-const EXPECTED_PURPOSE = 'argus-pair-v1';
-const MAX_BODY_BYTES = 16 * 1024;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // Verdict thresholds (per spec). Individual = max(automation, device_tampering,
@@ -104,29 +104,6 @@ const TOTAL_SCORE_LIMIT = 50;
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
-
-// Device-trust token. Once a phone passes WebAuthn we mint an HMAC-signed
-// blob containing (pubkey, ip, exp). On the NEXT visit within the TTL,
-// from the same IP, the phone presents the token instead of running the
-// biometric ceremony again. Strict IP-pin: any drift forces fresh
-// WebAuthn. The HMAC secret lives in Secrets Manager so it survives
-// Lambda redeploys (otherwise every deploy would invalidate every token).
-const DEVICE_TRUST_SECRET_ARN = process.env.DEVICE_TRUST_SECRET_ARN || '';
-const DEVICE_TRUST_TTL_SECONDS = 12 * 3600;
-const sm = new SecretsManagerClient({});
-let cachedTrustSecret: string | null = null;
-async function getTrustSecret(): Promise<string | null> {
-  if (cachedTrustSecret) return cachedTrustSecret;
-  if (!DEVICE_TRUST_SECRET_ARN) return null;
-  try {
-    const r = await sm.send(new GetSecretValueCommand({ SecretId: DEVICE_TRUST_SECRET_ARN }));
-    cachedTrustSecret = r.SecretString || null;
-    return cachedTrustSecret;
-  } catch (e) {
-    console.warn(`[pair] getTrustSecret failed: ${(e as Error).message}`);
-    return null;
-  }
-}
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -500,24 +477,10 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
 
 type Verdict = 'pending' | 'paired' | 'failed';
 
-interface AttestationInput {
-  envelope: string;
-  signature: string;
-  publicKey: string;
-  keyId: string;
-}
-
 interface StoredAttestation extends AttestationInput {
   argusSessionId: string;
   receivedAt: number;
-  envelopeDecoded: {
-    v: number;
-    purpose: string;
-    payload: Record<string, unknown>;
-    iat: number;
-    exp: number;
-    keyId: string;
-  };
+  envelopeDecoded: EnvelopeDecoded;
 }
 
 interface SessionItem {
@@ -529,156 +492,6 @@ interface SessionItem {
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
   verdictReason?: string;
-}
-
-function jsonResp(statusCode: number, body: unknown) {
-  return {
-    statusCode,
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-    },
-    body: JSON.stringify(body),
-  };
-}
-
-function originAllowed(event: { headers?: Record<string, string | undefined> }): boolean {
-  if (ALLOWED_ORIGINS.length === 0) return true; // dev
-  const o = event.headers?.origin || event.headers?.Origin;
-  // Same-origin GET requests in some browsers (Chrome) omit the Origin
-  // header entirely. Rejecting on missing Origin would block legitimate
-  // polling from the SPA, and CloudFront would then rewrite the 403 to
-  // the SPA HTML (errorResponses[403] needed for client-side routing) —
-  // which the JSON parser blows up on. So: allow if Origin is absent
-  // (browser couldn't have set it for a cross-origin call), reject only
-  // when it's explicitly wrong. CORS preflight handles the rest.
-  if (!o) return true;
-  return ALLOWED_ORIGINS.includes(o);
-}
-
-function b64urlToBuf(s: string): Buffer {
-  const pad = '='.repeat((4 - (s.length % 4)) % 4);
-  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
-}
-
-function p1363ToDer(sig: Buffer): Buffer {
-  // ECDSA-P-256 IEEE-P1363 → DER. WebCrypto signs in P1363 (r||s, 64 bytes);
-  // Node's crypto.verify wants DER unless dsaEncoding: 'ieee-p1363' is set,
-  // but the option name needed Node 16+ and was buggy on some platforms.
-  // Convert explicitly to avoid surprises.
-  if (sig.length !== 64) throw new Error('signature: expected 64 bytes for P-256');
-  const r = sig.subarray(0, 32);
-  const s = sig.subarray(32, 64);
-  const rTrim = trimLeadZero(r);
-  const sTrim = trimLeadZero(s);
-  const rDer = Buffer.concat([Buffer.from([0x02, rTrim.length]), rTrim]);
-  const sDer = Buffer.concat([Buffer.from([0x02, sTrim.length]), sTrim]);
-  const seq = Buffer.concat([rDer, sDer]);
-  return Buffer.concat([Buffer.from([0x30, seq.length]), seq]);
-}
-
-function trimLeadZero(b: Buffer): Buffer {
-  let i = 0;
-  while (i < b.length - 1 && b[i] === 0) i++;
-  // If high bit set, prepend 0x00 (DER positive-integer convention).
-  if (b[i] & 0x80) return Buffer.concat([Buffer.from([0]), b.subarray(i)]);
-  return b.subarray(i);
-}
-
-interface VerifyResult {
-  ok: boolean;
-  reason?: string;
-  decoded?: StoredAttestation['envelopeDecoded'];
-}
-
-function verifyAttestation(a: AttestationInput): VerifyResult {
-  // 1. Decode envelope.
-  let json: string;
-  try {
-    json = b64urlToBuf(a.envelope).toString('utf8');
-  } catch {
-    return { ok: false, reason: 'envelope_not_base64url' };
-  }
-  let decoded: StoredAttestation['envelopeDecoded'];
-  try {
-    decoded = JSON.parse(json);
-  } catch {
-    return { ok: false, reason: 'envelope_not_json' };
-  }
-  if (decoded.v !== 1) return { ok: false, reason: 'envelope_version' };
-  if (typeof decoded.purpose !== 'string' || decoded.purpose !== EXPECTED_PURPOSE) {
-    return { ok: false, reason: 'envelope_purpose_mismatch' };
-  }
-  const now = Math.floor(Date.now() / 1000);
-  if (now < decoded.iat - CLOCK_SKEW_SECONDS) {
-    return { ok: false, reason: 'envelope_not_yet_valid' };
-  }
-  if (now > decoded.exp + CLOCK_SKEW_SECONDS) {
-    return { ok: false, reason: 'envelope_expired' };
-  }
-
-  // 2. keyId is sha256(SPKI)[0..16] hex; check it matches both the envelope's
-  //    claimed keyId and the top-level attestation.keyId.
-  const pkBytes = Buffer.from(a.publicKey, 'base64');
-  const derivedKeyId = createHash('sha256').update(pkBytes).digest('hex').slice(0, 16);
-  if (derivedKeyId !== decoded.keyId || derivedKeyId !== a.keyId) {
-    return { ok: false, reason: 'keyId_mismatch' };
-  }
-
-  // 3. Verify signature over the raw envelope bytes (the base64url string itself).
-  let pubKey;
-  try {
-    pubKey = createPublicKey({ key: pkBytes, format: 'der', type: 'spki' });
-  } catch {
-    return { ok: false, reason: 'publicKey_not_spki' };
-  }
-  let sigBuf: Buffer;
-  try {
-    sigBuf = Buffer.from(a.signature, 'base64');
-  } catch {
-    return { ok: false, reason: 'signature_not_base64' };
-  }
-  let sigDer: Buffer;
-  try {
-    sigDer = p1363ToDer(sigBuf);
-  } catch (e) {
-    return { ok: false, reason: `signature_shape: ${(e as Error).message}` };
-  }
-  const verifier = createVerify('SHA256');
-  verifier.update(a.envelope, 'utf8');
-  const sigOk = verifier.verify(pubKey, sigDer);
-  if (!sigOk) return { ok: false, reason: 'signature_verify_failed' };
-
-  return { ok: true, decoded };
-}
-
-function parseBody(raw: string | undefined): Record<string, unknown> | null {
-  if (!raw) return {};
-  if (raw.length > MAX_BODY_BYTES) return null;
-  try {
-    const v = JSON.parse(raw);
-    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-function validateAttestInput(body: Record<string, unknown>): AttestationInput | null {
-  const att = body.attestation as Record<string, unknown> | undefined;
-  if (!att) return null;
-  if (
-    typeof att.envelope !== 'string' ||
-    typeof att.signature !== 'string' ||
-    typeof att.publicKey !== 'string' ||
-    typeof att.keyId !== 'string'
-  )
-    return null;
-  return {
-    envelope: att.envelope,
-    signature: att.signature,
-    publicKey: att.publicKey,
-    keyId: att.keyId,
-  };
 }
 
 // ── Verdict pipeline ───────────────────────────────────────────────────────
@@ -961,77 +774,6 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
   };
 }
 
-// ── Device-trust token (silent re-auth after first WebAuthn) ──────────────
-
-interface DeviceTrustPayload {
-  v: 1;
-  pubkey: string; // SPKI base64, matches the SDK device key
-  keyId: string;
-  ip: string; // strict — any drift forces re-WebAuthn
-  iat: number;
-  exp: number;
-}
-
-function b64urlEncodeBytes(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function mintDeviceTrust(pubkey: string, keyId: string, ip: string): Promise<string | null> {
-  const secret = await getTrustSecret();
-  if (!secret || !ip) return null;
-  const iat = Math.floor(Date.now() / 1000);
-  const payload: DeviceTrustPayload = {
-    v: 1,
-    pubkey,
-    keyId,
-    ip,
-    iat,
-    exp: iat + DEVICE_TRUST_TTL_SECONDS,
-  };
-  const body = b64urlEncodeBytes(Buffer.from(JSON.stringify(payload), 'utf8'));
-  const mac = createHmac('sha256', secret).update(body).digest('base64url');
-  return `${body}.${mac}`;
-}
-
-interface DeviceTrustVerifyResult {
-  ok: boolean;
-  reason?: string;
-  payload?: DeviceTrustPayload;
-}
-
-async function verifyDeviceTrust(
-  token: string,
-  requesterIp: string,
-  expectedPubKey: string
-): Promise<DeviceTrustVerifyResult> {
-  if (typeof token !== 'string' || !token.includes('.')) {
-    return { ok: false, reason: 'malformed' };
-  }
-  const [body, mac] = token.split('.', 2);
-  if (!body || !mac) return { ok: false, reason: 'malformed' };
-  const secret = await getTrustSecret();
-  if (!secret) return { ok: false, reason: 'no_secret' };
-  const expected = createHmac('sha256', secret).update(body).digest('base64url');
-  const a = Buffer.from(mac);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
-    return { ok: false, reason: 'hmac' };
-  }
-  let payload: DeviceTrustPayload;
-  try {
-    payload = JSON.parse(b64urlToBuf(body).toString('utf8')) as DeviceTrustPayload;
-  } catch {
-    return { ok: false, reason: 'not_json' };
-  }
-  if (payload.v !== 1) return { ok: false, reason: 'version' };
-  const now = Math.floor(Date.now() / 1000);
-  if (now > payload.exp) return { ok: false, reason: 'expired' };
-  if (!requesterIp) return { ok: false, reason: 'no_requester_ip' };
-  if (payload.ip !== requesterIp) return { ok: false, reason: 'ip_changed' };
-  if (payload.pubkey !== expectedPubKey) return { ok: false, reason: 'pubkey_mismatch' };
-  return { ok: true, payload };
-}
-
 /**
  * Real client IP. CloudFront injects the CloudFront-Viewer-Address header
  * on the way to origin AND strips any client-supplied value with the same
@@ -1044,26 +786,6 @@ async function verifyDeviceTrust(
  * earlier version of this comment claimed). Either field is reliable for
  * device-trust IP-pinning; we prefer the header for explicitness.
  */
-function getViewerIp(event: {
-  headers?: Record<string, string | undefined>;
-  requestContext?: { http?: { sourceIp?: string }; identity?: { sourceIp?: string } };
-}): string {
-  const headers = event.headers || {};
-  const raw = headers['cloudfront-viewer-address'] || headers['CloudFront-Viewer-Address'] || '';
-  if (raw) {
-    // IPv6: "[2001:db8::1]:12345"
-    if (raw.startsWith('[')) {
-      const close = raw.indexOf(']');
-      if (close > 0) return raw.slice(1, close);
-    }
-    // IPv4: "1.2.3.4:54321"
-    const lastColon = raw.lastIndexOf(':');
-    if (lastColon > 0) return raw.slice(0, lastColon);
-    return raw;
-  }
-  return event.requestContext?.http?.sourceIp ?? event.requestContext?.identity?.sourceIp ?? '';
-}
-
 // ── WebAuthn proof-of-life verification ────────────────────────────────────
 
 interface WebAuthnAnnotations {
