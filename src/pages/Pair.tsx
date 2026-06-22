@@ -16,6 +16,7 @@ import { IconCheck, IconX, IconShield } from '../components/Icons';
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
+  | 'challenge'
   | 'dialpad'
   | 'returning'
   | 'pairing'
@@ -34,16 +35,27 @@ function isDebugMode(): boolean {
   return new URLSearchParams(window.location.search).get('debug') === 'true';
 }
 
+function nonceFromPairHash(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return params.get('n');
+}
+
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
-  const [phase, setPhase] = useState<Phase>('awaiting-desktop');
+  const initialNonce = nonceFromPairHash();
+  const [phase, setPhase] = useState<Phase>(initialNonce ? 'challenge' : 'awaiting-desktop');
   const [status, setStatus] = useState('');
   const [verdict, setVerdict] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hasTrust, setHasTrust] = useState(false);
-  const [nonce, setNonce] = useState<string | null>(null);
+  const [trustChecked, setTrustChecked] = useState(false);
+  const [nonce, setNonce] = useState<string | null>(initialNonce);
+  const [challengeIndex, setChallengeIndex] = useState(0);
+  const [desktopReady, setDesktopReady] = useState(false);
   const infoRef = useRef<PhoneSessionInfo | null>(null);
   const inflightRef = useRef(false);
+  const startedInChallengeRef = useRef(!!initialNonce);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -56,27 +68,25 @@ export function Pair() {
     }
     (async () => {
       try {
-        const [info, trustToken] = await Promise.all([
-          awaitDesktopReady(sessionId, ctl.signal),
-          loadTrustToken(),
-        ]);
+        let trustSettled = false;
+        const trustFallback = window.setTimeout(() => {
+          if (trustSettled || ctl.signal.aborted) return;
+          setTrustChecked(true);
+        }, 1500);
+        void loadTrustToken().then((trustToken) => {
+          trustSettled = true;
+          window.clearTimeout(trustFallback);
+          if (ctl.signal.aborted) return;
+          setHasTrust(!!trustToken);
+          setTrustChecked(true);
+        });
+
+        const info = await awaitDesktopReady(sessionId, ctl.signal);
         if (ctl.signal.aborted) return;
         infoRef.current = info;
         setNonce(info.nonce);
-        const remembered = !!trustToken;
-        setHasTrust(remembered);
-        // Remembered device → silent reauth, unless we're in debug mode
-        // (forced via desktop's ?debug=true → QR → here). Debug always
-        // lands on the buttons so the ceremony is visible.
-        if (remembered && !isDebugMode()) {
-          // Held-confirmation step: render the late-80s CRT dialpad and
-          // wait for the user to dial the displayed code + tap SEND.
-          // The argus scan is already running in the background (kicked
-          // off by awaitDesktopReady); when SEND fires we'll await the
-          // scan promise (typically already resolved) and POST. Net
-          // user-perceived latency = max(user-dial, server-work).
-          setPhase('dialpad');
-        } else {
+        setDesktopReady(true);
+        if (!startedInChallengeRef.current) {
           setPhase('ready');
         }
       } catch (e) {
@@ -199,17 +209,34 @@ export function Pair() {
     }
   }
 
+  function advanceChallenge() {
+    if (!desktopReady || !trustChecked || !infoRef.current) {
+      setChallengeIndex((i) => i + 1);
+      return;
+    }
+    if (hasTrust && !isDebugMode()) {
+      setPhase('returning');
+      void pair();
+      return;
+    }
+    setPhase('ready');
+  }
+
   // Full-bleed render for the dialpad phase — no Wordmark/pill chrome,
   // no constrained max-w-sm wrapper. The dialer takes the whole viewport
   // for the iPhone Phone-app silhouette to read correctly.
-  if (phase === 'dialpad' && nonce) {
+  const trustedDialpad =
+    desktopReady && trustChecked && hasTrust && !isDebugMode() && phase === 'ready';
+  if ((phase === 'challenge' || phase === 'dialpad' || trustedDialpad) && nonce) {
+    const readyToContinue = desktopReady && trustChecked;
+    const returning = readyToContinue && hasTrust && !isDebugMode();
     return (
       <Dialpad
+        key={`${nonce}:${challengeIndex}`}
         nonce={nonce}
-        onSend={() => {
-          setPhase('returning');
-          void pair();
-        }}
+        challengeIndex={challengeIndex}
+        actionLabel={readyToContinue ? (returning ? 'SEND' : 'CONTINUE') : 'NEXT'}
+        onSend={phase === 'dialpad' || trustedDialpad ? () => void pair() : advanceChallenge}
       />
     );
   }

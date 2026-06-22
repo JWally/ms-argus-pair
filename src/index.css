@@ -509,34 +509,37 @@
   text-shadow: 0 0 4px var(--accent-glow-soft);
 }
 
-/* Each digit of the target code is rendered as its own span so we can
-   light it up as the user dials. dialer-digit-on = already entered
-   (bright); dialer-digit-next = the digit they should tap next (medium,
-   cursor pulse); dialer-digit-pending = future digits (faint). */
-.dialer-digit {
+.dialer-equation {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  min-width: min(100%, 8.5em);
+  white-space: nowrap;
+}
+
+.dialer-caret {
   display: inline-block;
-  margin: 0 0.18em;
-  transition:
-    color 160ms ease-out,
-    text-shadow 160ms ease-out;
-}
-.dialer-digit-on {
-  color: var(--accent-bright);
-  text-shadow:
+  width: 0.08em;
+  height: 0.95em;
+  margin-left: 0.08em;
+  background: var(--accent-bright);
+  box-shadow:
     0 0 6px var(--accent-glow),
-    0 0 22px var(--accent-glow),
-    0 0 42px var(--accent-glow-soft);
+    0 0 14px var(--accent-glow-soft);
+  transform: translateY(0.08em);
+  animation: dialer-cursor 0.95s steps(2, end) infinite;
 }
-.dialer-digit-next {
-  color: var(--accent);
+
+.dialer-key-target {
+  background: rgba(168, 85, 247, 0.2);
   text-shadow:
     0 0 6px var(--accent-glow),
     0 0 14px var(--accent-glow-soft);
-  animation: dialer-cursor 0.95s steps(2, end) infinite;
-}
-.dialer-digit-pending {
-  color: var(--accent-faint);
-  text-shadow: 0 0 4px var(--accent-glow-soft);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 28px var(--accent-glow),
+    inset 0 0 14px var(--accent-faint);
+  animation: dialer-key-throb 1s ease-in-out infinite;
 }
 
 .dialer-shake {
@@ -573,6 +576,18 @@
   }
 }
 
+@keyframes dialer-key-throb {
+  0%,
+  100% {
+    transform: translateY(0);
+    filter: brightness(1);
+  }
+  50% {
+    transform: translateY(-1px);
+    filter: brightness(1.35);
+  }
+}
+
 .dialer-keypad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -603,21 +618,21 @@
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   box-shadow:
-    0 0 0 1px rgba(168, 85, 247, 0.18),
+    0 0 0 1px var(--accent-faint),
     0 0 16px var(--accent-glow-soft),
-    inset 0 0 10px rgba(168, 85, 247, 0.08);
+    inset 0 0 10px var(--accent-key-fill);
   transition:
     background 100ms ease-out,
     transform 60ms ease-out,
     box-shadow 120ms ease-out;
 }
 .dialer-key:active {
-  background: rgba(168, 85, 247, 0.22);
+  background: var(--accent-faint);
   transform: translateY(1px);
   box-shadow:
-    0 0 0 1px rgba(168, 85, 247, 0.4),
+    0 0 0 1px var(--accent-dim),
     0 0 24px var(--accent-glow),
-    inset 0 0 14px rgba(168, 85, 247, 0.2);
+    inset 0 0 14px var(--accent-faint);
 }
 
 .dialer-key-digit {
@@ -656,8 +671,8 @@
   display: block;
   width: 100%;
   border: 1.5px solid var(--accent-faint);
-  background: rgba(168, 85, 247, 0.04);
-  color: rgba(168, 85, 247, 0.32);
+  background: var(--accent-key-fill);
+  color: var(--accent-faint);
   font-family:
     'SF Pro Display',
     -apple-system,
@@ -684,13 +699,13 @@
 
 .dialer-send-armed {
   border-color: var(--accent);
-  background: linear-gradient(180deg, rgba(168, 85, 247, 0.28), rgba(168, 85, 247, 0.1));
+  background: linear-gradient(180deg, var(--accent-faint), var(--accent-key-fill));
   color: var(--accent-bright);
   text-shadow:
     0 0 6px var(--accent-glow),
     0 0 18px var(--accent-glow);
   box-shadow:
-    0 0 0 1px rgba(168, 85, 247, 0.5),
+    0 0 0 1px var(--accent-dim),
     0 0 28px var(--accent-glow);
   cursor: pointer;
   animation: dialer-send-pulse 1.5s ease-in-out infinite;
@@ -708,7 +723,7 @@
   height: 2.6rem;
   background: transparent;
   border: none;
-  color: rgba(168, 85, 247, 0.18);
+  color: var(--accent-faint);
   cursor: not-allowed;
   transition: color 180ms ease-out;
   -webkit-tap-highlight-color: transparent;
@@ -730,18 +745,21 @@
   0%,
   100% {
     box-shadow:
-      0 0 0 1px rgba(168, 85, 247, 0.5),
+      0 0 0 1px var(--accent-dim),
       0 0 28px var(--accent-glow);
   }
   50% {
     box-shadow:
-      0 0 0 1px rgba(168, 85, 247, 0.7),
+      0 0 0 1px var(--accent),
       0 0 42px var(--accent-glow);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .dialer-send-armed {
+    animation: none;
+  }
+  .dialer-key-target {
     animation: none;
   }
 }
