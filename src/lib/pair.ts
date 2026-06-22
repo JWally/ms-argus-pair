@@ -856,6 +856,25 @@ export async function submitPhoneAttestation(
       : { error: (webauthnSettled.reason as Error).message };
 
   events.onStatus?.('submitting');
+  // Credential id from this fresh registration, if any. We persist it as
+  // the USE-PASSKEY hint once the server confirms a paired verdict (see
+  // rememberPasskey). Captured BEFORE the request so both the normal
+  // response and the 409 already_attested fallback can record it: on
+  // mobile the winning request frequently lands on the fallback (double-
+  // tap / lost first response), and skipping the hint there was making
+  // every visit re-mint a brand-new passkey. We only track the create
+  // path — passkey-auth reuses an existing hint, OAuth manages none.
+  const createdCredentialId =
+    passkeyMode === 'passkey-create' &&
+    webauthnSettled.status === 'fulfilled' &&
+    webauthnSettled.value !== null &&
+    typeof webauthnSettled.value === 'object' &&
+    typeof (webauthnSettled.value as { id?: unknown }).id === 'string'
+      ? (webauthnSettled.value as { id: string }).id
+      : null;
+  const rememberPasskey = (verdict: string): void => {
+    if (verdict === 'paired' && createdCredentialId) writePasskeyHint(createdCredentialId);
+  };
   try {
     const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
       method: 'POST',
@@ -871,20 +890,8 @@ export async function submitPhoneAttestation(
       }),
     });
     if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-    // Server confirmed registration AND the pair succeeded. Now safe
-    // to remember the credentialId so future visits offer USE PASSKEY.
-    // We only do this on the passkey-create path — passkey-auth was
-    // using an existing hint already; OAuth doesn't manage one.
-    if (
-      r.verdict === 'paired' &&
-      passkeyMode === 'passkey-create' &&
-      webauthnSettled.status === 'fulfilled'
-    ) {
-      const wa = webauthnSettled.value;
-      if (wa && typeof wa === 'object' && typeof (wa as { id?: unknown }).id === 'string') {
-        writePasskeyHint((wa as { id: string }).id);
-      }
-    }
+    // Server confirmed registration AND the pair succeeded.
+    rememberPasskey(r.verdict);
     return r;
   } catch (e) {
     // Session is already paired (a prior request from this device succeeded
@@ -897,6 +904,9 @@ export async function submitPhoneAttestation(
       const fallback = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/result`, {
         method: 'GET',
       });
+      // This double-submit is exactly the case that used to drop the hint
+      // and force a re-mint next visit. Record it off the fallback verdict.
+      rememberPasskey(fallback.verdict);
       return fallback;
     }
     throw e;
