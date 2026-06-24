@@ -122,7 +122,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // argus projection. Per-row writes are independent of the SESSION#… rows.
 const ARGUS_SID_LEDGER_TTL_SECONDS = 24 * 3600;
 
-async function claimArgusSessionId(
+export async function claimArgusSessionId(
   argusSessionId: string,
   pairSessionId: string,
   role: 'desktop' | 'phone'
@@ -149,8 +149,24 @@ async function claimArgusSessionId(
     return { ok: true };
   } catch (err: unknown) {
     const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-    if (isConflict) return { ok: false, reason: 'already_claimed' };
-    throw err;
+    if (!isConflict) throw err;
+    // Idempotent re-claim: a single pair attempt can legitimately submit the
+    // same argusSessionId twice — the silent device-trust redeem claims it,
+    // fails its IP-pinned verify (mobile IP rotated) and 401s WITHOUT storing
+    // an attestation, then the client re-submits the SAME scan on the WebAuthn
+    // fallback. That second claim must NOT 409 the user. Only a DIFFERENT pair
+    // session reusing the id is the recycling attack the ledger defends.
+    // Mirrors the STUN nonce tracker's same-session re-claim acceptance.
+    const existing = await ddb.send(
+      new GetCommand({
+        TableName: TABLE,
+        Key: { PK: `ARGUSSID#${argusSessionId}`, SK: 'CLAIM' },
+      })
+    );
+    if (existing.Item?.claimedBy === pairSessionId && existing.Item?.role === role) {
+      return { ok: true };
+    }
+    return { ok: false, reason: 'already_claimed' };
   }
 }
 
@@ -166,6 +182,24 @@ async function claimArgusSessionId(
 // dating the field) is treated as STALE. Real argus scans backfill this
 // field; only ancient cached projections wouldn't have it.
 const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
+
+// ── proof-of-life requirement (toggle) ─────────────────────────────────────
+//
+// The design intent was `magic-token || webauthn`: a pair only succeeds if the
+// phone proved liveness via a passkey ceremony, an OAuth sign-in, or a redeemed
+// device-trust token. That guarantee is OPTIONAL by default here, because the
+// orphaned-passkey loop (server returns `credential_not_registered` for a
+// passkey the phone still holds) was hard-failing clean, Apple-attested phones
+// as `no_proof_of_life`. With it optional, a session pairs on the Argus
+// integrity scores alone (both sides clean, scores under the limits, neither on
+// a proxy); the passkey / Google buttons (and the "skip" path) still work and
+// still mint a device-trust token, they're just no longer mandatory.
+//
+// To restore the strict `magic-token || webauthn` bar, set
+// PAIR_REQUIRE_PROOF_OF_LIFE=true in the Lambda env (needs the two-place CDK
+// wiring from CLAUDE.md). SECURITY NOTE: optional weakens the anti-bot bar to
+// "clean scan on both sides."
+const REQUIRE_PROOF_OF_LIFE = process.env.PAIR_REQUIRE_PROOF_OF_LIFE === 'true';
 
 function projectionAgeSeconds(p: MerchantProjection | null): number | null {
   if (!p || typeof p.created_at !== 'number') return null;
@@ -1583,7 +1617,7 @@ const lambdaHandler = async (event: {
       const desktopAgeSec = projectionAgeSeconds(desktopProj);
       const phoneAgeSec = projectionAgeSeconds(phoneProj);
 
-      if (!proofOfLife) {
+      if (REQUIRE_PROOF_OF_LIFE && !proofOfLife) {
         verdict = 'failed';
         reason = 'no_proof_of_life';
         annotations = {
@@ -1625,7 +1659,7 @@ const lambdaHandler = async (event: {
         const computed = computeVerdict(desktopClass, phoneClass);
         verdict = computed.verdict;
         reason = computed.reason;
-        annotations = { ...computed.annotations, ...webauthnResult };
+        annotations = { ...computed.annotations, ...webauthnResult, proof_of_life: proofOfLife };
       }
 
       // Always log the verdict reason + the proof-of-life sub-error so

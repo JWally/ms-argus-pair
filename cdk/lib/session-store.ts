@@ -182,6 +182,22 @@ export async function claimArgusValkey(
     'NX'
   );
   if (r === 'OK') return { ok: true };
+  // Idempotent re-claim: the same pair session can legitimately re-submit the
+  // same argusSessionId (silent device-trust redeem claims it, 401s on its
+  // IP-pinned verify without storing, then the WebAuthn fallback re-submits
+  // the SAME scan). That retry must not 409. Only a DIFFERENT pair session
+  // reusing the id is the recycling attack the claim defends against.
+  const existingRaw = await valkey.get(claimKey(argusSid));
+  if (existingRaw) {
+    try {
+      const existing = JSON.parse(existingRaw) as { sessionId?: string; role?: string };
+      if (existing.sessionId === pairSessionId && existing.role === role) {
+        return { ok: true };
+      }
+    } catch {
+      /* unparseable existing claim — fall through to reject */
+    }
+  }
   return { ok: false, reason: 'already_claimed' };
 }
 
