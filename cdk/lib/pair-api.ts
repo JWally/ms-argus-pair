@@ -99,6 +99,15 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // scores.
 const INDIVIDUAL_SCORE_LIMIT = 30;
 const TOTAL_SCORE_LIMIT = 50;
+// #13: PAT is a strong Apple-device signal but FARMABLE (the upstream
+// /v1/pat-attestation challenge is unbound + not single-use). So PAT is no
+// longer an unconditional golden ticket. It EXTENDS the per-side score
+// tolerance from INDIVIDUAL_SCORE_LIMIT up to PAT_SCORE_FLOOR for an
+// attested side, but cannot whitewash hard automation/tampering evidence
+// (score >= floor), and no longer exempts the datacenter or total-score
+// checks. A genuine Apple device scores well under 30, so this never costs a
+// legit PAT user; it only denies a farmed PAT stapled onto a dirty device.
+const PAT_SCORE_FLOOR = 70;
 
 // WebAuthn RP identifier. Must match the rpId the phone passes to
 // startRegistration on the client (window.location.hostname).
@@ -772,8 +781,10 @@ interface VerdictResult {
  *     2. either side individual score >= 30
  *     3. sum of scores >= 50
  *     4. both sides classified as desktop/laptop
- *   Golden ticket: PAT on a side overrides score + DC checks for that side only.
- *   Soft rules: DC OK on desktop, NOT OK on phone (unless PAT).
+ *   PAT (#13): extends a side's score tolerance to PAT_SCORE_FLOOR — NOT an
+ *     unconditional override. It does not whitewash hard evidence (score >=
+ *     floor) and does not exempt the datacenter or total-score checks.
+ *   Soft rules: DC OK on desktop, NOT OK on phone.
  *   Allow-with-annotation: both sides classified as phone.
  *   VPN: no penalty either way (already absent from rules above).
  */
@@ -822,24 +833,31 @@ function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): Verdict
   if (desktop.isProxy) return { verdict: 'failed', reason: 'desktop_on_proxy', annotations };
   if (phone.isProxy) return { verdict: 'failed', reason: 'phone_on_proxy', annotations };
 
-  // PAT overrides individual score + DC checks for that side only.
-  const desktopScoreOk = desktop.patAttested || desktop.individualScore < INDIVIDUAL_SCORE_LIMIT;
-  const phoneScoreOk = phone.patAttested || phone.individualScore < INDIVIDUAL_SCORE_LIMIT;
-  if (!desktopScoreOk) {
+  // Score gate (#13). PAT extends tolerance to PAT_SCORE_FLOOR but cannot
+  // override hard evidence at/above the floor. A side passes if its score is
+  // under the normal limit, OR (PAT-attested AND under the higher floor).
+  const scoreOk = (s: ClassifiedScan) =>
+    s.individualScore < INDIVIDUAL_SCORE_LIMIT ||
+    (s.patAttested && s.individualScore < PAT_SCORE_FLOOR);
+  if (!scoreOk(desktop)) {
     return { verdict: 'failed', reason: 'desktop_score_high', annotations };
   }
-  if (!phoneScoreOk) {
+  if (!scoreOk(phone)) {
     return { verdict: 'failed', reason: 'phone_score_high', annotations };
   }
 
+  // Total score — always enforced (#13). PAT no longer grants a both-sides
+  // exemption: two farmed PATs must not stack borderline scores past the cap.
+  // Two genuine Apple devices score far below this, so legit pairs are safe.
   const totalScore = desktop.individualScore + phone.individualScore;
-  // PAT on both sides: skip total check (both already golden-ticketed).
-  if (!(desktop.patAttested && phone.patAttested) && totalScore >= TOTAL_SCORE_LIMIT) {
+  if (totalScore >= TOTAL_SCORE_LIMIT) {
     return { verdict: 'failed', reason: 'total_score_high', annotations };
   }
 
-  // Phone-on-datacenter — not OK unless PAT covered.
-  if (phone.isDatacenter && !phone.patAttested) {
+  // Phone-on-datacenter — hard deny (#13). PAT no longer exempts: a genuine
+  // Apple device is never on a datacenter IP, so PAT + datacenter egress
+  // means a farmed/relayed token. (Proxy is already an unconditional deny.)
+  if (phone.isDatacenter) {
     return { verdict: 'failed', reason: 'phone_on_datacenter', annotations };
   }
 
