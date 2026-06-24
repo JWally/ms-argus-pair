@@ -579,6 +579,9 @@ export async function awaitDesktopReady(
 const PASSKEY_HINT_KEY = 'argus-pair:passkey-registered';
 const PASSKEY_CRED_ID_KEY = 'argus-pair:passkey-credential-id';
 
+/** @public — passkey-hint UI helper, dormant while passkeys are off the
+ *  mobile UX (Pair.tsx no longer renders passkey buttons). Kept for if/when
+ *  passkeys are reinstated. */
 export function hasPasskeyHint(): boolean {
   try {
     return window.localStorage.getItem(PASSKEY_HINT_KEY) === '1';
@@ -593,6 +596,8 @@ export function hasPasskeyHint(): boolean {
  * server reports the stored credential isn't recognized server-side
  * (the classic stuck-hint failure mode after a registration-time
  * rpId mismatch).
+ *
+ * @public — dormant while passkeys are off the mobile UX; kept for reinstating.
  */
 export function clearPasskeyHint(): void {
   writePasskeyHint(null);
@@ -740,7 +745,7 @@ export interface SubmitPhoneAttestationOptions {
    * Server-side verification handles all three identically as
    * proof-of-life signals.
    */
-  mode?: 'passkey-create' | 'passkey-auth' | 'oauth';
+  mode?: 'passkey-create' | 'passkey-auth' | 'oauth' | 'none';
   /** When `mode === "oauth"`, the result from one of the
    *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
@@ -822,17 +827,23 @@ export async function submitPhoneAttestation(
   // (caller's responsibility), THEN we do the Argus scan.
   events.onStatus?.('proof of life + integrity scan');
   const useOAuth = options.mode === 'oauth';
+  // Proof-of-life is optional server-side (see PAIR_REQUIRE_PROOF_OF_LIFE).
+  // `mode: 'none'` runs no passkey/OAuth ceremony — the pair succeeds on the
+  // Argus scores alone. The server records proof_of_life:false either way.
+  const skipProof = options.mode === 'none';
   // Default to register if the caller didn't pick — first-time visitors
   // hitting older code paths get the cleaner CREATE flow rather than
   // the iOS "no passkeys for this site" dialog.
   const passkeyMode: 'passkey-create' | 'passkey-auth' =
     options.mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
 
-  const webauthnPromise: Promise<unknown | { error: string }> = useOAuth
-    ? Promise.resolve({ error: 'mode_oauth_skipped' })
-    : passkeyMode === 'passkey-auth'
-      ? authenticateExistingPasskey(info.nonce)
-      : createNewPasskey(info.nonce);
+  const webauthnPromise: Promise<unknown | { error: string }> = skipProof
+    ? Promise.resolve({ error: 'proof_skipped' })
+    : useOAuth
+      ? Promise.resolve({ error: 'mode_oauth_skipped' })
+      : passkeyMode === 'passkey-auth'
+        ? authenticateExistingPasskey(info.nonce)
+        : createNewPasskey(info.nonce);
 
   // Argus scan was kicked off in awaitDesktopReady (at WS-connect time),
   // running in parallel with the desktop scan + the desktop-ready wait.
