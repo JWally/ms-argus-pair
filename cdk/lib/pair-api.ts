@@ -60,7 +60,7 @@ import {
   type OAuthProvider,
   type OAuthVerifyResult,
 } from './oauth-providers';
-import { mintBootstrapToken, openEnvelope, postToPeer } from './ws-handler';
+import { mintBootstrapToken, openEnvelope, postToPeer, verifyBootstrapToken } from './ws-handler';
 import {
   isValkeySessionsEnabled,
   mgetSession,
@@ -507,6 +507,53 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
     }
   }
   return { ok: true, siteHash };
+}
+
+// ── #10: throttle POST /session/start ──────────────────────────────────
+// Session creation was unbounded — 20 concurrent → 20×200 (verified live
+// 2026-06-24), enabling attempt-volume / resource abuse. Cap per source IP
+// per fixed window. Generous enough for a shared NAT / enthusiastic tester,
+// tight enough to deny a single-IP farm. Hardcoded (like RAFFLE_BUCKET_MAX)
+// to avoid CDK env plumbing.
+const SESSION_START_RL_MAX = 20; // allow this many starts …
+const SESSION_START_RL_WINDOW_SEC = 60; // … per IP per this window
+/**
+ * Returns true if a new session-start from `ip` is allowed. Single fixed
+ * window bucket. Note: we pass `max + 1` to the Valkey rlIncr cap and allow
+ * `<= max` — the Lua caps the counter AT the cap and the raffle path's
+ * strict `> cap` check never trips at the boundary; `max + 1` makes the
+ * Valkey semantics match the DDB `ct < max` path (both allow exactly `max`).
+ */
+async function checkSessionStartRateLimit(ip: string): Promise<boolean> {
+  const max = SESSION_START_RL_MAX;
+  const windowSec = SESSION_START_RL_WINDOW_SEC;
+  const win = Math.floor(Date.now() / (windowSec * 1000));
+  const bucket = createHash('sha256')
+    .update(`ss:${ip || 'unknown'}`)
+    .digest('hex')
+    .slice(0, 32);
+  if (isValkeyRateLimitsEnabled()) {
+    const { getValkey } = await import('./valkey-client');
+    const count = await getValkey().rlIncr(`pair:rl:${bucket}:${win}`, max + 1, windowSec + 60);
+    return Number(count ?? 0) <= max;
+  }
+  // DDB fallback: ADD ct while ct < max (allows exactly `max`, then trips).
+  const ttl = Math.floor(Date.now() / 1000) + windowSec + 60;
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { PK: `RL#${bucket}#${win}`, SK: 'CT' },
+        UpdateExpression: 'ADD ct :one SET expiresAt = if_not_exists(expiresAt, :ttl)',
+        ConditionExpression: 'attribute_not_exists(ct) OR ct < :max',
+        ExpressionAttributeValues: { ':one': 1, ':max': max, ':ttl': ttl },
+      })
+    );
+    return true;
+  } catch (e) {
+    if ((e as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw e;
+  }
 }
 
 type Verdict = 'pending' | 'paired' | 'failed';
@@ -1293,6 +1340,18 @@ const lambdaHandler = async (event: {
       return jsonResp(200, result);
     }
     case 'POST /api/session/start': {
+      // #10: per-IP throttle. Fail OPEN on limiter error — a Valkey/DDB hiccup
+      // must not take down all pairing; the cap is abuse-bounding, not a
+      // security boundary on its own.
+      let startAllowed = true;
+      try {
+        startAllowed = await checkSessionStartRateLimit(getViewerIp(event));
+      } catch (e) {
+        console.warn(`[pair] session-start rate-limit check failed open: ${(e as Error).message}`);
+      }
+      if (!startAllowed) {
+        return jsonResp(429, { error: 'rate_limited', scope: 'session_start' });
+      }
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
@@ -1851,6 +1910,23 @@ const lambdaHandler = async (event: {
     }
 
     case 'GET /api/session/{id}/result': {
+      // #10: authenticate. The verdict (and its annotations) used to be
+      // readable by anyone who knew the sessionId. Require a valid bootstrap
+      // token for THIS session — either role, since both the desktop and the
+      // phone are legitimate session participants. The token is the same HMAC
+      // wsToken minted at /session/start (desktop holds desktopToken; the
+      // phone holds phoneToken from the QR hash). 5-min TTL matches the
+      // session TTL, so it covers the whole polling window.
+      const resultToken =
+        event.queryStringParameters?.t ||
+        (event.headers?.authorization || event.headers?.Authorization || '').replace(
+          /^Bearer\s+/i,
+          ''
+        );
+      const resultClaims = resultToken ? await verifyBootstrapToken(resultToken) : null;
+      if (!resultClaims || resultClaims.sessionId !== sessionId) {
+        return jsonResp(401, { error: 'result_unauthorized' });
+      }
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(200, { verdict: 'failed', reason: 'expired_or_missing' });
       // 204 No Content while still pending — saves polling clients a few

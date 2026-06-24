@@ -424,6 +424,12 @@ export interface PhoneSessionInfo {
    * poll /result.
    */
   desktopEnvelope: string;
+  /**
+   * The phone's WS bootstrap token (from the QR hash). Used to authenticate
+   * the GET /result fallback (#10) — /result now requires a valid session
+   * token for either role.
+   */
+  phoneToken: string;
   /** Live WS connection the phone opened to receive `desktop-ready`. */
   conn: WsConnection;
   /**
@@ -540,6 +546,7 @@ export async function awaitDesktopReady(
       desktopArgusSessionId: data.desktopArgusSessionId,
       desktopKeyId: data.desktopKeyId,
       desktopEnvelope,
+      phoneToken,
       conn,
       scanPromise,
     };
@@ -912,9 +919,10 @@ export async function submitPhoneAttestation(
     // touch events on mobile make the phone show "Something went wrong"
     // even though the desktop sees the pairing succeed.
     if (e instanceof HttpError && e.status === 409 && e.bodyJson?.error === 'already_attested') {
-      const fallback = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/result`, {
-        method: 'GET',
-      });
+      const fallback = await jsonFetch<AttestResponse>(
+        `${API}/session/${sessionId}/result?t=${encodeURIComponent(info.phoneToken)}`,
+        { method: 'GET' }
+      );
       // This double-submit is exactly the case that used to drop the hint
       // and force a re-mint next visit. Record it off the fallback verdict.
       rememberPasskey(fallback.verdict);
