@@ -124,7 +124,7 @@ export async function mintBootstrapToken(
   return `${body}.${mac}`;
 }
 
-async function verifyBootstrapToken(token: string): Promise<BootstrapClaims | null> {
+export async function verifyBootstrapToken(token: string): Promise<BootstrapClaims | null> {
   if (typeof token !== 'string' || !token.includes('.')) return null;
   const [body, mac] = token.split('.', 2);
   if (!body || !mac) return null;
