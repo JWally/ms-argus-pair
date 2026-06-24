@@ -1341,16 +1341,19 @@ const lambdaHandler = async (event: {
     case 'GET /api/session/{id}/info': {
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(200, { expired: true });
+      // SECURITY (#8): this endpoint is UNAUTHENTICATED — anyone who knows
+      // the sessionId can call it. It MUST NOT leak the pairing secrets.
+      // `nonce`, `desktopArgusSessionId`, and `desktopKeyId` used to be
+      // returned here; that let a relay/farm pair against a desktop session
+      // knowing only its sessionId (verified live 2026-06-24). They are now
+      // delivered ONLY over the authenticated WebSocket `desktop-ready`
+      // message (gated by the phoneToken in the QR fragment) and via the QR
+      // hash — see src/lib/pair.ts awaitDesktopReady(). No legitimate client
+      // reads them from /info. Keep this response free of binding material.
       return jsonResp(200, {
-        nonce: s.nonce,
         expiresAt: s.expiresAt,
         desktopReady: !!s.desktopAttestation,
         verdict: s.verdict,
-        // Phone needs these to bind its signed envelope to the specific
-        // desktop scan it's pairing with. Both are server-anchored — the
-        // phone signs over them but doesn't get to pick the values.
-        desktopArgusSessionId: s.desktopAttestation?.argusSessionId,
-        desktopKeyId: s.desktopAttestation?.keyId,
       });
     }
 
@@ -1515,18 +1518,36 @@ const lambdaHandler = async (event: {
       if (payload.role !== 'phone') {
         return jsonResp(400, { error: 'payload_role_mismatch' });
       }
-      // Phone bound itself to the host's argusSessionId — verify it matches
-      // what the desktop actually submitted. Stops a third party from
-      // joining a session they've snooped the QR for *and* swapping their
-      // own desktop scan in.
+      // SECURITY (#8) — cross-sign / authenticate the desktop binding.
       //
-      // These fields used to live inside the phone's signed envelope, but
-      // moving them to top-level POST body lets the phone scan start as
-      // soon as it has nonce (from QR hash) instead of waiting for the
-      // desktop-ready WS message to arrive. Security is preserved because
-      // the phone learns these values from the legitimate desktop's
-      // desktop-ready peer message, which the WS handler routes by role,
-      // and the values are then validated against storage server-side.
+      // The binding used to be trusted from `body.desktopArgusSessionId` /
+      // `body.desktopKeyId` (plaintext), whose values were ALSO handed out by
+      // the unauthenticated GET /info — so anyone with the sessionId could
+      // satisfy this check and pair against a desktop session they never
+      // co-operated (relay / farm pool-decoupling, verified live 2026-06-24).
+      //
+      // We now require the phone to present the server-sealed `desktopEnvelope`
+      // — the AES-256-GCM identity the WS handler minted for the desktop's
+      // authenticated connection. The phone obtains it ONLY over the
+      // authenticated WebSocket `desktop-ready` relay, which is gated by the
+      // phoneToken carried in the QR-hash fragment. It is unforgeable
+      // (auth-tag) and bound to {sessionId, role}. There is exactly one
+      // desktop per session, so an authentic role:'desktop' envelope for THIS
+      // session uniquely proves the phone went through the legitimate paired
+      // channel. /info no longer leaks any of this material.
+      const desktopEnv =
+        typeof body.desktopEnvelope === 'string' && body.desktopEnvelope.length > 0
+          ? await openEnvelope(body.desktopEnvelope)
+          : null;
+      if (!desktopEnv || desktopEnv.sessionId !== sessionId || desktopEnv.role !== 'desktop') {
+        return jsonResp(400, { error: 'desktop_binding_unauthenticated' });
+      }
+
+      // Defense-in-depth: the phone-presented binding values (sourced from the
+      // authenticated WS desktop-ready message client-side) must still match
+      // what the desktop actually stored server-side. These are no longer the
+      // authenticity boundary (the sealed envelope above is) — they catch a
+      // mis-bound or stale phone client.
       const desktopArgusSessionIdInput = body.desktopArgusSessionId as string | undefined;
       const desktopKeyIdInput = body.desktopKeyId as string | undefined;
       if (
@@ -1795,50 +1816,35 @@ const lambdaHandler = async (event: {
       // PostToConnection the verdict straight into the desktop's open
       // socket. Replaces the desktop's /result polling on the happy
       // path; fire-and-forget — push failure does not fail the response.
-      const desktopEnvelopeRaw = body.desktopEnvelope;
-      console.log(
-        `[pair] verdict-push: desktopEnvelope present=${typeof desktopEnvelopeRaw === 'string'} len=${typeof desktopEnvelopeRaw === 'string' ? desktopEnvelopeRaw.length : 0}`
-      );
-      if (typeof desktopEnvelopeRaw === 'string' && desktopEnvelopeRaw.length > 0) {
-        const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
-        if (!mgmtEndpoint) {
-          console.warn('[pair] WS_MGMT_ENDPOINT not configured; skipping verdict push');
+      // Reuse the desktopEnv we already authenticated above (#8) — same sealed
+      // envelope, already verified session/role-bound, so no need to re-open.
+      const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
+      if (!mgmtEndpoint) {
+        console.warn('[pair] WS_MGMT_ENDPOINT not configured; skipping verdict push');
+      } else {
+        console.log(
+          `[pair] verdict-push: posting to cid=${desktopEnv.connectionId} verdict=${verdict}`
+        );
+        // Wrap in the same shape the WS handler uses for relayed peer
+        // messages — `action:'message'` + `data:{kind,...}` — so the
+        // desktop's persistent fanout in src/lib/ws.ts dispatches it
+        // through onMessage exactly like phone-here / desktop-ready.
+        // Without `action:'message'` the fanout silently drops it.
+        const push = await postToPeer(mgmtEndpoint, desktopEnv.connectionId, {
+          action: 'message',
+          from: 'server',
+          sessionId,
+          data: {
+            kind: 'verdict',
+            verdict,
+            reason,
+            annotations,
+          },
+        });
+        if (push.ok) {
+          console.log(`[pair] verdict-push: ok cid=${desktopEnv.connectionId}`);
         } else {
-          const env = await openEnvelope(desktopEnvelopeRaw);
-          if (!env) {
-            console.warn('[pair] desktopEnvelope failed to open; skipping verdict push');
-          } else if (env.sessionId !== sessionId) {
-            console.warn(
-              `[pair] desktopEnvelope sessionId mismatch (env=${env.sessionId} path=${sessionId}); skipping verdict push`
-            );
-          } else if (env.role !== 'desktop') {
-            console.warn(`[pair] desktopEnvelope role=${env.role} (need desktop); skipping push`);
-          } else {
-            console.log(
-              `[pair] verdict-push: posting to cid=${env.connectionId} verdict=${verdict}`
-            );
-            // Wrap in the same shape the WS handler uses for relayed peer
-            // messages — `action:'message'` + `data:{kind,...}` — so the
-            // desktop's persistent fanout in src/lib/ws.ts dispatches it
-            // through onMessage exactly like phone-here / desktop-ready.
-            // Without `action:'message'` the fanout silently drops it.
-            const push = await postToPeer(mgmtEndpoint, env.connectionId, {
-              action: 'message',
-              from: 'server',
-              sessionId,
-              data: {
-                kind: 'verdict',
-                verdict,
-                reason,
-                annotations,
-              },
-            });
-            if (push.ok) {
-              console.log(`[pair] verdict-push: ok cid=${env.connectionId}`);
-            } else {
-              console.warn(`[pair] verdict-push failed: ${push.reason}`);
-            }
-          }
+          console.warn(`[pair] verdict-push failed: ${push.reason}`);
         }
       }
       return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
