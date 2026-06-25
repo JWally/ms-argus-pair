@@ -19,7 +19,7 @@ pre-push:
       # not a real deploy. The actual deploy script (`npm run deploy`)
       # sets VITE_PAIR_URL_BASE explicitly so the guard fires only when
       # someone runs cdk deploy directly without sourcing env.
-      run: PAIR_ALLOW_ORIGIN_FALLBACK=1 npm run build
+      run: PAIR_ALLOW_ORIGIN_FALLBACK=1 npm run build && npm run test:hygiene
     dead-code:
       # knip — unused exports / files / dependencies. Ratchet baseline
       # as of branch chore/add-quality-gates: clean. Any new unused
