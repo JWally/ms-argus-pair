@@ -10,7 +10,12 @@
          .getDevicePublicKey() used by the dual-scan co-attestation flow.
          `defer`: the SDK isn't touched until the user taps the button, so it
          doesn't need to block the parser. -->
-    <script defer src="https://static-integrity-dev-jw.argus.pw/argus-loader.iife.js"></script>
+    <script
+      defer
+      src="https://static-integrity-dev-jw.argus.pw/argus-loader.iife.js"
+      integrity="sha384-VKxVHmIwosBtt5REYfZdhegPvhwaYTWfCzcHz0xP6CbHDMvdWQbB0XOSxrkpd4hJ"
+      crossorigin="anonymous"
+    ></script>
     <style>
       /* Splash spinner keyframes — defined in <head> so they survive
          React's `createRoot.render()` clobber of #root. If this lived
