@@ -123,10 +123,8 @@ export function Pair() {
     return () => window.clearTimeout(timer);
   }, [phase]);
 
-  // Proof-of-life (passkey / Google) is intentionally NOT part of the mobile
-  // UX. We always pair via the device-verify path (`mode: 'none'`); the silent
-  // device-trust redeem still runs first inside submitPhoneAttestation for
-  // returning devices.
+  // Returning devices still try silent device-trust redeem first inside
+  // submitPhoneAttestation. Fresh devices run the default passkey proof.
   async function pair() {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     inflightRef.current = true;
@@ -134,12 +132,9 @@ export function Pair() {
     setStatus('starting');
     setErrorMsg(null);
     try {
-      const r = await submitPhoneAttestation(
-        sessionId,
-        infoRef.current,
-        { onStatus: setStatus },
-        { mode: 'none' }
-      );
+      const r = await submitPhoneAttestation(sessionId, infoRef.current, {
+        onStatus: setStatus,
+      });
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {

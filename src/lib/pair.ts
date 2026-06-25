@@ -752,7 +752,7 @@ export interface SubmitPhoneAttestationOptions {
    * Server-side verification handles all three identically as
    * proof-of-life signals.
    */
-  mode?: 'passkey-create' | 'passkey-auth' | 'oauth' | 'none';
+  mode?: 'passkey-create' | 'passkey-auth' | 'oauth';
   /** When `mode === "oauth"`, the result from one of the
    *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
@@ -834,23 +834,17 @@ export async function submitPhoneAttestation(
   // (caller's responsibility), THEN we do the Argus scan.
   events.onStatus?.('proof of life + integrity scan');
   const useOAuth = options.mode === 'oauth';
-  // Proof-of-life is optional server-side (see PAIR_REQUIRE_PROOF_OF_LIFE).
-  // `mode: 'none'` runs no passkey/OAuth ceremony — the pair succeeds on the
-  // Argus scores alone. The server records proof_of_life:false either way.
-  const skipProof = options.mode === 'none';
   // Default to register if the caller didn't pick — first-time visitors
   // hitting older code paths get the cleaner CREATE flow rather than
   // the iOS "no passkeys for this site" dialog.
   const passkeyMode: 'passkey-create' | 'passkey-auth' =
     options.mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
 
-  const webauthnPromise: Promise<unknown | { error: string }> = skipProof
-    ? Promise.resolve({ error: 'proof_skipped' })
-    : useOAuth
-      ? Promise.resolve({ error: 'mode_oauth_skipped' })
-      : passkeyMode === 'passkey-auth'
-        ? authenticateExistingPasskey(info.nonce)
-        : createNewPasskey(info.nonce);
+  const webauthnPromise: Promise<unknown | { error: string }> = useOAuth
+    ? Promise.resolve({ error: 'mode_oauth_skipped' })
+    : passkeyMode === 'passkey-auth'
+      ? authenticateExistingPasskey(info.nonce)
+      : createNewPasskey(info.nonce);
 
   // Argus scan was kicked off in awaitDesktopReady (at WS-connect time),
   // running in parallel with the desktop scan + the desktop-ready wait.
