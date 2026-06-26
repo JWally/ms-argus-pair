@@ -617,6 +617,8 @@ interface HostedSessionItem {
   hostedAttestation?: StoredAttestation;
   callbackCode?: string;
   callbackUrl?: string;
+  raffleHash?: string;
+  raffleEnteredAt?: number;
   annotations?: Record<string, unknown>;
 }
 
@@ -632,6 +634,8 @@ interface HostedCodeItem {
   annotations?: Record<string, unknown>;
   expiresAt: number;
   redeemedAt?: number;
+  raffleHash?: string;
+  raffleEnteredAt?: number;
 }
 
 // ── Verdict pipeline ───────────────────────────────────────────────────────
@@ -1426,6 +1430,7 @@ const lambdaHandler = async (event: {
     'POST /api/session/start',
     'POST /api/hosted/start',
     'POST /api/hosted/redeem',
+    'POST /api/hosted/entry',
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
@@ -1603,6 +1608,8 @@ const lambdaHandler = async (event: {
       const att = validateAttestInput(body);
       const webauthnInput = body.webauthn;
       const oauthInput = body.oauth;
+      const deviceTrustToken =
+        typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
       if (!argusSessionId || !att) {
         return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
       }
@@ -1624,6 +1631,17 @@ const lambdaHandler = async (event: {
       if (payload.role !== 'hosted') {
         return jsonResp(400, { error: 'payload_role_mismatch' });
       }
+      const requesterIp = getViewerIp(event);
+      let trustResult: DeviceTrustVerifyResult | null = null;
+      if (deviceTrustToken) {
+        trustResult = await verifyDeviceTrust(deviceTrustToken, requesterIp, att.publicKey);
+        if (!trustResult.ok) {
+          return jsonResp(401, {
+            error: 'device_trust_invalid',
+            reason: trustResult.reason,
+          });
+        }
+      }
       const claim = await claimArgusSessionId(argusSessionId, sessionId!, 'hosted');
       if (!claim.ok) {
         return jsonResp(409, { error: 'argus_session_already_claimed', reason: claim.reason });
@@ -1635,9 +1653,15 @@ const lambdaHandler = async (event: {
         envelopeDecoded: v.decoded,
       });
 
-      const proofPath = oauthInput
-        ? verifyOAuthProofOfLife(oauthInput, s.nonce)
-        : verifyWebAuthn(webauthnInput, s.nonce, att.publicKey);
+      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = trustResult?.ok
+        ? Promise.resolve<WebAuthnAnnotations>({
+            phone_webauthn_attested: true,
+            phone_webauthn_user_verified: true,
+            phone_webauthn_format: 'device_trust_redeem',
+          } as WebAuthnAnnotations)
+        : oauthInput
+          ? verifyOAuthProofOfLife(oauthInput, s.nonce)
+          : verifyWebAuthn(webauthnInput, s.nonce, att.publicKey);
       const [merchantProj, hostedProj, proof] = await Promise.all([
         fetchProjection(s.merchantAttestation.argusSessionId),
         fetchProjection(argusSessionId),
@@ -1659,6 +1683,9 @@ const lambdaHandler = async (event: {
         hosted_continuity_pending: true,
         ...proof,
       };
+      if (trustResult?.ok) {
+        annotations.phone_device_trust_redeemed = true;
+      }
       if (!proofOfLife) {
         reason = 'no_proof_of_life';
       } else if (!merchantClass || !hostedClass) {
@@ -1676,8 +1703,16 @@ const lambdaHandler = async (event: {
         verdict = 'passed';
         reason = 'hosted_mobile_verified';
       }
+      let nextDeviceTrust: string | null = null;
+      if (
+        verdict === 'passed' &&
+        !trustResult?.ok &&
+        (proof as WebAuthnAnnotations).phone_webauthn_attested
+      ) {
+        nextDeviceTrust = await mintDeviceTrust(att.publicKey, att.keyId, requesterIp);
+      }
       const { code, callbackUrl } = await mintHostedCallbackCode(s, verdict, reason, annotations);
-      return jsonResp(200, { verdict, reason, code, callbackUrl, annotations });
+      return jsonResp(200, { verdict, reason, code, callbackUrl, annotations, nextDeviceTrust });
     }
 
     case 'POST /api/hosted/redeem': {
@@ -1696,6 +1731,109 @@ const lambdaHandler = async (event: {
         merchantSessionId: redeemed.merchantSessionId,
         annotations: redeemed.annotations ?? {},
       });
+    }
+
+    case 'POST /api/hosted/entry': {
+      const code = typeof body.code === 'string' ? body.code.trim() : '';
+      const merchantId = typeof body.merchantId === 'string' ? body.merchantId.trim() : '';
+      const handle = normalizeHandle(body.handle);
+      if (!code || !merchantId) {
+        return jsonResp(400, { error: 'missing_hosted_entry_fields' });
+      }
+      if (!handle) {
+        return jsonResp(400, {
+          error: 'invalid_handle',
+          allowed: '3-64 chars, [a-z0-9._@-]',
+        });
+      }
+      const codeRow = await ddb.send(
+        new GetCommand({ TableName: TABLE, Key: { PK: `HOSTED_CODE#${code}`, SK: 'META' } })
+      );
+      const entryCode = codeRow.Item as HostedCodeItem | undefined;
+      const now = Math.floor(Date.now() / 1000);
+      if (!entryCode || entryCode.merchantId !== merchantId || entryCode.expiresAt <= now) {
+        return jsonResp(404, { error: 'code_not_found_or_expired' });
+      }
+      if (entryCode.verdict !== 'passed') {
+        return jsonResp(409, { error: 'hosted_not_verified', verdict: entryCode.verdict });
+      }
+      if (entryCode.raffleHash) {
+        return jsonResp(409, {
+          error: 'session_already_entered',
+          code: hashToCode(entryCode.raffleHash),
+        });
+      }
+      const hosted = await loadHostedSession(entryCode.hostedSessionId);
+      if (!hosted) return jsonResp(410, { error: 'hosted_session_not_found' });
+      const hostedPub = hosted.hostedAttestation?.publicKey ?? '';
+      const merchantPub = hosted.merchantAttestation?.publicKey ?? '';
+      if (!hostedPub || !merchantPub) {
+        return jsonResp(409, { error: 'session_missing_attestations' });
+      }
+      const siteHost = desktopSiteHost(event);
+      const ua = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
+      const ip = String(getViewerIp(event));
+      const authIdentity = resolveRaffleAuthIdentity(entryCode.annotations ?? {}, {
+        phoneAttestation: hosted.hostedAttestation,
+      } as SessionItem);
+      const rl = await checkRaffleRateLimits({
+        phonePub: hostedPub,
+        desktopPub: merchantPub,
+        desktopUa: ua,
+        desktopIp: ip,
+        phoneUa: ua,
+        phoneIp: ip,
+        authIdentity,
+        siteHost,
+      });
+      if (!rl.ok) {
+        return jsonResp(429, {
+          error: 'rate_limited',
+          bucket: rl.tripped,
+          site: siteHost,
+        });
+      }
+      const { hash, code: handleCode } = handleHash(handle);
+      const enteredAt = Math.floor(Date.now() / 1000);
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { PK: `HOSTED_CODE#${code}`, SK: 'META' },
+            UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
+            ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(raffleHash)',
+            ExpressionAttributeValues: { ':h': hash, ':t': enteredAt },
+          })
+        );
+      } catch (err: unknown) {
+        const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+        if (isConflict) return jsonResp(409, { error: 'session_already_entered' });
+        throw err;
+      }
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: hosted.PK, SK: 'META' },
+          UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
+          ExpressionAttributeValues: { ':h': hash, ':t': enteredAt },
+        })
+      );
+      const updated = await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
+          UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, lbPk = :lb, code = :code',
+          ExpressionAttributeValues: {
+            ':one': 1,
+            ':t': enteredAt,
+            ':lb': 'LB',
+            ':code': handleCode,
+          },
+          ReturnValues: 'ALL_NEW',
+        })
+      );
+      const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
+      return jsonResp(200, { ok: true, code: handleCode, count });
     }
 
     case 'POST /api/session/start': {

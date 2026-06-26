@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { PROVIDERS_CONFIGURED } from '../lib/oauth';
-import { runHostedChallenge } from '../lib/hosted';
+import { runHostedChallenge, tryHostedTrustChallenge } from '../lib/hosted';
 import { Wordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
 
@@ -22,6 +22,7 @@ export function HostedVerify() {
   const [phase, setPhase] = useState<Phase>('ready');
   const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const triedTrustRef = useRef(false);
 
   async function verify(mode: 'passkey-auth' | 'passkey-create' | 'google') {
     if (!hostedSessionId || !query.nonce) {
@@ -41,6 +42,32 @@ export function HostedVerify() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  useEffect(() => {
+    if (triedTrustRef.current || !hostedSessionId || !query.nonce) return;
+    triedTrustRef.current = true;
+    let alive = true;
+    void (async () => {
+      setPhase('working');
+      setStatus('checking saved device');
+      const result = await tryHostedTrustChallenge(hostedSessionId, query.nonce);
+      if (!alive) return;
+      if (result) {
+        setStatus('returning');
+        window.location.assign(result.callbackUrl);
+      } else {
+        setPhase('ready');
+        setStatus('');
+      }
+    })().catch((e) => {
+      if (!alive) return;
+      setPhase('error');
+      setError(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [hostedSessionId, query.nonce]);
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">

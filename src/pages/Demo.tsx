@@ -344,27 +344,26 @@ export function Demo() {
             wins!
           </p>
 
-          {/* Mobile-only inline QR — sits right under the intro line. */}
+          {/* Mobile starts the serial hosted redirect flow; QR pairing is desktop-first. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
-            <div className="mt-6 lg:hidden">
-              <QrPanel svg={qrSvg} />
-              <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
-                <div className="neon-track">
-                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                  <span className="neon-text-red">See · the · demo</span>
-                  <span className="neon-text-green">No · install · No · login</span>
-                  <span className="neon-text-red">Try · it · live</span>
-                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                  <span className="neon-text-red">See · the · demo</span>
-                  <span className="neon-text-green">No · install · No · login</span>
-                  <span className="neon-text-red">Try · it · live</span>
-                </div>
-              </div>
+            <div className="card mt-6 p-4 md:hidden">
+              <div className="label mb-2">Same-phone path</div>
+              <p className="mb-3 text-sm leading-relaxed text-white/80">
+                Verify this phone, then come right back to enter.
+              </p>
+              <button
+                className="btn btn-primary w-full py-3 text-sm"
+                onClick={() => void startHostedDemo()}
+                disabled={hostedStatus === 'starting'}
+              >
+                {hostedStatus === 'starting' ? 'Starting redirect' : 'Try mobile redirect'}
+              </button>
+              {hostedError && <p className="mt-3 break-all text-xs text-red-200">{hostedError}</p>}
             </div>
           )}
 
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
-            <div className="card mt-6 p-4">
+            <div className="card mt-6 hidden p-4 md:block">
               <div className="label mb-2 flex items-center gap-2">
                 <span className="spinner" /> {status || (qrSvg ? 'waiting for phone' : 'starting')}
               </div>
@@ -381,7 +380,7 @@ export function Demo() {
             </div>
           )}
 
-          <div className="card mt-4 p-4">
+          <div className="card mt-4 hidden p-4 md:block">
             <div className="label mb-2">Same-phone path</div>
             <p className="mb-3 text-sm leading-relaxed text-white/80">
               On mobile, use hosted redirect instead of QR pairing.

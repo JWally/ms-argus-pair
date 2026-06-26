@@ -1,4 +1,5 @@
 import { isOAuthError, runOAuthProofOfLife, type OAuthOutcome } from './oauth';
+import { clearTrustToken, loadTrustToken, saveTrustToken } from './device-trust';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -132,6 +133,7 @@ export interface HostedAttestResult {
   code: string;
   callbackUrl: string;
   annotations?: Record<string, unknown>;
+  nextDeviceTrust?: string | null;
 }
 
 export async function startHostedVerify(): Promise<HostedStartResult> {
@@ -180,13 +182,17 @@ export async function submitHostedMerchantLeg(start: HostedStartResult): Promise
 export async function runHostedChallenge(
   hostedSessionId: string,
   nonce: string,
-  proofMode: 'passkey-auth' | 'passkey-create' | 'google'
+  proofMode: 'passkey-auth' | 'passkey-create' | 'google' | 'trust'
 ): Promise<HostedAttestResult> {
-  const proof: { webauthn?: unknown; oauth?: OAuthOutcome } = {};
+  const proof: { webauthn?: unknown; oauth?: OAuthOutcome; deviceTrustToken?: string } = {};
   if (proofMode === 'google') {
     const oauth = await runOAuthProofOfLife('google', nonce);
     if (isOAuthError(oauth)) throw new Error(oauth.error);
     proof.oauth = oauth;
+  } else if (proofMode === 'trust') {
+    const trustToken = await loadTrustToken();
+    if (!trustToken) throw new Error('device_trust_missing');
+    proof.deviceTrustToken = trustToken;
   } else {
     proof.webauthn =
       proofMode === 'passkey-auth'
@@ -210,14 +216,36 @@ export async function runHostedChallenge(
   if (!run.attestation) {
     throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
   }
-  return jsonFetch<HostedAttestResult>(`${API}/hosted/${hostedSessionId}/hosted-attest`, {
-    method: 'POST',
-    body: JSON.stringify({
-      argusSessionId: run.argusSessionId,
-      attestation: run.attestation,
-      ...proof,
-    }),
-  });
+  const result = await jsonFetch<HostedAttestResult>(
+    `${API}/hosted/${hostedSessionId}/hosted-attest`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        argusSessionId: run.argusSessionId,
+        attestation: run.attestation,
+        ...proof,
+      }),
+    }
+  );
+  if (result.nextDeviceTrust) await saveTrustToken(result.nextDeviceTrust);
+  return result;
+}
+
+export async function tryHostedTrustChallenge(
+  hostedSessionId: string,
+  nonce: string
+): Promise<HostedAttestResult | null> {
+  const trustToken = await loadTrustToken();
+  if (!trustToken) return null;
+  try {
+    return await runHostedChallenge(hostedSessionId, nonce, 'trust');
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 401) {
+      await clearTrustToken();
+      return null;
+    }
+    throw e;
+  }
 }
 
 export async function redeemHostedCode(code: string): Promise<{
@@ -230,5 +258,15 @@ export async function redeemHostedCode(code: string): Promise<{
   return jsonFetch(`${API}/hosted/redeem`, {
     method: 'POST',
     body: JSON.stringify({ merchantId: 'demo', code }),
+  });
+}
+
+export async function submitHostedRaffleEntry(
+  code: string,
+  handle: string
+): Promise<{ ok: true; code: string; count: number }> {
+  return jsonFetch(`${API}/hosted/entry`, {
+    method: 'POST',
+    body: JSON.stringify({ merchantId: 'demo', code, handle }),
   });
 }

@@ -18,6 +18,7 @@ for (const route of [
   'POST /api/hosted/{id}/merchant-attest',
   'POST /api/hosted/{id}/hosted-attest',
   'POST /api/hosted/redeem',
+  'POST /api/hosted/entry',
 ]) {
   assert(api.includes(`case '${route}'`), `handler missing ${route}`);
 }
@@ -27,15 +28,31 @@ for (const pathName of [
   '/api/hosted/{id}/merchant-attest',
   '/api/hosted/{id}/hosted-attest',
   '/api/hosted/redeem',
+  '/api/hosted/entry',
 ]) {
   assert(stack.includes(`path: '${pathName}'`), `CDK route missing ${pathName}`);
 }
 
 assert(api.includes('HOSTED#'), 'hosted sessions should be stored under a separate PK prefix');
-assert(api.includes('HOSTED_CODE#'), 'hosted callback codes should be stored under a separate PK prefix');
+assert(
+  api.includes('HOSTED_CODE#'),
+  'hosted callback codes should be stored under a separate PK prefix'
+);
 assert(api.includes('attribute_not_exists(redeemedAt)'), 'redeem should be one-shot');
-assert(api.includes('validateHostedVerifyReturnUrl'), 'hosted start should validate merchant return URLs');
-assert(api.includes('buildHostedVerifyCallbackUrl'), 'hosted attest should return code+state callback URLs');
+assert(api.includes('attribute_not_exists(raffleHash)'), 'hosted entry should be one-shot');
+assert(
+  api.includes('validateHostedVerifyReturnUrl'),
+  'hosted start should validate merchant return URLs'
+);
+assert(
+  api.includes('buildHostedVerifyCallbackUrl'),
+  'hosted attest should return code+state callback URLs'
+);
+assert(api.includes('deviceTrustToken'), 'hosted attest should accept silent device-trust proof');
+assert(
+  api.includes('nextDeviceTrust'),
+  'hosted attest should mint the next trust token after fresh proof'
+);
 
 if (process.exitCode) process.exit(process.exitCode);
 console.log('hosted-verify-api-contract: ok');
