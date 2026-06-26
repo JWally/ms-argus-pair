@@ -10,7 +10,7 @@ import {
   type LeaderboardRow,
   type RaffleStatus as RaffleEntryGate,
 } from '../lib/pair';
-import { startHostedVerify, submitHostedMerchantLeg } from '../lib/hosted';
+import { startHostedVerify, submitHostedMerchantLeg, submitHostedRaffleEntry } from '../lib/hosted';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
 import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
@@ -125,6 +125,8 @@ export function Demo() {
   const [entryGate, setEntryGate] = useState<RaffleEntryGate | null>(null);
   const [hostedStatus, setHostedStatus] = useState<'idle' | 'starting' | 'error'>('idle');
   const [hostedError, setHostedError] = useState<string | null>(null);
+  const [hostedEntryCode, setHostedEntryCode] = useState<string | null>(null);
+  const [entryModalOpen, setEntryModalOpen] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
 
@@ -195,6 +197,43 @@ export function Demo() {
     []
   );
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hosted = params.get('hosted');
+    if (!hosted) return;
+    startedRef.current = true;
+    let timer: number | null = null;
+    if (hosted === 'passed') {
+      try {
+        const raw = window.sessionStorage.getItem('argus-hosted-entry');
+        const parsed = raw ? (JSON.parse(raw) as { code?: string }) : null;
+        if (parsed?.code) {
+          timer = window.setTimeout(() => {
+            setHostedEntryCode(parsed.code!);
+            setEntryModalOpen(true);
+            setVerdictReason('hosted_mobile_verified');
+          }, 0);
+        } else {
+          timer = window.setTimeout(() => {
+            setHostedError('Hosted verification returned without an entry code.');
+          }, 0);
+        }
+      } catch {
+        timer = window.setTimeout(() => {
+          setHostedError('Hosted verification returned without a readable entry code.');
+        }, 0);
+      }
+    } else if (hosted === 'failed') {
+      timer = window.setTimeout(() => {
+        setHostedError(params.get('reason') || 'Hosted verification failed.');
+      }, 0);
+    }
+    window.history.replaceState({}, '', window.location.pathname);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
   async function startDemo() {
     setPhase('scanning');
     setStatus('preparing session');
@@ -260,19 +299,25 @@ export function Demo() {
     setRaffleError(null);
     setRaffleEntry(null);
     setHandleInput('');
+    setHostedEntryCode(null);
+    setEntryModalOpen(false);
+    window.sessionStorage.removeItem('argus-hosted-entry');
     startedRef.current = true;
     void startDemo();
   }
 
   async function submitHandle(e: FormEvent) {
     e.preventDefault();
-    if (!sessionId || raffleStatus === 'submitting') return;
+    if ((!sessionId && !hostedEntryCode) || raffleStatus === 'submitting') return;
     setRaffleStatus('submitting');
     setRaffleError(null);
     try {
-      const r = await submitRaffleEntry(sessionId, handleInput);
+      const r = hostedEntryCode
+        ? await submitHostedRaffleEntry(hostedEntryCode, handleInput)
+        : await submitRaffleEntry(sessionId!, handleInput);
       setRaffleEntry({ code: r.code, count: r.count });
       setRaffleStatus('entered');
+      setEntryModalOpen(false);
       void refreshLeaderboard();
     } catch (e) {
       setRaffleStatus('error');
@@ -303,6 +348,20 @@ export function Demo() {
       }
     }
   }
+
+  useEffect(() => {
+    if (
+      phase === 'paired' &&
+      raffleStatus === 'idle' &&
+      entryGate?.status !== 'rate_limited' &&
+      entryGate?.status !== 'already_entered'
+    ) {
+      const timer = window.setTimeout(() => {
+        setEntryModalOpen(true);
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [entryGate?.status, phase, raffleStatus]);
 
   useEffect(() => {
     if (startedRef.current) return;
@@ -394,6 +453,19 @@ export function Demo() {
             </button>
             {hostedError && <p className="mt-3 break-all text-xs text-red-200">{hostedError}</p>}
           </div>
+
+          {hostedEntryCode && raffleStatus !== 'entered' && (
+            <div className="card card-accent mt-4 border-green-500/40 p-4">
+              <div className="label mb-2 text-green-200">Verified on this phone</div>
+              <button
+                type="button"
+                className="btn btn-primary w-full py-3 text-sm"
+                onClick={() => setEntryModalOpen(true)}
+              >
+                Enter contest
+              </button>
+            </div>
+          )}
 
           {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
             <div className="card card-accent mt-4 border-green-500/40 p-4">
@@ -505,29 +577,13 @@ export function Demo() {
                   </div>
                 </div>
               ) : (
-                <form onSubmit={submitHandle} className="mt-6 flex flex-col gap-3 sm:flex-row">
-                  <input
-                    type="text"
-                    inputMode="email"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    placeholder="handle or email"
-                    value={handleInput}
-                    onChange={(e) => setHandleInput(e.target.value)}
-                    className="contest-input w-full flex-1 rounded-xl border-2 border-accent/50 bg-black/55 px-4 py-4 font-mono text-base text-white placeholder:text-muted/80 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/60"
-                    minLength={3}
-                    maxLength={64}
-                    required
-                  />
-                  <button
-                    type="submit"
-                    className="btn btn-primary px-6 py-4 text-base"
-                    disabled={raffleStatus === 'submitting' || handleInput.trim().length < 3}
-                  >
-                    {raffleStatus === 'submitting' ? 'Sending…' : 'Enter →'}
-                  </button>
-                </form>
+                <button
+                  type="button"
+                  className="btn btn-primary mt-6 w-full py-4 text-base sm:w-auto sm:px-8"
+                  onClick={() => setEntryModalOpen(true)}
+                >
+                  Enter contest
+                </button>
               )}
               {entryGate?.status === 'ok' && typeof entryGate.used === 'number' && (
                 <div className="mt-2 text-xs text-muted/80">
@@ -902,6 +958,69 @@ export function Demo() {
       <footer className="mt-auto pt-6 text-center text-[10px] uppercase tracking-[0.2em] text-muted/60">
         Two devices · one signed envelope · zero passwords
       </footer>
+
+      {entryModalOpen && (
+        <div
+          className="entry-modal fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="entry-modal-title"
+        >
+          <div className="card card-accent w-full max-w-md p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="label flex items-center gap-2">
+                  <span className="contest-dot" aria-hidden /> Contest · live
+                </div>
+                <h2 id="entry-modal-title" className="mt-2 text-2xl font-semibold tracking-tight">
+                  Claim your spot.
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-muted">
+                  Enter a handle or email. First handle to {CONTEST_TARGET.toLocaleString()} wins.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn h-10 w-10 shrink-0 p-0 text-lg"
+                onClick={() => setEntryModalOpen(false)}
+                aria-label="Close entry form"
+              >
+                ×
+              </button>
+            </div>
+
+            <form onSubmit={submitHandle} className="mt-5 space-y-3">
+              <input
+                type="text"
+                inputMode="email"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="handle or email"
+                value={handleInput}
+                onChange={(e) => setHandleInput(e.target.value)}
+                className="contest-input w-full rounded-xl border-2 border-accent/50 bg-black/55 px-4 py-4 font-mono text-base text-white placeholder:text-muted/80 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/60"
+                minLength={3}
+                maxLength={64}
+                autoFocus
+                required
+              />
+              <button
+                type="submit"
+                className="btn btn-primary w-full py-4 text-base"
+                disabled={raffleStatus === 'submitting' || handleInput.trim().length < 3}
+              >
+                {raffleStatus === 'submitting' ? 'Sending…' : 'Enter →'}
+              </button>
+              {raffleError && (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {raffleError}
+                </div>
+              )}
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

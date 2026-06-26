@@ -39,9 +39,15 @@ assert(
 );
 assert(callback.includes('redeemHostedCode'), 'callback page should redeem one-shot code');
 assert(
-  callback.includes('submitHostedRaffleEntry'),
-  'callback page should show the hosted entry form'
+  callback.includes('argus-hosted-entry'),
+  'callback page should hand verified codes back home'
 );
+assert(
+  callback.includes('hosted=passed'),
+  'callback page should return verified users to the demo page'
+);
+assert(demo.includes('entry-modal'), 'demo page should show entry in a modal');
+assert(demo.includes('submitHostedRaffleEntry'), 'demo entry modal should support hosted codes');
 
 if (process.exitCode) process.exit(process.exitCode);
 console.log('hosted-verify-ui: ok');
