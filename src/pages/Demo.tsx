@@ -108,6 +108,7 @@ export function Demo() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
   const [pairUrl, setPairUrl] = useState<string | null>(null);
+  const [phoneConnected, setPhoneConnected] = useState(false);
   const [, setVerdict] = useState<string | null>(null);
   const [verdictReason, setVerdictReason] = useState<string | null>(null);
   const [annotations, setAnnotations] = useState<Record<string, unknown> | null>(null);
@@ -183,6 +184,9 @@ export function Demo() {
     }).svg();
   }, [pairUrl]);
 
+  const showPairing = phase === 'idle' || phase === 'scanning' || phase === 'waiting';
+  const showQr = showPairing && !phoneConnected;
+
   useEffect(
     () => () => {
       stopRef.current?.();
@@ -198,10 +202,16 @@ export function Demo() {
     setAnnotations(null);
     setErrorMsg(null);
     setDesktopAttested(null);
+    setPhoneConnected(false);
     try {
       const session = await startDesktopSession({
         onStatus: setStatus,
         onDesktopAttested: setDesktopAttested,
+        onPhoneConnected: () => {
+          setPhoneConnected(true);
+          setPairUrl(null);
+          setStatus('phone connected');
+        },
       });
       stopRef.current = session.stop;
       setSessionId(session.sessionId);
@@ -234,6 +244,7 @@ export function Demo() {
     setVerdictReason(null);
     setAnnotations(null);
     setErrorMsg(null);
+    setPhoneConnected(false);
     setEntryGate(null);
     setDesktopAttested(null);
     setSessionId(null);
@@ -326,7 +337,7 @@ export function Demo() {
           </p>
 
           {/* Mobile-only inline QR — sits right under the intro line. */}
-          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
+          {showQr && (
             <div className="mt-6 lg:hidden">
               <QrPanel svg={qrSvg} />
               <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
@@ -344,15 +355,22 @@ export function Demo() {
             </div>
           )}
 
-          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
+          {showPairing && (
             <div className="card mt-6 p-4">
               <div className="label mb-2 flex items-center gap-2">
-                <span className="spinner" /> {status || (qrSvg ? 'waiting for phone' : 'starting')}
+                <span className="spinner" />{' '}
+                {phoneConnected
+                  ? 'Phone connected'
+                  : status || (qrSvg ? 'waiting for phone' : 'starting')}
               </div>
               <div className="space-y-2 text-sm text-white/80">
                 <div className="flex items-start gap-3">
                   <IconPhone className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                  <span>Open your phone camera and point it at the code.</span>
+                  <span>
+                    {phoneConnected
+                      ? 'Finish on your phone. This screen will update automatically.'
+                      : 'Open your phone camera and point it at the code.'}
+                  </span>
                 </div>
                 <div className="flex items-start gap-3">
                   <IconShield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
@@ -388,11 +406,7 @@ export function Demo() {
         </div>
 
         {/* Right column: desktop-only QR. */}
-        <div className="hidden lg:block lg:pl-4">
-          {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
-            <QrPanel svg={qrSvg} />
-          )}
-        </div>
+        <div className="hidden lg:block lg:pl-4">{showQr && <QrPanel svg={qrSvg} />}</div>
       </section>
 
       {/* Paired */}

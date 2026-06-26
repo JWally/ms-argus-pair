@@ -153,6 +153,7 @@ export interface PairEvents {
   onStatus?: (status: string) => void;
   onError?: (err: unknown) => void;
   onDesktopAttested?: (info: DesktopAttestedSummary) => void;
+  onPhoneConnected?: () => void;
 }
 
 // ── HOST (desktop) ───────────────────────────────────────────────────────
@@ -288,6 +289,7 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
   let scanError: Error | null = null;
   let phoneEnvelope: string | null = null;
   let bufferedReady: Record<string, unknown> | null = null;
+  let notifiedPhoneConnected = false;
 
   const sendReadyIfBothUp = () => {
     if (phoneEnvelope && bufferedReady) {
@@ -312,6 +314,10 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     if (!data || typeof data.kind !== 'string') return;
     if (data.kind === 'phone-here') {
       phoneEnvelope = msg.fromEnvelope;
+      if (!notifiedPhoneConnected) {
+        notifiedPhoneConnected = true;
+        events.onPhoneConnected?.();
+      }
       sendReadyIfBothUp();
     } else if (data.kind === 'verdict') {
       // The WS handler stamps `from` server-side (relayed peer messages

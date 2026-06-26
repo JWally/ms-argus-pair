@@ -369,9 +369,9 @@ export class PairStack extends cdk.Stack {
     });
 
     // ── WebSocket handler Lambda ───────────────────────────────────────
-    // Handles $connect / $disconnect / message routes. Stateless —
-    // routes peer messages by decrypting the envelopes the clients
-    // present, no DDB lookup. See cdk/lib/ws-handler.ts.
+    // Handles $connect / $disconnect / message routes. Peer routing uses
+    // sealed envelopes; whoami also claims one DDB slot per session role
+    // so a copied QR/session token cannot create duplicate active peers.
     const wsHandlerFn = new lambda.NodejsFunction(this, 'PairWsHandlerFn', {
       entry: path.join(__dirname, 'ws-handler.ts'),
       handler: 'handler',
@@ -380,12 +380,14 @@ export class PairStack extends cdk.Stack {
       memorySize: 512,
       timeout: cdk.Duration.seconds(10),
       environment: {
+        TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: allOrigins.join(','),
         WS_ENVELOPE_SECRET_ARN: wsEnvelopeSecret.secretArn,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: { minify: true, sourceMap: false, target: 'node22' },
     });
+    table.grantReadWriteData(wsHandlerFn);
     wsEnvelopeSecret.grantRead(wsHandlerFn);
     // The pair HTTP Lambda mints bootstrap tokens at /session/start →
     // shares the same secret.

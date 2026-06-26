@@ -1,8 +1,9 @@
 /**
  * WebSocket handler for ms-argus-pair.
  *
- * Stateless routing via signed/sealed envelopes — no DDB. Pattern lifted
- * (with hardening) from JWally/safety-socket-server.
+ * Signed/sealed envelopes route peer messages without a server-side lookup.
+ * `whoami` also claims one live connection slot per {sessionId, role} in DDB
+ * so copied QR/session tokens cannot create duplicate active peers.
  *
  * **Bootstrap.** Clients receive an HMAC-signed `wsToken` from POST
  * /session/start (HTTP API). The token attests:
@@ -44,6 +45,13 @@ import {
   PostToConnectionCommand,
   GoneException,
 } from '@aws-sdk/client-apigatewaymanagementapi';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DeleteCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  TransactWriteCommand,
+} from '@aws-sdk/lib-dynamodb';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -51,6 +59,91 @@ const TOKEN_TTL_SECONDS = 5 * 60; // bootstrap token TTL
 const ENVELOPE_MAX_AGE_SEC = 60 * 60; // 1 hour — peer messages allowed within
 const ALLOWED_ROLES = new Set(['desktop', 'phone']);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+const TABLE = process.env.TABLE_NAME;
+
+// ── One-live-connection claims ────────────────────────────────────────
+
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+interface ConnectionClaim {
+  sessionId: string;
+  role: 'desktop' | 'phone';
+}
+
+async function claimRoleConnection(
+  claims: BootstrapClaims,
+  connectionId: string
+): Promise<boolean> {
+  if (!TABLE) throw new Error('TABLE_NAME not configured');
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = Math.min(claims.exp + 60, now + TOKEN_TTL_SECONDS + 60);
+  try {
+    await ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: TABLE,
+              Item: {
+                PK: `WS#${claims.sessionId}`,
+                SK: claims.role,
+                connectionId,
+                expiresAt,
+              },
+              ConditionExpression: 'attribute_not_exists(PK)',
+            },
+          },
+          {
+            Put: {
+              TableName: TABLE,
+              Item: {
+                PK: `WSC#${connectionId}`,
+                SK: 'META',
+                sessionId: claims.sessionId,
+                role: claims.role,
+                expiresAt,
+              },
+              ConditionExpression: 'attribute_not_exists(PK)',
+            },
+          },
+        ],
+      })
+    );
+    return true;
+  } catch (e) {
+    if ((e as { name?: string }).name === 'TransactionCanceledException') return false;
+    throw e;
+  }
+}
+
+async function releaseRoleConnection(connectionId: string): Promise<void> {
+  if (!TABLE) throw new Error('TABLE_NAME not configured');
+  const reverse = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: { PK: `WSC#${connectionId}`, SK: 'META' },
+    })
+  );
+  const item = reverse.Item as Partial<ConnectionClaim> | undefined;
+  if (!item?.sessionId || !item?.role) return;
+
+  await Promise.allSettled([
+    ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: { PK: `WS#${item.sessionId}`, SK: item.role },
+        ConditionExpression: 'connectionId = :connectionId',
+        ExpressionAttributeValues: { ':connectionId': connectionId },
+      })
+    ),
+    ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: { PK: `WSC#${connectionId}`, SK: 'META' },
+      })
+    ),
+  ]);
+}
 
 // ── Secret material (cold-start cached) ────────────────────────────────
 
@@ -284,6 +377,9 @@ async function handleWhoami(
   const origin = typeof body.origin === 'string' ? body.origin : '';
   if (!originOk(origin)) return bad('origin_not_allowed');
   const ip = event.requestContext.identity?.sourceIp ?? '';
+  if (!(await claimRoleConnection(claims, event.requestContext.connectionId))) {
+    return bad('role_already_connected');
+  }
   const env: Envelope = {
     v: 1,
     connectionId: event.requestContext.connectionId,
@@ -363,6 +459,7 @@ export const handler = async (event: WsEvent): Promise<WsResp> => {
   }
   if (route === '$disconnect') {
     console.log(`[ws] disconnect cid=${cid}`);
+    await releaseRoleConnection(cid);
     return ok();
   }
   let body: { action?: string } & Record<string, unknown> = {};
