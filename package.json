@@ -16,6 +16,8 @@
     "typecheck": "tsc --noEmit",
     "dead-code": "PAIR_ALLOW_ORIGIN_FALLBACK=1 knip",
     "test:hygiene": "node scripts/assert-build-hygiene.mjs",
+    "test:spa-router": "node scripts/spa-router.test.mjs",
+    "test:cdk-hardening": "node scripts/assert-cdk-hardening.mjs",
     "quality": "npm run lint && npm run dead-code",
     "cdk:synth": "npx cdk synth",
     "cdk:diff": "npx cdk diff",

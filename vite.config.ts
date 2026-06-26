@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { visualizer } from 'rollup-plugin-visualizer';
 
@@ -45,43 +45,11 @@ function assertPairUrlBaseSet(mode: string): void {
   );
 }
 
-/**
- * Make Vite's auto-injected `<link rel="stylesheet">` non-render-blocking.
- *
- * The browser blocks first paint on ANY <link rel=stylesheet> in <head>,
- * even when the visible above-the-fold content (our inline splash) uses
- * only inline styles. That defeats the splash's whole purpose: on a cold
- * load the user stares at a blank screen until the CSS round-trips.
- *
- * Fix: swap rel="stylesheet" → media="print" onload="this.media='all'".
- * Browser fetches it but doesn't block screen render on it; once
- * downloaded the onload swaps media to 'all' and the stylesheet applies.
- * Standard pattern, supported everywhere. <noscript> fallback for
- * JS-disabled clients gets a normal blocking link.
- *
- * Only touches Vite-emitted stylesheet links; manual <style> blocks
- * stay as written. Runs on every build (no flag).
- */
-function nonBlockingCssPlugin(): Plugin {
-  return {
-    name: 'non-blocking-css',
-    enforce: 'post',
-    transformIndexHtml(html) {
-      return html.replace(
-        /<link([^>]*?)\srel="stylesheet"([^>]*?)>/g,
-        (_match, before: string, after: string) =>
-          `<link${before} rel="stylesheet"${after} media="print" onload="this.media='all'"><noscript><link${before} rel="stylesheet"${after}></noscript>`
-      );
-    },
-  };
-}
-
 export default defineConfig(({ mode }) => {
   assertPairUrlBaseSet(mode);
   return {
     plugins: [
       react(),
-      nonBlockingCssPlugin(),
       ...(analyze
         ? [
             visualizer({
