@@ -5,6 +5,10 @@ import path from 'node:path';
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
 const demoPage = fs.readFileSync(path.join(root, 'src/pages/Demo.tsx'), 'utf8');
+const phoneConnectedHandler =
+  demoPage.match(
+    /onPhoneConnected:\s*\(\)\s*=>\s*\{[\s\S]*?setStatus\('phone connected'\);[\s\S]*?\}/
+  )?.[0] ?? '';
 
 function assert(condition, message) {
   if (!condition) {
@@ -25,9 +29,10 @@ assert(
 
 assert(
   demoPage.includes('phoneConnected') &&
-    demoPage.includes('const showQr =') &&
-    demoPage.includes('!phoneConnected'),
-  'desktop demo should track phone connection and suppress QR rendering after connect'
+    demoPage.includes('disabled={phoneConnected}') &&
+    demoPage.includes('qr-disabled') &&
+    !phoneConnectedHandler.includes('setPairUrl(null);'),
+  'desktop demo should track phone connection and blur, not remove, the QR after connect'
 );
 
 assert(

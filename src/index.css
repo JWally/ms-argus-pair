@@ -123,6 +123,20 @@
   .qr-svg.qr-arrived {
     animation: qr-arrival 520ms ease-out forwards;
   }
+  .qr-frame.qr-disabled {
+    pointer-events: none;
+  }
+  .qr-frame.qr-disabled .qr-svg {
+    opacity: 0.34;
+    filter: blur(10px) saturate(0.3);
+    transition:
+      filter 90ms ease-out,
+      opacity 90ms ease-out;
+  }
+  .qr-frame.qr-disabled::before,
+  .qr-frame.qr-disabled::after {
+    border-color: rgb(74 222 128 / 0.45);
+  }
   @keyframes qr-arrival {
     0% {
       opacity: 0;

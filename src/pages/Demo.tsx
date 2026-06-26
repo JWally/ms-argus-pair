@@ -87,9 +87,14 @@ function QrLoadingGlyphs() {
   );
 }
 
-function QrPanel({ svg }: { svg: string | null }) {
+function QrPanel({ svg, disabled = false }: { svg: string | null; disabled?: boolean }) {
   return (
-    <div className="qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
+    <div
+      className={`qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem] ${
+        disabled ? 'qr-disabled' : ''
+      }`}
+      aria-disabled={disabled}
+    >
       {svg ? (
         <div
           className="qr-svg qr-arrived block aspect-square w-full text-white/90"
@@ -185,7 +190,7 @@ export function Demo() {
   }, [pairUrl]);
 
   const showPairing = phase === 'idle' || phase === 'scanning' || phase === 'waiting';
-  const showQr = showPairing && !phoneConnected;
+  const showQr = showPairing;
 
   useEffect(
     () => () => {
@@ -209,7 +214,6 @@ export function Demo() {
         onDesktopAttested: setDesktopAttested,
         onPhoneConnected: () => {
           setPhoneConnected(true);
-          setPairUrl(null);
           setStatus('phone connected');
         },
       });
@@ -339,19 +343,21 @@ export function Demo() {
           {/* Mobile-only inline QR — sits right under the intro line. */}
           {showQr && (
             <div className="mt-6 lg:hidden">
-              <QrPanel svg={qrSvg} />
-              <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
-                <div className="neon-track">
-                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                  <span className="neon-text-red">See · the · demo</span>
-                  <span className="neon-text-green">No · install · No · login</span>
-                  <span className="neon-text-red">Try · it · live</span>
-                  <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                  <span className="neon-text-red">See · the · demo</span>
-                  <span className="neon-text-green">No · install · No · login</span>
-                  <span className="neon-text-red">Try · it · live</span>
+              <QrPanel svg={qrSvg} disabled={phoneConnected} />
+              {!phoneConnected && (
+                <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
+                  <div className="neon-track">
+                    <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
+                    <span className="neon-text-red">See · the · demo</span>
+                    <span className="neon-text-green">No · install · No · login</span>
+                    <span className="neon-text-red">Try · it · live</span>
+                    <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
+                    <span className="neon-text-red">See · the · demo</span>
+                    <span className="neon-text-green">No · install · No · login</span>
+                    <span className="neon-text-red">Try · it · live</span>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -406,7 +412,9 @@ export function Demo() {
         </div>
 
         {/* Right column: desktop-only QR. */}
-        <div className="hidden lg:block lg:pl-4">{showQr && <QrPanel svg={qrSvg} />}</div>
+        <div className="hidden lg:block lg:pl-4">
+          {showQr && <QrPanel svg={qrSvg} disabled={phoneConnected} />}
+        </div>
       </section>
 
       {/* Paired */}
