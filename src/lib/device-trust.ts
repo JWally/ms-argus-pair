@@ -19,6 +19,7 @@ const DB_NAME = 'argus-pair-trust';
 const DB_VERSION = 1;
 const STORE = 'tokens';
 const KEY = 'phone-trust';
+const PROBE_KEY = 'storage-probe';
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -40,8 +41,7 @@ export async function loadTrustToken(): Promise<string | null> {
     return await new Promise<string | null>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
       const req = tx.objectStore(STORE).get(KEY);
-      req.onsuccess = () =>
-        resolve(typeof req.result === 'string' ? (req.result as string) : null);
+      req.onsuccess = () => resolve(typeof req.result === 'string' ? (req.result as string) : null);
       req.onerror = () => reject(req.error);
     });
   } catch {
@@ -74,5 +74,27 @@ export async function clearTrustToken(): Promise<void> {
     });
   } catch {
     /* best-effort */
+  }
+}
+
+export async function detectPrivateStorageMode(): Promise<boolean> {
+  try {
+    const db = await open();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      store.put(String(Date.now()), PROBE_KEY);
+      const req = store.get(PROBE_KEY);
+      req.onsuccess = () => {
+        if (typeof req.result === 'string') resolve();
+        else reject(new Error('indexeddb_probe_missing'));
+      };
+      req.onerror = () => reject(req.error);
+    });
+    window.localStorage.setItem(PROBE_KEY, '1');
+    window.localStorage.removeItem(PROBE_KEY);
+    return false;
+  } catch {
+    return true;
   }
 }

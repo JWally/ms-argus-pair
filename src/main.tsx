@@ -12,6 +12,12 @@ import './index.css';
 // Named exports → default-export shape that React.lazy expects.
 const Demo = lazy(() => import('./pages/Demo').then((m) => ({ default: m.Demo })));
 const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));
+const HostedVerify = lazy(() =>
+  import('./pages/HostedVerify').then((m) => ({ default: m.HostedVerify }))
+);
+const HostedCallback = lazy(() =>
+  import('./pages/HostedCallback').then((m) => ({ default: m.HostedCallback }))
+);
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
@@ -23,6 +29,8 @@ createRoot(rootElement).render(
         <Routes>
           <Route path="/" element={<Demo />} />
           <Route path="/pair/:roomId" element={<Pair />} />
+          <Route path="/verify/:hostedSessionId" element={<HostedVerify />} />
+          <Route path="/hosted/callback" element={<HostedCallback />} />
         </Routes>
       </Suspense>
     </BrowserRouter>

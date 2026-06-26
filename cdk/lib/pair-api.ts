@@ -84,6 +84,11 @@ import {
   verifyDeviceTrust,
   type DeviceTrustVerifyResult,
 } from './pair-api/attestation/trust';
+import {
+  buildHostedVerifyCallbackUrl,
+  buildHostedVerifyRedirectUrl,
+  validateHostedVerifyReturnUrl,
+} from './hosted-verify/protocol';
 
 const TABLE = process.env.TABLE_NAME!;
 
@@ -113,6 +118,17 @@ const PAT_SCORE_FLOOR = 70;
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
+const HOSTED_SESSION_TTL_SECONDS = 300;
+const HOSTED_CODE_TTL_SECONDS = 180;
+const HOSTED_VERIFY_BASE_URL = process.env.HOSTED_VERIFY_BASE_URL || WEBAUTHN_EXPECTED_ORIGIN;
+const HOSTED_RETURN_ORIGINS = (
+  process.env.HOSTED_RETURN_ORIGINS ||
+  process.env.ALLOWED_ORIGINS ||
+  WEBAUTHN_EXPECTED_ORIGIN
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -134,9 +150,9 @@ const ARGUS_SID_LEDGER_TTL_SECONDS = 24 * 3600;
 export async function claimArgusSessionId(
   argusSessionId: string,
   pairSessionId: string,
-  role: 'desktop' | 'phone'
+  role: 'desktop' | 'phone' | 'merchant' | 'hosted'
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (isValkeySessionsEnabled()) {
+  if (isValkeySessionsEnabled() && (role === 'desktop' || role === 'phone')) {
     return claimArgusValkey(argusSessionId, pairSessionId, role);
   }
   const now = Math.floor(Date.now() / 1000);
@@ -582,6 +598,40 @@ interface SessionItem {
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
   verdictReason?: string;
+}
+
+type HostedVerdict = 'pending' | 'passed' | 'failed';
+
+interface HostedSessionItem {
+  PK: string;
+  SK: 'META';
+  merchantId: string;
+  merchantSessionId: string;
+  returnUrl: string;
+  state: string;
+  nonce: string;
+  expiresAt: number;
+  verdict: HostedVerdict;
+  verdictReason?: string;
+  merchantAttestation?: StoredAttestation;
+  hostedAttestation?: StoredAttestation;
+  callbackCode?: string;
+  callbackUrl?: string;
+  annotations?: Record<string, unknown>;
+}
+
+interface HostedCodeItem {
+  PK: string;
+  SK: 'META';
+  code: string;
+  hostedSessionId: string;
+  merchantId: string;
+  merchantSessionId: string;
+  verdict: HostedVerdict;
+  verdictReason?: string;
+  annotations?: Record<string, unknown>;
+  expiresAt: number;
+  redeemedAt?: number;
 }
 
 // ── Verdict pipeline ───────────────────────────────────────────────────────
@@ -1175,6 +1225,118 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return (res.Item as SessionItem) ?? null;
 }
 
+async function loadHostedSession(hostedSessionId: string): Promise<HostedSessionItem | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: { PK: `HOSTED#${hostedSessionId}`, SK: 'META' } })
+  );
+  return (res.Item as HostedSessionItem | undefined) ?? null;
+}
+
+async function putHostedSession(item: HostedSessionItem): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(PK)',
+    })
+  );
+}
+
+async function recordHostedLegAttestation(
+  hostedSessionId: string,
+  field: 'merchantAttestation' | 'hostedAttestation',
+  attestation: StoredAttestation
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { PK: `HOSTED#${hostedSessionId}`, SK: 'META' },
+      UpdateExpression: `SET ${field} = :a`,
+      ConditionExpression: `attribute_exists(PK) AND attribute_not_exists(${field})`,
+      ExpressionAttributeValues: { ':a': attestation },
+    })
+  );
+}
+
+async function mintHostedCallbackCode(
+  session: HostedSessionItem,
+  verdict: HostedVerdict,
+  reason: string,
+  annotations: Record<string, unknown>
+): Promise<{ code: string; callbackUrl: string }> {
+  const code = randomBytes(32).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + HOSTED_CODE_TTL_SECONDS;
+  const callbackUrl = buildHostedVerifyCallbackUrl({
+    returnUrl: session.returnUrl,
+    code,
+    state: session.state,
+  });
+  const item: HostedCodeItem = {
+    PK: `HOSTED_CODE#${code}`,
+    SK: 'META',
+    code,
+    hostedSessionId: session.PK.replace(/^HOSTED#/, ''),
+    merchantId: session.merchantId,
+    merchantSessionId: session.merchantSessionId,
+    verdict,
+    verdictReason: reason,
+    annotations,
+    expiresAt,
+  };
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(PK)',
+    })
+  );
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { PK: session.PK, SK: 'META' },
+      UpdateExpression:
+        'SET verdict = :v, verdictReason = :r, annotations = :a, callbackCode = :c, callbackUrl = :u',
+      ExpressionAttributeValues: {
+        ':v': verdict,
+        ':r': reason,
+        ':a': annotations,
+        ':c': code,
+        ':u': callbackUrl,
+      },
+    })
+  );
+  return { code, callbackUrl };
+}
+
+async function redeemHostedCallbackCode(
+  code: string,
+  merchantId: string
+): Promise<HostedCodeItem | null | 'already_redeemed'> {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { PK: `HOSTED_CODE#${code}`, SK: 'META' },
+        UpdateExpression: 'SET redeemedAt = :now',
+        ConditionExpression:
+          'attribute_exists(PK) AND merchantId = :merchantId AND expiresAt > :now AND attribute_not_exists(redeemedAt)',
+        ExpressionAttributeValues: { ':now': now, ':merchantId': merchantId },
+        ReturnValues: 'ALL_NEW',
+      })
+    );
+    return (res.Attributes as HostedCodeItem | undefined) ?? null;
+  } catch (e) {
+    if ((e as { name?: string }).name !== 'ConditionalCheckFailedException') throw e;
+    const existing = await ddb.send(
+      new GetCommand({ TableName: TABLE, Key: { PK: `HOSTED_CODE#${code}`, SK: 'META' } })
+    );
+    if ((existing.Item as HostedCodeItem | undefined)?.redeemedAt) return 'already_redeemed';
+    return null;
+  }
+}
+
 // ── OAuth proof-of-life ────────────────────────────────────────────────
 //
 // Same shape as WebAuthnAnnotations so the verdict branch below stays
@@ -1262,6 +1424,8 @@ const lambdaHandler = async (event: {
   // Routes that don't carry an {id} path parameter — skip the UUID check.
   const idLessRoutes = new Set([
     'POST /api/session/start',
+    'POST /api/hosted/start',
+    'POST /api/hosted/redeem',
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
@@ -1357,6 +1521,183 @@ const lambdaHandler = async (event: {
       }
       return jsonResp(200, result);
     }
+    case 'POST /api/hosted/start': {
+      const merchantId = typeof body.merchantId === 'string' ? body.merchantId.trim() : '';
+      const merchantSessionId =
+        typeof body.merchantSessionId === 'string' ? body.merchantSessionId.trim() : '';
+      const returnUrl = typeof body.returnUrl === 'string' ? body.returnUrl.trim() : '';
+      const state = typeof body.state === 'string' ? body.state.trim() : '';
+      if (!merchantId || !merchantSessionId || !returnUrl || !state) {
+        return jsonResp(400, { error: 'missing_hosted_start_fields' });
+      }
+      const returnCheck = validateHostedVerifyReturnUrl(returnUrl, HOSTED_RETURN_ORIGINS);
+      if (!returnCheck.ok) {
+        return jsonResp(400, { error: 'invalid_return_url', reason: returnCheck.reason });
+      }
+      const id = randomUUID();
+      const nonce = randomBytes(32).toString('base64url');
+      const expiresAt = Math.floor(Date.now() / 1000) + HOSTED_SESSION_TTL_SECONDS;
+      await putHostedSession({
+        PK: `HOSTED#${id}`,
+        SK: 'META',
+        merchantId,
+        merchantSessionId,
+        returnUrl,
+        state,
+        nonce,
+        expiresAt,
+        verdict: 'pending',
+      });
+      return jsonResp(200, {
+        hostedSessionId: id,
+        nonce,
+        expiresAt,
+        redirectUrl: buildHostedVerifyRedirectUrl({
+          verifyBaseUrl: HOSTED_VERIFY_BASE_URL,
+          sessionId: id,
+          merchantId,
+          state,
+          nonce,
+        }),
+      });
+    }
+
+    case 'POST /api/hosted/{id}/merchant-attest': {
+      const argusSessionId = body.argusSessionId as string | undefined;
+      const att = validateAttestInput(body);
+      if (!argusSessionId || !att) {
+        return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
+      }
+      const s = await loadHostedSession(sessionId!);
+      if (!s) return jsonResp(404, { error: 'hosted_session_not_found' });
+      if (s.merchantAttestation) return jsonResp(409, { error: 'already_attested' });
+      const v = verifyAttestation(att);
+      if (!v.ok || !v.decoded) {
+        return jsonResp(400, { error: 'attestation_invalid', reason: v.reason });
+      }
+      const payload = v.decoded.payload as { sessionId?: string; nonce?: string; role?: string };
+      if (payload.sessionId !== sessionId) {
+        return jsonResp(400, { error: 'payload_session_mismatch' });
+      }
+      if (payload.nonce !== s.nonce) {
+        return jsonResp(400, { error: 'payload_nonce_mismatch' });
+      }
+      if (payload.role !== 'merchant') {
+        return jsonResp(400, { error: 'payload_role_mismatch' });
+      }
+      const claim = await claimArgusSessionId(argusSessionId, sessionId!, 'merchant');
+      if (!claim.ok) {
+        return jsonResp(409, { error: 'argus_session_already_claimed', reason: claim.reason });
+      }
+      await recordHostedLegAttestation(sessionId!, 'merchantAttestation', {
+        ...att,
+        argusSessionId,
+        receivedAt: Math.floor(Date.now() / 1000),
+        envelopeDecoded: v.decoded,
+      });
+      return jsonResp(200, { ok: true });
+    }
+
+    case 'POST /api/hosted/{id}/hosted-attest': {
+      const argusSessionId = body.argusSessionId as string | undefined;
+      const att = validateAttestInput(body);
+      const webauthnInput = body.webauthn;
+      const oauthInput = body.oauth;
+      if (!argusSessionId || !att) {
+        return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
+      }
+      const s = await loadHostedSession(sessionId!);
+      if (!s) return jsonResp(404, { error: 'hosted_session_not_found' });
+      if (!s.merchantAttestation) return jsonResp(409, { error: 'merchant_not_attested_yet' });
+      if (s.hostedAttestation) return jsonResp(409, { error: 'already_attested' });
+      const v = verifyAttestation(att);
+      if (!v.ok || !v.decoded) {
+        return jsonResp(400, { error: 'attestation_invalid', reason: v.reason });
+      }
+      const payload = v.decoded.payload as { sessionId?: string; nonce?: string; role?: string };
+      if (payload.sessionId !== sessionId) {
+        return jsonResp(400, { error: 'payload_session_mismatch' });
+      }
+      if (payload.nonce !== s.nonce) {
+        return jsonResp(400, { error: 'payload_nonce_mismatch' });
+      }
+      if (payload.role !== 'hosted') {
+        return jsonResp(400, { error: 'payload_role_mismatch' });
+      }
+      const claim = await claimArgusSessionId(argusSessionId, sessionId!, 'hosted');
+      if (!claim.ok) {
+        return jsonResp(409, { error: 'argus_session_already_claimed', reason: claim.reason });
+      }
+      await recordHostedLegAttestation(sessionId!, 'hostedAttestation', {
+        ...att,
+        argusSessionId,
+        receivedAt: Math.floor(Date.now() / 1000),
+        envelopeDecoded: v.decoded,
+      });
+
+      const proofPath = oauthInput
+        ? verifyOAuthProofOfLife(oauthInput, s.nonce)
+        : verifyWebAuthn(webauthnInput, s.nonce, att.publicKey);
+      const [merchantProj, hostedProj, proof] = await Promise.all([
+        fetchProjection(s.merchantAttestation.argusSessionId),
+        fetchProjection(argusSessionId),
+        proofPath,
+      ]);
+      const merchantClass = classifyScan(merchantProj, 'hosted_merchant');
+      const hostedClass = classifyScan(hostedProj, 'hosted_argus');
+      const proofOfLife = (proof as WebAuthnAnnotations).phone_webauthn_attested === true;
+      let verdict: HostedVerdict = 'failed';
+      let reason = 'hosted_verification_failed';
+      const annotations: Record<string, unknown> = {
+        proof_of_life: proofOfLife,
+        merchant_projection_present: !!merchantProj,
+        hosted_projection_present: !!hostedProj,
+        merchant_is_phone: merchantClass?.isPhone ?? false,
+        hosted_is_phone: hostedClass?.isPhone ?? false,
+        merchant_score: merchantClass?.individualScore ?? null,
+        hosted_score: hostedClass?.individualScore ?? null,
+        hosted_continuity_pending: true,
+        ...proof,
+      };
+      if (!proofOfLife) {
+        reason = 'no_proof_of_life';
+      } else if (!merchantClass || !hostedClass) {
+        reason = 'projection_lookup_failed';
+      } else if (!isProjectionFresh(merchantProj) || !isProjectionFresh(hostedProj)) {
+        reason = 'projection_stale';
+      } else if (!merchantClass.isPhone || !hostedClass.isPhone) {
+        reason = 'mobile_required';
+      } else if (
+        merchantClass.individualScore >= INDIVIDUAL_SCORE_LIMIT ||
+        hostedClass.individualScore >= INDIVIDUAL_SCORE_LIMIT
+      ) {
+        reason = 'score_high';
+      } else {
+        verdict = 'passed';
+        reason = 'hosted_mobile_verified';
+      }
+      const { code, callbackUrl } = await mintHostedCallbackCode(s, verdict, reason, annotations);
+      return jsonResp(200, { verdict, reason, code, callbackUrl, annotations });
+    }
+
+    case 'POST /api/hosted/redeem': {
+      const code = typeof body.code === 'string' ? body.code.trim() : '';
+      const merchantId = typeof body.merchantId === 'string' ? body.merchantId.trim() : '';
+      if (!code || !merchantId) {
+        return jsonResp(400, { error: 'missing_redeem_fields' });
+      }
+      const redeemed = await redeemHostedCallbackCode(code, merchantId);
+      if (redeemed === 'already_redeemed') return jsonResp(409, { error: 'code_already_redeemed' });
+      if (!redeemed) return jsonResp(404, { error: 'code_not_found_or_expired' });
+      return jsonResp(200, {
+        verdict: redeemed.verdict,
+        reason: redeemed.verdictReason ?? null,
+        hostedSessionId: redeemed.hostedSessionId,
+        merchantSessionId: redeemed.merchantSessionId,
+        annotations: redeemed.annotations ?? {},
+      });
+    }
+
     case 'POST /api/session/start': {
       // #10: per-IP throttle. Fail OPEN on limiter error — a Valkey/DDB hiccup
       // must not take down all pairing; the cap is abuse-bounding, not a

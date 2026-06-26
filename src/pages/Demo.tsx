@@ -10,6 +10,7 @@ import {
   type LeaderboardRow,
   type RaffleStatus as RaffleEntryGate,
 } from '../lib/pair';
+import { startHostedVerify, submitHostedMerchantLeg } from '../lib/hosted';
 import { Wordmark } from '../components/Brand';
 import { AnnotationsCard } from '../components/AnnotationsCard';
 import { DeviceComparisonCard } from '../components/DeviceComparisonCard';
@@ -89,15 +90,17 @@ function QrLoadingGlyphs() {
 
 function QrPanel({ svg }: { svg: string | null }) {
   return (
-    <div className="qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
-      {svg ? (
-        <div
-          className="qr-svg qr-arrived block aspect-square w-full text-white/90"
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
-      ) : (
-        <QrLoadingGlyphs />
-      )}
+    <div className="mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
+      <div className="qr-frame w-full">
+        {svg ? (
+          <div
+            className="qr-svg qr-arrived block aspect-square w-full text-white/90"
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        ) : (
+          <QrLoadingGlyphs />
+        )}
+      </div>
     </div>
   );
 }
@@ -120,6 +123,8 @@ export function Demo() {
   const [raffleEntry, setRaffleEntry] = useState<{ code: string; count: number } | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const [entryGate, setEntryGate] = useState<RaffleEntryGate | null>(null);
+  const [hostedStatus, setHostedStatus] = useState<'idle' | 'starting' | 'error'>('idle');
+  const [hostedError, setHostedError] = useState<string | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
 
@@ -222,6 +227,20 @@ export function Demo() {
         setPhase('error');
         setErrorMsg(msg);
       }
+    }
+  }
+
+  async function startHostedDemo() {
+    if (hostedStatus === 'starting') return;
+    setHostedStatus('starting');
+    setHostedError(null);
+    try {
+      const start = await startHostedVerify();
+      await submitHostedMerchantLeg(start);
+      window.location.assign(start.redirectUrl);
+    } catch (e) {
+      setHostedStatus('error');
+      setHostedError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -361,6 +380,21 @@ export function Demo() {
               </div>
             </div>
           )}
+
+          <div className="card mt-4 p-4">
+            <div className="label mb-2">Same-phone path</div>
+            <p className="mb-3 text-sm leading-relaxed text-white/80">
+              On mobile, use hosted redirect instead of QR pairing.
+            </p>
+            <button
+              className="btn btn-primary w-full py-3 text-sm"
+              onClick={() => void startHostedDemo()}
+              disabled={hostedStatus === 'starting'}
+            >
+              {hostedStatus === 'starting' ? 'Starting redirect' : 'Try mobile redirect'}
+            </button>
+            {hostedError && <p className="mt-3 break-all text-xs text-red-200">{hostedError}</p>}
+          </div>
 
           {(phase === 'scanning' || phase === 'waiting') && desktopAttested?.clean && (
             <div className="card card-accent mt-4 border-green-500/40 p-4">

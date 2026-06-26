@@ -7,7 +7,7 @@ import {
   submitPhoneAttestation,
   type PhoneSessionInfo,
 } from '../lib/pair';
-import { loadTrustToken } from '../lib/device-trust';
+import { detectPrivateStorageMode, loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
 import { Wordmark } from '../components/Brand';
 import { Dialpad } from '../components/Dialpad';
@@ -52,6 +52,7 @@ export function Pair() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hasTrust, setHasTrust] = useState(false);
   const [passkeyHint, setPasskeyHint] = useState(false);
+  const [privateModeLikely, setPrivateModeLikely] = useState(false);
   const [trustChecked, setTrustChecked] = useState(false);
   const [nonce, setNonce] = useState<string | null>(initialNonce);
   const [challengeIndex, setChallengeIndex] = useState(0);
@@ -76,14 +77,17 @@ export function Pair() {
           if (trustSettled || ctl.signal.aborted) return;
           setTrustChecked(true);
         }, 1500);
-        void loadTrustToken().then((trustToken) => {
-          trustSettled = true;
-          window.clearTimeout(trustFallback);
-          if (ctl.signal.aborted) return;
-          setHasTrust(!!trustToken);
-          setPasskeyHint(hasPasskeyHint());
-          setTrustChecked(true);
-        });
+        void Promise.all([loadTrustToken(), detectPrivateStorageMode()]).then(
+          ([trustToken, privateStorage]) => {
+            trustSettled = true;
+            window.clearTimeout(trustFallback);
+            if (ctl.signal.aborted) return;
+            setHasTrust(!!trustToken);
+            setPasskeyHint(hasPasskeyHint());
+            setPrivateModeLikely(privateStorage);
+            setTrustChecked(true);
+          }
+        );
 
         const info = await awaitDesktopReady(sessionId, ctl.signal);
         if (ctl.signal.aborted) return;
@@ -280,6 +284,11 @@ export function Pair() {
           {errorMsg && (
             <div className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-left text-xs text-red-100">
               {errorMsg}
+            </div>
+          )}
+          {!hasTrust && privateModeLikely && (
+            <div className="w-full rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-left text-xs leading-relaxed text-amber-50">
+              Private browsing does not remember this check. Use a normal tab to skip it next time.
             </div>
           )}
           {hasTrust ? (
