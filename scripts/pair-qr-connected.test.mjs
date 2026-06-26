@@ -32,8 +32,9 @@ assert(
     demoPage.includes('disabled={phoneConnected}') &&
     demoPage.includes('qr-disabled') &&
     demoPage.includes('qr-blurred') &&
+    demoPage.includes('qr-flip-grid') &&
     !phoneConnectedHandler.includes('setPairUrl(null);'),
-  'desktop demo should track phone connection and blur, not remove, the QR after connect'
+  'desktop demo should track phone connection and flip/blur, not remove, the QR after connect'
 );
 
 assert(

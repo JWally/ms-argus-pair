@@ -88,6 +88,7 @@ function QrLoadingGlyphs() {
 }
 
 function QrPanel({ svg, disabled = false }: { svg: string | null; disabled?: boolean }) {
+  const flipTiles = disabled ? Array.from({ length: 144 }, (_, i) => i) : [];
   return (
     <div
       className={`qr-frame mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem] ${
@@ -96,12 +97,25 @@ function QrPanel({ svg, disabled = false }: { svg: string | null; disabled?: boo
       aria-disabled={disabled}
     >
       {svg ? (
-        <div
-          className={`qr-svg block aspect-square w-full text-white/90 ${
-            disabled ? 'qr-blurred' : 'qr-arrived'
-          }`}
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+        <div className="qr-stage relative aspect-square w-full overflow-hidden rounded-lg">
+          <div
+            className={`qr-svg absolute inset-0 block aspect-square w-full text-white/90 ${
+              disabled ? 'qr-blurred' : 'qr-arrived'
+            }`}
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+          {disabled && (
+            <div className="qr-flip-grid" aria-hidden>
+              {flipTiles.map((tile) => (
+                <span
+                  className="qr-flip-tile"
+                  key={tile}
+                  style={{ animationDelay: `${(tile % 12) * 18 + Math.floor(tile / 12) * 9}ms` }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       ) : (
         <QrLoadingGlyphs />
       )}
