@@ -20,6 +20,8 @@ assert(main.includes('path="/verify/:hostedSessionId"'), 'SPA should route hoste
 assert(main.includes('path="/hosted/callback"'), 'SPA should route hosted callback page');
 assert(demo.includes('Try mobile redirect'), 'demo should expose hosted redirect CTA');
 assert(demo.includes('md:hidden'), 'mobile landing should prefer hosted redirect over QR pairing');
+assert(demo.includes('isMobileViewport'), 'mobile landing should not auto-start hidden QR pairing');
+assert(demo.includes('startSeqRef'), 'hosted redirect should ignore stale QR session completions');
 assert(
   demo.includes('submitHostedMerchantLeg(start)'),
   'demo should submit merchant leg before redirect'
@@ -47,6 +49,8 @@ assert(
   'callback page should return verified users to the demo page'
 );
 assert(demo.includes('entry-modal'), 'demo page should show entry in a modal');
+assert(demo.includes('Claim your spot'), 'mobile hosted card should show the entry goal');
+assert(demo.includes('Top 5'), 'entry modal should show top leaderboard rows');
 assert(demo.includes('submitHostedRaffleEntry'), 'demo entry modal should support hosted codes');
 
 if (process.exitCode) process.exit(process.exitCode);

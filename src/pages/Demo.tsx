@@ -129,6 +129,7 @@ export function Demo() {
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
   const startedRef = useRef(false);
+  const startSeqRef = useRef(0);
 
   async function refreshLeaderboard() {
     try {
@@ -197,6 +198,10 @@ export function Demo() {
     []
   );
 
+  function isMobileViewport(): boolean {
+    return window.matchMedia('(max-width: 767px)').matches;
+  }
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const hosted = params.get('hosted');
@@ -235,6 +240,7 @@ export function Demo() {
   }, []);
 
   async function startDemo() {
+    const seq = ++startSeqRef.current;
     setPhase('scanning');
     setStatus('preparing session');
     setVerdict(null);
@@ -247,16 +253,22 @@ export function Demo() {
         onStatus: setStatus,
         onDesktopAttested: setDesktopAttested,
       });
+      if (seq !== startSeqRef.current) {
+        session.stop();
+        return;
+      }
       stopRef.current = session.stop;
       setSessionId(session.sessionId);
       setPairUrl(session.pairUrl);
       setPhase('waiting');
       const r = await session.result;
+      if (seq !== startSeqRef.current) return;
       setVerdict(r.verdict);
       setVerdictReason(r.reason);
       setAnnotations((r as { annotations?: Record<string, unknown> }).annotations ?? null);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
+      if (seq !== startSeqRef.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       // Session-expired isn't a fault — the user simply didn't scan in
       // time. Route it to a calmer screen rather than the red error card.
@@ -271,6 +283,9 @@ export function Demo() {
 
   async function startHostedDemo() {
     if (hostedStatus === 'starting') return;
+    startSeqRef.current += 1;
+    stopRef.current?.();
+    stopRef.current = null;
     setHostedStatus('starting');
     setHostedError(null);
     try {
@@ -365,8 +380,12 @@ export function Demo() {
 
   useEffect(() => {
     if (startedRef.current) return;
+    if (isMobileViewport()) return;
     startedRef.current = true;
-    void startDemo();
+    const timer = window.setTimeout(() => {
+      void startDemo();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   return (
@@ -406,7 +425,7 @@ export function Demo() {
           {/* Mobile starts the serial hosted redirect flow; QR pairing is desktop-first. */}
           {(phase === 'idle' || phase === 'scanning' || phase === 'waiting') && (
             <div className="card mt-6 p-4 md:hidden">
-              <div className="label mb-2">Same-phone path</div>
+              <div className="label mb-2">Claim your spot</div>
               <p className="mb-3 text-sm leading-relaxed text-white/80">
                 Verify this phone, then come right back to enter.
               </p>
@@ -973,7 +992,7 @@ export function Demo() {
                   <span className="contest-dot" aria-hidden /> Contest · live
                 </div>
                 <h2 id="entry-modal-title" className="mt-2 text-2xl font-semibold tracking-tight">
-                  Claim your spot.
+                  Verified. Claim your spot.
                 </h2>
                 <p className="mt-2 text-sm leading-relaxed text-muted">
                   Enter a handle or email. First handle to {CONTEST_TARGET.toLocaleString()} wins.
@@ -1018,6 +1037,25 @@ export function Demo() {
                 </div>
               )}
             </form>
+
+            {leaderboard.length > 0 && (
+              <div className="mt-5 border-t border-edge/60 pt-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="label">Top 5</h3>
+                  <span className="label text-muted/70">leaderboard</span>
+                </div>
+                <ol className="space-y-1">
+                  {leaderboard.slice(0, 5).map((row, idx) => (
+                    <ScoreboardRow
+                      key={row.code}
+                      rank={idx + 1}
+                      row={row}
+                      highlight={raffleEntry?.code === row.code}
+                    />
+                  ))}
+                </ol>
+              </div>
+            )}
           </div>
         </div>
       )}
