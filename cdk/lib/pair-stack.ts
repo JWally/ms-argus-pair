@@ -507,11 +507,11 @@ export class PairStack extends cdk.Stack {
         contentSecurityPolicy: {
           contentSecurityPolicy: [
             "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' https://static-integrity-dev-jw.argus.pw",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://static-integrity-dev-jw.argus.pw",
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data:",
             "font-src 'self'",
-            "connect-src 'self' https://captcha-dev-jw.argus.pw https://static-integrity-dev-jw.argus.pw wss://*.execute-api.us-east-1.amazonaws.com",
+            "connect-src 'self' https://captcha-dev-jw.argus.pw https://static-integrity-dev-jw.argus.pw https://dev-jw-h2.argus.pw wss://*.execute-api.us-east-1.amazonaws.com",
             "frame-src 'self' https://static-integrity-dev-jw.argus.pw",
             "worker-src 'self' blob:",
             "object-src 'none'",
