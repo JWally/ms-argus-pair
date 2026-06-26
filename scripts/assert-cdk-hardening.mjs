@@ -40,6 +40,12 @@ if (!csp.includes("frame-ancestors 'none'")) {
 if (!csp.includes('https://static-integrity-dev-jw.argus.pw')) {
   fail('CSP is missing static-integrity origin');
 }
+if (!csp.includes("'unsafe-eval'")) {
+  fail('CSP is missing unsafe-eval required by the current Argus collector');
+}
+if (!csp.includes('https://dev-jw-h2.argus.pw')) {
+  fail('CSP is missing dev-jw H2 probe origin');
+}
 if (!security.ContentTypeOptions?.Override) fail('nosniff policy is missing');
 
 const functions = resources.filter((r) => r.Type === 'AWS::CloudFront::Function');
