@@ -97,7 +97,9 @@ function QrPanel({ svg, disabled = false }: { svg: string | null; disabled?: boo
     >
       {svg ? (
         <div
-          className="qr-svg qr-arrived block aspect-square w-full text-white/90"
+          className={`qr-svg block aspect-square w-full text-white/90 ${
+            disabled ? 'qr-blurred' : 'qr-arrived'
+          }`}
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       ) : (

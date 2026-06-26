@@ -126,12 +126,17 @@
   .qr-frame.qr-disabled {
     pointer-events: none;
   }
-  .qr-frame.qr-disabled .qr-svg {
-    opacity: 0.34;
-    filter: blur(10px) saturate(0.3);
+  .qr-svg.qr-blurred {
+    animation: none !important;
+    opacity: 1;
+  }
+  .qr-svg.qr-blurred svg {
+    filter: blur(12px) saturate(0.2) contrast(0.85);
+    transform: scale(1.035);
+    transform-origin: center;
     transition:
       filter 90ms ease-out,
-      opacity 90ms ease-out;
+      transform 90ms ease-out;
   }
   .qr-frame.qr-disabled::before,
   .qr-frame.qr-disabled::after {
