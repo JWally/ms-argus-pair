@@ -20,6 +20,7 @@ assert(main.includes('path="/verify/:hostedSessionId"'), 'SPA should route hoste
 assert(main.includes('path="/hosted/callback"'), 'SPA should route hosted callback page');
 assert(demo.includes('Try mobile redirect'), 'demo should expose hosted redirect CTA');
 assert(demo.includes('md:hidden'), 'mobile landing should prefer hosted redirect over QR pairing');
+assert(!demo.includes('Same-phone path'), 'desktop landing should not show hosted redirect CTA');
 assert(demo.includes('isMobileViewport'), 'mobile landing should not auto-start hidden QR pairing');
 assert(demo.includes('startSeqRef'), 'hosted redirect should ignore stale QR session completions');
 assert(

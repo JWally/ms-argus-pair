@@ -458,21 +458,6 @@ export function Demo() {
             </div>
           )}
 
-          <div className="card mt-4 hidden p-4 md:block">
-            <div className="label mb-2">Same-phone path</div>
-            <p className="mb-3 text-sm leading-relaxed text-white/80">
-              On mobile, use hosted redirect instead of QR pairing.
-            </p>
-            <button
-              className="btn btn-primary w-full py-3 text-sm"
-              onClick={() => void startHostedDemo()}
-              disabled={hostedStatus === 'starting'}
-            >
-              {hostedStatus === 'starting' ? 'Starting redirect' : 'Try mobile redirect'}
-            </button>
-            {hostedError && <p className="mt-3 break-all text-xs text-red-200">{hostedError}</p>}
-          </div>
-
           {hostedEntryCode && raffleStatus !== 'entered' && (
             <div className="card card-accent mt-4 border-green-500/40 p-4">
               <div className="label mb-2 text-green-200">Verified on this phone</div>

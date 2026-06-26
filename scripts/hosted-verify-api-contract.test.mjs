@@ -41,6 +41,10 @@ assert(
 assert(api.includes('attribute_not_exists(redeemedAt)'), 'redeem should be one-shot');
 assert(api.includes('attribute_not_exists(raffleHash)'), 'hosted entry should be one-shot');
 assert(
+  api.includes('RAFFLE_BUCKET_MAX + 1'),
+  'Valkey raffle buckets should trip after the configured max'
+);
+assert(
   api.includes('validateHostedVerifyReturnUrl'),
   'hosted start should validate merchant return URLs'
 );

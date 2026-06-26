@@ -483,7 +483,7 @@ async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimit
     // semantics as the DDB ConditionalCheck path.
     const pipeline = valkey.pipeline();
     for (const k of buckets) {
-      pipeline.rlIncr(`pair:rl:${k}:${hour}`, RAFFLE_BUCKET_MAX, RAFFLE_BUCKET_TTL_SECONDS);
+      pipeline.rlIncr(`pair:rl:${k}:${hour}`, RAFFLE_BUCKET_MAX + 1, RAFFLE_BUCKET_TTL_SECONDS);
     }
     const results = (await pipeline.exec()) ?? [];
     for (let i = 0; i < results.length; i++) {
