@@ -33,18 +33,8 @@ if (!security.StrictTransportSecurity?.IncludeSubdomains) fail('HSTS includeSubD
 if (security.StrictTransportSecurity?.AccessControlMaxAgeSec < 31536000) {
   fail('HSTS max-age is below one year');
 }
-const csp = security.ContentSecurityPolicy?.ContentSecurityPolicy ?? '';
-if (!csp.includes("frame-ancestors 'none'")) {
-  fail('CSP is missing frame-ancestors none');
-}
-if (!csp.includes('https://static-integrity-dev-jw.argus.pw')) {
-  fail('CSP is missing static-integrity origin');
-}
-if (!csp.includes("'unsafe-eval'")) {
-  fail('CSP is missing unsafe-eval required by the current Argus collector');
-}
-if (!csp.includes('https://dev-jw-h2.argus.pw')) {
-  fail('CSP is missing dev-jw H2 probe origin');
+if (security.ContentSecurityPolicy) {
+  fail('CSP should not be emitted by the pair app response headers policy');
 }
 if (!security.ContentTypeOptions?.Override) fail('nosniff policy is missing');
 

@@ -504,22 +504,6 @@ export class PairStack extends cdk.Stack {
           frameOption: HeadersFrameOption.DENY,
           override: true,
         },
-        contentSecurityPolicy: {
-          contentSecurityPolicy: [
-            "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://static-integrity-dev-jw.argus.pw",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data:",
-            "font-src 'self'",
-            "connect-src 'self' https://captcha-dev-jw.argus.pw https://static-integrity-dev-jw.argus.pw https://dev-jw-h2.argus.pw wss://*.execute-api.us-east-1.amazonaws.com",
-            "frame-src 'self' https://static-integrity-dev-jw.argus.pw",
-            "worker-src 'self' blob:",
-            "object-src 'none'",
-            "base-uri 'none'",
-            "frame-ancestors 'none'",
-          ].join('; '),
-          override: true,
-        },
       },
     });
     const spaRouter = new CloudFrontFunction(this, 'SpaRouter', {
