@@ -13,6 +13,12 @@ import {
   CachePolicy,
   OriginAccessIdentity,
   OriginRequestPolicy,
+  ResponseHeadersPolicy,
+  HeadersFrameOption,
+  HeadersReferrerPolicy,
+  Function as CloudFrontFunction,
+  FunctionCode,
+  FunctionEventType,
 } from 'aws-cdk-lib/aws-cloudfront';
 import { S3Origin, HttpOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import { PolicyStatement, CanonicalUserPrincipal } from 'aws-cdk-lib/aws-iam';
@@ -481,12 +487,59 @@ export class PairStack extends cdk.Stack {
 
     const s3Origin = new S3Origin(bucket, { originAccessIdentity: oai });
     const apiOrigin = new HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`);
+    const siteHeaders = new ResponseHeadersPolicy(this, 'SiteResponseHeaders', {
+      securityHeadersBehavior: {
+        strictTransportSecurity: {
+          accessControlMaxAge: cdk.Duration.days(365),
+          includeSubdomains: true,
+          preload: true,
+          override: true,
+        },
+        contentTypeOptions: { override: true },
+        referrerPolicy: {
+          referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+          override: true,
+        },
+        frameOptions: {
+          frameOption: HeadersFrameOption.DENY,
+          override: true,
+        },
+        contentSecurityPolicy: {
+          contentSecurityPolicy: [
+            "default-src 'self'",
+            "script-src 'self' 'unsafe-inline' https://static-integrity-dev-jw.argus.pw",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data:",
+            "font-src 'self'",
+            "connect-src 'self' https://captcha-dev-jw.argus.pw https://static-integrity-dev-jw.argus.pw wss://*.execute-api.us-east-1.amazonaws.com",
+            "frame-src 'self' https://static-integrity-dev-jw.argus.pw",
+            "worker-src 'self' blob:",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+          ].join('; '),
+          override: true,
+        },
+      },
+    });
+    const spaRouter = new CloudFrontFunction(this, 'SpaRouter', {
+      code: FunctionCode.fromFile({
+        filePath: path.join(__dirname, '../cloudfront/spa-router.js'),
+      }),
+    });
 
     const distribution = new Distribution(this, 'SiteDistribution', {
       defaultBehavior: {
         origin: s3Origin,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: CachePolicy.CACHING_DISABLED,
+        responseHeadersPolicy: siteHeaders,
+        functionAssociations: [
+          {
+            function: spaRouter,
+            eventType: FunctionEventType.VIEWER_REQUEST,
+          },
+        ],
       },
       additionalBehaviors: {
         '/api/*': {
@@ -495,6 +548,7 @@ export class PairStack extends cdk.Stack {
           allowedMethods: AllowedMethods.ALLOW_ALL,
           cachePolicy: CachePolicy.CACHING_DISABLED,
           originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          responseHeadersPolicy: siteHeaders,
         },
         ...Object.fromEntries(
           ['*.js', '*.css', '*.woff*', '*.png', '*.jpg', '*.svg'].map((pattern) => [
@@ -503,6 +557,7 @@ export class PairStack extends cdk.Stack {
               origin: s3Origin,
               cachePolicy: CachePolicy.CACHING_OPTIMIZED,
               viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+              responseHeadersPolicy: siteHeaders,
             },
           ])
         ),
@@ -513,23 +568,6 @@ export class PairStack extends cdk.Stack {
       httpVersion: HttpVersion.HTTP2,
       priceClass: PriceClass.PRICE_CLASS_100,
       defaultRootObject: 'index.html',
-      // SPA fallback only for non-/api paths: S3 returns 403/404 on unknown
-      // keys, CF rewrites to /index.html for client-side routing. API paths
-      // never reach this rewrite because they hit the /api/* behavior first.
-      errorResponses: [
-        {
-          httpStatus: 403,
-          responseHttpStatus: 200,
-          responsePagePath: '/index.html',
-          ttl: cdk.Duration.seconds(0),
-        },
-        {
-          httpStatus: 404,
-          responseHttpStatus: 200,
-          responsePagePath: '/index.html',
-          ttl: cdk.Duration.seconds(0),
-        },
-      ],
     });
 
     new ARecord(this, 'AliasRecord', {
