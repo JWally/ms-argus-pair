@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { awaitDesktopReady, submitPhoneAttestation, type PhoneSessionInfo } from '../lib/pair';
+import {
+  awaitDesktopReady,
+  clearPasskeyHint,
+  hasPasskeyHint,
+  submitPhoneAttestation,
+  type PhoneSessionInfo,
+} from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
+import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
 import { Wordmark } from '../components/Brand';
 import { Dialpad } from '../components/Dialpad';
 import { IconCheck, IconX, IconShield } from '../components/Icons';
+
+type ProofChoice = 'passkey-auth' | 'passkey-create' | 'google';
 
 type Phase =
   | 'awaiting-desktop'
@@ -42,6 +51,7 @@ export function Pair() {
   const [verdict, setVerdict] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hasTrust, setHasTrust] = useState(false);
+  const [passkeyHint, setPasskeyHint] = useState(false);
   const [trustChecked, setTrustChecked] = useState(false);
   const [nonce, setNonce] = useState<string | null>(initialNonce);
   const [challengeIndex, setChallengeIndex] = useState(0);
@@ -71,6 +81,7 @@ export function Pair() {
           window.clearTimeout(trustFallback);
           if (ctl.signal.aborted) return;
           setHasTrust(!!trustToken);
+          setPasskeyHint(hasPasskeyHint());
           setTrustChecked(true);
         });
 
@@ -124,17 +135,41 @@ export function Pair() {
   }, [phase]);
 
   // Returning devices still try silent device-trust redeem first inside
-  // submitPhoneAttestation. Fresh devices run the default passkey proof.
-  async function pair() {
+  // submitPhoneAttestation. Fresh devices pick a proof path from the
+  // menu so Private Browsing does not blindly create passkeys forever.
+  async function pair(proofMode: ProofChoice = passkeyHint ? 'passkey-auth' : 'passkey-create') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
+    const info = infoRef.current;
     inflightRef.current = true;
     setPhase(hasTrust ? 'returning' : 'pairing');
     setStatus('starting');
     setErrorMsg(null);
     try {
-      const r = await submitPhoneAttestation(sessionId, infoRef.current, {
-        onStatus: setStatus,
-      });
+      const oauthResult =
+        proofMode === 'google' ? await runOAuthProofOfLife('google', info.nonce) : null;
+      if (oauthResult && isOAuthError(oauthResult)) {
+        setPhase('ready');
+        setErrorMsg(oauthResult.error);
+        return;
+      }
+      const r = await submitPhoneAttestation(
+        sessionId,
+        info,
+        {
+          onStatus: setStatus,
+        },
+        {
+          mode: proofMode === 'google' ? 'oauth' : proofMode,
+          ...(oauthResult ? { oauthResult } : {}),
+        }
+      );
+      if (
+        proofMode === 'passkey-auth' &&
+        r.annotations?.phone_webauthn_error === 'credential_not_registered'
+      ) {
+        clearPasskeyHint();
+        setPasskeyHint(false);
+      }
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
     } catch (e) {
@@ -162,12 +197,15 @@ export function Pair() {
       setPhase('ready');
       return;
     }
-    // Calculator solved + desktop ready → pair immediately. The dialpad solve
-    // is the human gesture + intent, so there's no separate "Verify this
-    // device" tap (passkeys are off the mobile UX). Returning trusted devices
-    // still hit the silent redeem inside pair().
-    setPhase(hasTrust ? 'returning' : 'pairing');
-    void pair();
+    // Calculator solved + desktop ready. Returning trusted devices can
+    // redeem silently; fresh or storage-partitioned phones choose a proof
+    // path so we do not force a new passkey registration every scan.
+    if (hasTrust) {
+      setPhase('returning');
+      void pair();
+      return;
+    }
+    setPhase('ready');
   }
 
   // Full-bleed render for the dialpad phase — no Wordmark/pill chrome,
@@ -181,7 +219,7 @@ export function Pair() {
         nonce={nonce}
         challengeIndex={challengeIndex}
         actionLabel={readyToContinue ? 'SEND' : 'NEXT'}
-        onSend={phase === 'dialpad' ? () => void pair() : advanceChallenge}
+        onSend={advanceChallenge}
       />
     );
   }
@@ -231,19 +269,47 @@ export function Pair() {
           </div>
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold tracking-tight">
-              {hasTrust ? 'Welcome back' : 'Quick check'}
+              {hasTrust ? 'Welcome back' : 'Choose a check'}
             </h1>
             <p className="text-sm leading-relaxed text-muted">
               {hasTrust
                 ? 'We remember this device. One tap to confirm.'
-                : 'One tap to confirm this is a real device.'}
+                : 'Use a passkey if you already have one, or pick another proof.'}
             </p>
           </div>
-          <button onClick={() => pair()} className="btn btn-primary w-full py-4 text-base">
-            {hasTrust ? 'Confirm' : 'Verify this device'}
-          </button>
+          {errorMsg && (
+            <div className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-left text-xs text-red-100">
+              {errorMsg}
+            </div>
+          )}
+          {hasTrust ? (
+            <button onClick={() => pair()} className="btn btn-primary w-full py-4 text-base">
+              Confirm
+            </button>
+          ) : (
+            <div className="w-full space-y-3">
+              <button
+                onClick={() => pair('passkey-auth')}
+                className="btn btn-primary w-full py-4 text-base"
+              >
+                {passkeyHint ? 'Use passkey' : 'Use existing passkey'}
+              </button>
+              {PROVIDERS_CONFIGURED.google && (
+                <button onClick={() => pair('google')} className="btn w-full py-4 text-base">
+                  Continue with Google
+                </button>
+              )}
+              <button onClick={() => pair('passkey-create')} className="btn w-full py-4 text-base">
+                Create a new passkey
+              </button>
+            </div>
+          )}
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted/70">
-            {hasTrust ? 'Trusted device · same network' : 'No account · no password'}
+            {hasTrust
+              ? 'Trusted device · same network'
+              : PROVIDERS_CONFIGURED.google
+                ? 'Passkey · Google · device check'
+                : 'Passkey · device check'}
           </div>
         </div>
       )}
