@@ -14,11 +14,11 @@ function fail(message) {
 }
 
 const match = html.match(
-  /src="(https:\/\/static-integrity-dev-jw\.argus\.pw\/argus-loader\.iife\.js)"[\s\S]*?integrity="([^"]+)"/
+  /src="(https:\/\/static-integrity-dev-jw\.argus\.pw\/argus-bootstrap\.v1\.iife\.js)"[\s\S]*?integrity="([^"]+)"/
 );
 
 if (!match) {
-  fail('index.html is missing pinned argus-loader.iife.js');
+  fail('index.html is missing pinned argus-bootstrap.v1.iife.js');
 } else {
   const [, url, pinned] = match;
   const res = await fetch(url, { cache: 'no-store' });
@@ -28,10 +28,10 @@ if (!match) {
     const body = Buffer.from(await res.arrayBuffer());
     const actual = `sha384-${crypto.createHash('sha384').update(body).digest('base64')}`;
     if (actual !== pinned) {
-      fail(`loader SRI drift: pinned ${pinned}, actual ${actual}`);
+      fail(`bootstrap SRI drift: pinned ${pinned}, actual ${actual}`);
     }
   }
 }
 
 if (process.exitCode) process.exit(process.exitCode);
-console.log('argus-loader-sri: ok');
+console.log('argus-bootstrap-sri: ok');
