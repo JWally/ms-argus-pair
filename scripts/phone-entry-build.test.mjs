@@ -23,10 +23,20 @@ if (mainSource.includes('serviceWorker')) {
 if (!phoneSource.includes('serviceWorker.register') || !phoneSource.includes('/phone-sw.js')) {
   fail('phone entry should be the only place that registers the phone service worker');
 }
+if (
+  phoneSource.includes("from 'react'") ||
+  phoneSource.includes("from 'react-dom") ||
+  phoneSource.includes("from 'react-router-dom'")
+) {
+  fail('phone entry should not import React, ReactDOM, or the desktop router');
+}
 if (rootSw.includes("addEventListener('fetch'") || rootSw.includes('addEventListener("fetch"')) {
   fail('retired root service worker must not intercept desktop fetches');
 }
-if (phoneSw.includes("url.pathname.startsWith('/assets/')") && !phoneSw.includes("endsWith('.css')")) {
+if (
+  phoneSw.includes("url.pathname.startsWith('/assets/')") &&
+  !phoneSw.includes("endsWith('.css')")
+) {
   fail('phone service worker must not cache all /assets, especially JavaScript');
 }
 if (phoneSw.includes("endsWith('.js')")) {
@@ -54,6 +64,16 @@ try {
   const phoneBody = readFileSync(new URL(`assets/${phoneEntry}`, distUrl), 'utf8');
   if (phoneBody.includes('Scan · with') || phoneBody.includes('leaderboard')) {
     fail(`${basename(phoneEntry)} should not include desktop demo copy`);
+  }
+  const initialPhoneJs = [...phoneHtml.matchAll(/(?:src|href)="\/assets\/([^"]+\.js)"/g)].map(
+    (m) => m[1]
+  );
+  const initialPhoneBytes = initialPhoneJs.reduce(
+    (sum, name) => sum + readFileSync(new URL(`assets/${name}`, distUrl)).byteLength,
+    0
+  );
+  if (initialPhoneBytes > 25_000) {
+    fail(`phone initial JS should stay small; got ${initialPhoneBytes} bytes`);
   }
   if (!assets.includes('phone-sw.js') && !readdirSync(distUrl).includes('phone-sw.js')) {
     fail('dist should include phone-sw.js');
