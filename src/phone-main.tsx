@@ -3,7 +3,7 @@ import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from
 
 // Tiny DOM phone entry. It paints the cheap dialpad from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = 'passkey-auth' | 'passkey-create' | 'google';
+type ProofChoice = 'passkey' | 'google';
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
@@ -181,15 +181,14 @@ function advanceChallenge(): void {
   setState({ phase: 'ready' });
 }
 
-async function pair(
-  proofMode: ProofChoice = state.passkeyHint ? 'passkey-auth' : 'passkey-create'
-): Promise<void> {
+async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
   state.inflight = true;
   setState({ phase: state.hasTrust ? 'returning' : 'pairing', status: 'starting', errorMsg: null });
   try {
+    const passkeyMode = state.passkeyHint ? 'passkey-auth' : 'passkey-create';
     const options: SubmitPhoneAttestationOptions = {
-      mode: proofMode === 'google' ? 'oauth' : proofMode,
+      mode: proofMode === 'google' ? 'oauth' : passkeyMode,
     };
     if (proofMode === 'google') {
       const oauthMod = await loadOAuthModule();
@@ -209,7 +208,7 @@ async function pair(
       options
     );
     if (
-      proofMode === 'passkey-auth' &&
+      passkeyMode === 'passkey-auth' &&
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
     ) {
       state.pairMod.clearPasskeyHint();
@@ -415,9 +414,8 @@ async function renderReady(): Promise<void> {
             state.hasTrust
               ? '<button data-action="confirm" class="btn btn-primary w-full py-4 text-base">Confirm</button>'
               : `
-              <button data-action="passkey-auth" class="btn btn-primary w-full py-4 text-base">${state.passkeyHint ? 'Use passkey' : 'Use existing passkey'}</button>
-              ${googleConfigured ? '<button data-action="google" class="btn w-full py-4 text-base">Continue with Google</button>' : ''}
-              <button data-action="passkey-create" class="btn w-full py-4 text-base">Create a new passkey</button>`
+              <button data-action="passkey" class="btn btn-primary w-full py-4 text-base">Use passkey</button>
+              ${googleConfigured ? '<button data-action="google" class="btn w-full py-4 text-base">Continue with Google</button>' : ''}`
           }
         </div>
         <div class="text-[11px] uppercase tracking-[0.18em] text-muted/70">${
@@ -428,17 +426,14 @@ async function renderReady(): Promise<void> {
               : 'Passkey · device check'
         }</div>
       </div>
-    </div>`;
+  </div>`;
   root.querySelector('[data-action="confirm"]')?.addEventListener('click', () => void pair());
   root
-    .querySelector('[data-action="passkey-auth"]')
-    ?.addEventListener('click', () => void pair('passkey-auth'));
+    .querySelector('[data-action="passkey"]')
+    ?.addEventListener('click', () => void pair('passkey'));
   root
     .querySelector('[data-action="google"]')
     ?.addEventListener('click', () => void pair('google'));
-  root
-    .querySelector('[data-action="passkey-create"]')
-    ?.addEventListener('click', () => void pair('passkey-create'));
 }
 
 async function isGoogleConfigured(): Promise<boolean> {

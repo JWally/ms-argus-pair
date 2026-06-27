@@ -13,7 +13,7 @@ import { Wordmark } from '../components/Brand';
 import { Dialpad } from '../components/Dialpad';
 import { IconCheck, IconX, IconShield } from '../components/Icons';
 
-type ProofChoice = 'passkey-auth' | 'passkey-create' | 'google';
+type ProofChoice = 'passkey' | 'google';
 
 type Phase =
   | 'awaiting-desktop'
@@ -137,7 +137,7 @@ export function Pair() {
   // Returning devices still try silent device-trust redeem first inside
   // submitPhoneAttestation. Fresh devices pick a proof path from the
   // menu so Private Browsing does not blindly create passkeys forever.
-  async function pair(proofMode: ProofChoice = passkeyHint ? 'passkey-auth' : 'passkey-create') {
+  async function pair(proofMode: ProofChoice = 'passkey') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     const info = infoRef.current;
     inflightRef.current = true;
@@ -145,6 +145,7 @@ export function Pair() {
     setStatus('starting');
     setErrorMsg(null);
     try {
+      const passkeyMode = passkeyHint ? 'passkey-auth' : 'passkey-create';
       const oauthResult =
         proofMode === 'google' ? await runOAuthProofOfLife('google', info.nonce) : null;
       if (oauthResult && isOAuthError(oauthResult)) {
@@ -159,12 +160,12 @@ export function Pair() {
           onStatus: setStatus,
         },
         {
-          mode: proofMode === 'google' ? 'oauth' : proofMode,
+          mode: proofMode === 'google' ? 'oauth' : passkeyMode,
           ...(oauthResult ? { oauthResult } : {}),
         }
       );
       if (
-        proofMode === 'passkey-auth' &&
+        passkeyMode === 'passkey-auth' &&
         r.annotations?.phone_webauthn_error === 'credential_not_registered'
       ) {
         clearPasskeyHint();
@@ -289,19 +290,16 @@ export function Pair() {
           ) : (
             <div className="w-full space-y-3">
               <button
-                onClick={() => pair('passkey-auth')}
+                onClick={() => pair('passkey')}
                 className="btn btn-primary w-full py-4 text-base"
               >
-                {passkeyHint ? 'Use passkey' : 'Use existing passkey'}
+                Use passkey
               </button>
               {PROVIDERS_CONFIGURED.google && (
                 <button onClick={() => pair('google')} className="btn w-full py-4 text-base">
                   Continue with Google
                 </button>
               )}
-              <button onClick={() => pair('passkey-create')} className="btn w-full py-4 text-base">
-                Create a new passkey
-              </button>
             </div>
           )}
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted/70">
