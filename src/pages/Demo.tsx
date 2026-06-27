@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode-svg';
+import { Dialpad } from '../components/Dialpad';
 import {
   startDesktopSession,
   submitRaffleEntry,
@@ -125,6 +126,21 @@ function QrPanel({ svg, disabled = false }: { svg: string | null; disabled?: boo
 
 type RaffleStatus = 'idle' | 'submitting' | 'entered' | 'error';
 
+function StartPanel({ onStart }: { onStart: () => void }) {
+  const [startNonce] = useState(() => {
+    try {
+      return `demo-start:${crypto.randomUUID()}`;
+    } catch {
+      return `demo-start:${Date.now()}:${Math.random()}`;
+    }
+  });
+  return (
+    <div className="start-dialer mx-auto w-full max-w-[18rem] sm:max-w-[22rem] lg:max-w-[24rem]">
+      <Dialpad nonce={startNonce} actionLabel="START" onSend={onStart} />
+    </div>
+  );
+}
+
 export function Demo() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState('');
@@ -143,7 +159,6 @@ export function Demo() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const [entryGate, setEntryGate] = useState<RaffleEntryGate | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
-  const startedRef = useRef(false);
 
   async function refreshLeaderboard() {
     try {
@@ -205,7 +220,8 @@ export function Demo() {
     }).svg();
   }, [pairUrl]);
 
-  const showPairing = phase === 'idle' || phase === 'scanning' || phase === 'waiting';
+  const showStart = phase === 'idle';
+  const showPairing = phase === 'scanning' || phase === 'waiting';
   const showQr = showPairing;
 
   useEffect(
@@ -216,6 +232,9 @@ export function Demo() {
   );
 
   async function startDemo() {
+    if (phase === 'scanning' || phase === 'waiting') return;
+    stopRef.current?.();
+    stopRef.current = null;
     setPhase('scanning');
     setStatus('preparing session');
     setVerdict(null);
@@ -272,7 +291,6 @@ export function Demo() {
     setRaffleError(null);
     setRaffleEntry(null);
     setHandleInput('');
-    startedRef.current = true;
     void startDemo();
   }
 
@@ -316,12 +334,6 @@ export function Demo() {
     }
   }
 
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void startDemo();
-  }, []);
-
   return (
     <div className="mx-auto flex min-h-dvh max-w-6xl flex-col gap-10 px-6 py-10 sm:py-16">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -356,7 +368,12 @@ export function Demo() {
             wins!
           </p>
 
-          {/* Mobile-only inline QR — sits right under the intro line. */}
+          {/* Mobile-only start/QR — sits right under the intro line. */}
+          {showStart && (
+            <div className="mt-6 lg:hidden">
+              <StartPanel onStart={startDemo} />
+            </div>
+          )}
           {showQr && (
             <div className="mt-6 lg:hidden">
               <QrPanel svg={qrSvg} disabled={phoneConnected} />
@@ -429,6 +446,7 @@ export function Demo() {
 
         {/* Right column: desktop-only QR. */}
         <div className="hidden lg:block lg:pl-4">
+          {showStart && <StartPanel onStart={startDemo} />}
           {showQr && <QrPanel svg={qrSvg} disabled={phoneConnected} />}
         </div>
       </section>
