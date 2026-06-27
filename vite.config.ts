@@ -1,6 +1,10 @@
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { visualizer } from 'rollup-plugin-visualizer';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Bundle visualizer: emits stats.html during build when ANALYZE=1.
 // Skipped by default so the standard build / deploy path is unchanged.
@@ -87,8 +91,9 @@ export default defineConfig(({ mode }) => {
       outDir: 'dist',
       sourcemap: false,
       rollupOptions: {
-        output: {
-          inlineDynamicImports: true,
+        input: {
+          index: resolve(__dirname, 'index.html'),
+          phone: resolve(__dirname, 'phone.html'),
         },
       },
     },

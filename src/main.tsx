@@ -28,14 +28,3 @@ createRoot(rootElement).render(
     </BrowserRouter>
   </StrictMode>
 );
-
-// App-shell SW for repeat phone paints. It deliberately does not own
-// /api or mutation requests, and we do not force a controllerchange
-// reload — Safari reloads during validation were the old failure mode.
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((e) => {
-      console.warn('[argus-pair] service worker registration failed', e);
-    });
-  });
-}

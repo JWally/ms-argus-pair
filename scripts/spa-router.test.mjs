@@ -14,8 +14,8 @@ function route(uri) {
 const cases = [
   ['/', '/index.html'],
   ['', '/index.html'],
-  ['/pair/abc', '/index.html'],
-  ['/pair/abc/step', '/index.html'],
+  ['/pair/abc', '/phone.html'],
+  ['/pair/abc/step', '/phone.html'],
   ['/assets/missing.js', '/assets/missing.js'],
   ['/assets/index.css', '/assets/index.css'],
   ['/api/session/start', '/api/session/start'],

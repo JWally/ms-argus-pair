@@ -12,6 +12,11 @@ function handler(event) {
     return request;
   }
 
+  if (uri.indexOf('/pair/') === 0) {
+    request.uri = '/phone.html';
+    return request;
+  }
+
   var last = uri.split('/').pop() || '';
   if (last.indexOf('.') !== -1) {
     return request;
