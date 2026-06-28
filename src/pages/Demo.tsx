@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import QRCode from 'qrcode-svg';
 import {
   startDesktopSession,
@@ -356,29 +357,14 @@ export function Demo() {
             wins!
           </p>
 
-          {/* Mobile-only inline QR — sits right under the intro line. */}
-          {showQr && (
-            <div className="mt-6 lg:hidden">
-              <QrPanel svg={qrSvg} disabled={phoneConnected} />
-              {!phoneConnected && (
-                <div className="neon-callout mx-auto mt-4 max-w-[18rem] sm:max-w-[22rem]">
-                  <div className="neon-track">
-                    <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                    <span className="neon-text-red">See · the · demo</span>
-                    <span className="neon-text-green">No · install · No · login</span>
-                    <span className="neon-text-red">Try · it · live</span>
-                    <span className="neon-text-green">Scan · with · a · friend&apos;s · phone</span>
-                    <span className="neon-text-red">See · the · demo</span>
-                    <span className="neon-text-green">No · install · No · login</span>
-                    <span className="neon-text-red">Try · it · live</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+          <div className="mt-6 lg:hidden">
+            <Link className="btn btn-primary w-full px-6 py-4 text-base" to="/merchant">
+              Use mobile SSO
+            </Link>
+          </div>
 
           {showPairing && (
-            <div className="card mt-6 p-4">
+            <div className="card mt-6 hidden p-4 lg:block">
               <div className="label mb-2 flex items-center gap-2">
                 <span className="spinner" />{' '}
                 {phoneConnected

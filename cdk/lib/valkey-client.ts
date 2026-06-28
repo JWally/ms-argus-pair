@@ -28,7 +28,7 @@ import Redis from 'ioredis';
 const RL_INCR_LUA = `
 local cur = tonumber(redis.call('GET', KEYS[1]) or "0")
 if cur >= tonumber(ARGV[1]) then
-  return cur
+  return tonumber(ARGV[1]) + 1
 end
 local new = redis.call('INCR', KEYS[1])
 if new == 1 then

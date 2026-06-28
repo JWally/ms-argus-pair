@@ -296,6 +296,26 @@ export class PairStack extends cdk.Stack {
       integration,
     });
     api.addRoutes({
+      path: '/api/sso/start',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/sso/{id}/challenge',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/sso/{id}/validate',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/sso/{id}/claim',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
       // Temporary diagnostic — DNS+TCP+TLS reachability check against
       // the Valkey endpoint, for debugging the post-migration timeouts.
       path: '/api/_valkey-debug',

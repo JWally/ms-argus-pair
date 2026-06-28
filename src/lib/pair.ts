@@ -170,6 +170,27 @@ export interface DesktopSession {
   }>;
 }
 
+export interface SsoStartResult {
+  sessionId: string;
+  nonce: string;
+  expiresAt: number;
+  challengeUrl: string;
+}
+
+export interface SsoChallengeResult {
+  ok: true;
+  returnCode: string;
+  returnUrl: string;
+}
+
+export interface SsoValidateResult {
+  verdict: 'approved' | 'failed';
+  reason: string;
+  reasons: string[];
+  merchantSessionId: string;
+  nextDeviceTrust?: string | null;
+}
+
 interface SessionStartResp {
   sessionId: string;
   nonce: string;
@@ -414,6 +435,125 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     },
     result,
   };
+}
+
+async function runSsoLeg(payload: Record<string, unknown>): Promise<{
+  argusSessionId: string;
+  attestation: ArgusAttestation;
+}> {
+  const run = await getArgus().run({
+    cpi: ARGUS_CPI,
+    timeoutMs: 30_000,
+    attest: {
+      purpose: ATTEST_PURPOSE,
+      ttlSeconds: ATTEST_TTL_SECONDS,
+      payload,
+    },
+  });
+  if (!run.attestation) {
+    throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
+  }
+  return { argusSessionId: run.argusSessionId, attestation: run.attestation };
+}
+
+export async function startSsoSession(merchantSessionId: string): Promise<SsoStartResult> {
+  const leg = await runSsoLeg({ role: 'merchant-start', merchantSessionId });
+  return jsonFetch<SsoStartResult>(`${API}/sso/start`, {
+    method: 'POST',
+    body: JSON.stringify({ merchantSessionId, ...leg }),
+  });
+}
+
+export async function submitSsoChallenge(
+  sessionId: string,
+  nonce: string
+): Promise<SsoChallengeResult> {
+  const leg = await runSsoLeg({ role: 'argus-challenge', ssoSessionId: sessionId, nonce });
+  return jsonFetch<SsoChallengeResult>(`${API}/sso/${encodeURIComponent(sessionId)}/challenge`, {
+    method: 'POST',
+    body: JSON.stringify(leg),
+  });
+}
+
+export async function validateSsoReturn({
+  sessionId,
+  nonce,
+  returnCode,
+  mode,
+  oauthResult,
+  deviceTrustToken,
+}: {
+  sessionId: string;
+  nonce: string;
+  returnCode: string;
+  mode?: 'passkey-create' | 'passkey-auth' | 'oauth' | 'device-trust';
+  oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
+  deviceTrustToken?: string;
+}): Promise<SsoValidateResult> {
+  const useOAuth = mode === 'oauth';
+  const useDeviceTrust = mode === 'device-trust';
+  const passkeyMode = mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
+  const webauthnPromise: Promise<unknown | { error: string }> =
+    useOAuth || useDeviceTrust
+      ? Promise.resolve({ error: `mode_${mode}_skipped` })
+      : passkeyMode === 'passkey-auth'
+        ? authenticateExistingPasskey(nonce)
+        : createNewPasskey(nonce);
+  const legPromise = runSsoLeg({
+    role: 'merchant-validate',
+    ssoSessionId: sessionId,
+    nonce,
+    returnCode,
+  });
+  const [webauthnSettled, legSettled] = await Promise.allSettled([webauthnPromise, legPromise]);
+  if (legSettled.status !== 'fulfilled') throw legSettled.reason;
+  const webauthn =
+    webauthnSettled.status === 'fulfilled'
+      ? webauthnSettled.value
+      : { error: (webauthnSettled.reason as Error).message };
+  const createdCredentialId =
+    passkeyMode === 'passkey-create' &&
+    webauthnSettled.status === 'fulfilled' &&
+    webauthnSettled.value !== null &&
+    typeof webauthnSettled.value === 'object' &&
+    typeof (webauthnSettled.value as { id?: unknown }).id === 'string'
+      ? (webauthnSettled.value as { id: string }).id
+      : null;
+
+  const result = await jsonFetch<SsoValidateResult>(
+    `${API}/sso/${encodeURIComponent(sessionId)}/validate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        returnCode,
+        ...legSettled.value,
+        ...(useDeviceTrust && deviceTrustToken ? { deviceTrustToken } : {}),
+        ...(!useDeviceTrust && !useOAuth ? { webauthn } : {}),
+        ...(useOAuth && oauthResult ? { oauth: oauthResult } : {}),
+      }),
+    }
+  ).catch((e) => {
+    if (e instanceof HttpError && e.status === 403 && e.bodyJson?.verdict === 'failed') {
+      return e.bodyJson as unknown as SsoValidateResult;
+    }
+    throw e;
+  });
+  if (result.nextDeviceTrust) {
+    const { saveTrustToken } = await import('./device-trust');
+    await saveTrustToken(result.nextDeviceTrust);
+  }
+  if (result.verdict === 'approved' && createdCredentialId) writePasskeyHint(createdCredentialId);
+  return result;
+}
+
+export async function submitSsoClaim(
+  sessionId: string,
+  handle: string
+): Promise<RaffleEntryResult> {
+  return jsonFetch<RaffleEntryResult>(`${API}/sso/${encodeURIComponent(sessionId)}/claim`, {
+    method: 'POST',
+    body: JSON.stringify({ handle: handle.trim().toLowerCase() }),
+  });
 }
 
 // ── CLIENT (phone) ───────────────────────────────────────────────────────
