@@ -84,6 +84,7 @@ import {
   verifyDeviceTrust,
   type DeviceTrustVerifyResult,
 } from './pair-api/attestation/trust';
+import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 
 const TABLE = process.env.TABLE_NAME!;
 
@@ -269,6 +270,36 @@ function handleHash(h: string): { hash: string; code: string } {
 
 function hashToCode(hash: string): string {
   return `${hash.slice(0, 4)}-${hash.slice(4, 8)}`;
+}
+
+async function incrementLeaderboard(handle: string): Promise<{
+  hash: string;
+  code: string;
+  count: number;
+}> {
+  const { hash, code } = handleHash(handle);
+  const updated = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
+      // `lbPk` and `code` aren't used by the increment itself — they
+      // exist so LeaderboardIndex (GSI) can serve the top-N Query
+      // without a Scan. `lbPk` is a constant partition key all
+      // leaderboard rows share; `code` is the user-facing 6-char
+      // handle code projected into the index so the read doesn't
+      // have to recompute it from PK on every page view.
+      UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, lbPk = :lb, code = :code',
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':t': Math.floor(Date.now() / 1000),
+        ':lb': 'LB',
+        ':code': code,
+      },
+      ReturnValues: 'ALL_NEW',
+    })
+  );
+  const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
+  return { hash, code, count };
 }
 
 /**
@@ -584,6 +615,25 @@ interface SessionItem {
   verdictReason?: string;
 }
 
+interface SsoSessionItem {
+  PK: string;
+  SK: 'META';
+  nonce: string;
+  merchantSessionId: string;
+  startProfile: SsoLegProfile;
+  challengeProfile?: SsoLegProfile;
+  validateProfile?: SsoLegProfile;
+  returnCodeHash?: string;
+  returnCodeExpiresAt?: number;
+  returnCodeConsumedAt?: number;
+  claimHash?: string;
+  claimEnteredAt?: number;
+  verdict: 'pending' | 'approved' | 'failed';
+  verdictReason?: string;
+  expiresAt: number;
+  approvedAt?: number;
+}
+
 // ── Verdict pipeline ───────────────────────────────────────────────────────
 
 interface MerchantProjection {
@@ -766,6 +816,87 @@ function classifyScan(p: MerchantProjection | null, side: string): ClassifiedSca
     isMobileNetwork,
     isVpn,
   };
+}
+
+function ssoProfileFromScan(
+  argusSessionId: string,
+  attestation: AttestationInput,
+  scan: ClassifiedScan | null
+): SsoLegProfile {
+  return {
+    argusSessionId,
+    keyId: attestation.keyId,
+    ip: scan?.ip ?? null,
+    asnName: scan?.asnName ?? null,
+    country: scan?.country ?? null,
+    city: scan?.city ?? null,
+    score: scan?.individualScore ?? null,
+    isPhone: scan?.isPhone === true,
+    isProxy: scan?.isProxy ?? false,
+    isDatacenter: scan?.isDatacenter ?? false,
+    isVpn: scan?.isVpn ?? false,
+  };
+}
+
+function requirePhoneSsoScan(
+  scan: ClassifiedScan | null,
+  leg: 'start' | 'challenge' | 'validate'
+): { ok: true } | { ok: false; response: ReturnType<typeof jsonResp> } {
+  if (scan?.isPhone === true) return { ok: true };
+  return {
+    ok: false,
+    response: jsonResp(403, {
+      error: 'sso_requires_phone',
+      leg,
+      message: 'SSO is only available from phone-classified Argus scans.',
+    }),
+  };
+}
+
+function hashSsoReturnCode(code: string): string {
+  return createHash('sha256').update(`argus-pair-sso-return:${code}`).digest('hex');
+}
+
+function validateSsoAttestation(
+  body: Record<string, unknown>,
+  expected: { role: string; sessionId?: string; nonce?: string; returnCode?: string }
+): { ok: true; attestation: AttestationInput } | { ok: false; status: number; body: unknown } {
+  const att = validateAttestInput(body);
+  const argusSessionId = body.argusSessionId as string | undefined;
+  if (!argusSessionId || !att) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'missing_argusSessionId_or_attestation' },
+    };
+  }
+  const verified = verifyAttestation(att);
+  if (!verified.ok || !verified.decoded) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'attestation_invalid', reason: verified.reason },
+    };
+  }
+  const payload = verified.decoded.payload as {
+    role?: string;
+    ssoSessionId?: string;
+    nonce?: string;
+    returnCode?: string;
+  };
+  if (payload.role !== expected.role) {
+    return { ok: false, status: 400, body: { error: 'payload_role_mismatch' } };
+  }
+  if (expected.sessionId && payload.ssoSessionId !== expected.sessionId) {
+    return { ok: false, status: 400, body: { error: 'payload_session_mismatch' } };
+  }
+  if (expected.nonce && payload.nonce !== expected.nonce) {
+    return { ok: false, status: 400, body: { error: 'payload_nonce_mismatch' } };
+  }
+  if (expected.returnCode && payload.returnCode !== expected.returnCode) {
+    return { ok: false, status: 400, body: { error: 'payload_return_code_mismatch' } };
+  }
+  return { ok: true, attestation: att };
 }
 
 interface VerdictResult {
@@ -1175,6 +1306,13 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return (res.Item as SessionItem) ?? null;
 }
 
+async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: { PK: `SSO#${sessionId}`, SK: 'META' } })
+  );
+  return (res.Item as SsoSessionItem | undefined) ?? null;
+}
+
 // ── OAuth proof-of-life ────────────────────────────────────────────────
 //
 // Same shape as WebAuthnAnnotations so the verdict branch below stays
@@ -1262,6 +1400,7 @@ const lambdaHandler = async (event: {
   // Routes that don't carry an {id} path parameter — skip the UUID check.
   const idLessRoutes = new Set([
     'POST /api/session/start',
+    'POST /api/sso/start',
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
@@ -1413,6 +1552,283 @@ const lambdaHandler = async (event: {
           phoneToken: phoneWsToken,
         },
       });
+    }
+
+    case 'POST /api/sso/start': {
+      const checked = validateSsoAttestation(body, { role: 'merchant-start' });
+      if (!checked.ok) return jsonResp(checked.status, checked.body);
+      const argusSessionId = body.argusSessionId as string;
+      const id = randomUUID();
+      const nonce = randomBytes(32).toString('base64url');
+      const merchantSessionId =
+        typeof body.merchantSessionId === 'string' && body.merchantSessionId.length > 0
+          ? body.merchantSessionId.slice(0, 128)
+          : randomUUID();
+      const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+      const projection = await fetchProjection(argusSessionId);
+      const scan = classifyScan(projection, 'sso_start');
+      const phoneCheck = requirePhoneSsoScan(scan, 'start');
+      if (!phoneCheck.ok) return phoneCheck.response;
+      const item: SsoSessionItem = {
+        PK: `SSO#${id}`,
+        SK: 'META',
+        nonce,
+        merchantSessionId,
+        startProfile: ssoProfileFromScan(argusSessionId, checked.attestation, scan),
+        verdict: 'pending',
+        expiresAt,
+      };
+      await ddb.send(
+        new PutCommand({
+          TableName: TABLE,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(PK)',
+        })
+      );
+      return jsonResp(200, {
+        sessionId: id,
+        nonce,
+        expiresAt,
+        challengeUrl: `/sso/challenge/${id}`,
+      });
+    }
+
+    case 'POST /api/sso/{id}/challenge': {
+      const s = await loadSsoSession(sessionId!);
+      if (!s) return jsonResp(404, { error: 'sso_session_not_found' });
+      if (s.challengeProfile) return jsonResp(409, { error: 'sso_challenge_already_completed' });
+      const checked = validateSsoAttestation(body, {
+        role: 'argus-challenge',
+        sessionId: sessionId!,
+        nonce: s.nonce,
+      });
+      if (!checked.ok) return jsonResp(checked.status, checked.body);
+      const argusSessionId = body.argusSessionId as string;
+      const projection = await fetchProjection(argusSessionId);
+      const scan = classifyScan(projection, 'sso_challenge');
+      const phoneCheck = requirePhoneSsoScan(scan, 'challenge');
+      if (!phoneCheck.ok) return phoneCheck.response;
+      const challengeProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
+      const code = mintReturnCode({ sessionId: sessionId!, ttlSeconds: 90 });
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: `SSO#${sessionId}`, SK: 'META' },
+          UpdateExpression:
+            'SET challengeProfile = :c, returnCodeHash = :h, returnCodeExpiresAt = :e',
+          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(challengeProfile)',
+          ExpressionAttributeValues: {
+            ':c': challengeProfile,
+            ':h': hashSsoReturnCode(code.value),
+            ':e': Math.floor(code.expiresAt / 1000),
+          },
+        })
+      );
+      return jsonResp(200, {
+        ok: true,
+        returnCode: code.value,
+        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}`,
+      });
+    }
+
+    case 'POST /api/sso/{id}/validate': {
+      const s = await loadSsoSession(sessionId!);
+      if (!s) return jsonResp(404, { error: 'sso_session_not_found' });
+      if (!s.challengeProfile || !s.returnCodeHash || !s.returnCodeExpiresAt) {
+        return jsonResp(409, { error: 'sso_challenge_not_completed' });
+      }
+      if (s.returnCodeConsumedAt) {
+        return jsonResp(409, { error: 'sso_return_code_consumed' });
+      }
+      const returnCode = typeof body.returnCode === 'string' ? body.returnCode : '';
+      if (!returnCode || hashSsoReturnCode(returnCode) !== s.returnCodeHash) {
+        return jsonResp(401, { error: 'sso_return_code_invalid' });
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (now > s.returnCodeExpiresAt) {
+        return jsonResp(401, { error: 'sso_return_code_expired' });
+      }
+      const checked = validateSsoAttestation(body, {
+        role: 'merchant-validate',
+        sessionId: sessionId!,
+        nonce: s.nonce,
+        returnCode,
+      });
+      if (!checked.ok) return jsonResp(checked.status, checked.body);
+      const argusSessionId = body.argusSessionId as string;
+      const projection = await fetchProjection(argusSessionId);
+      const scan = classifyScan(projection, 'sso_validate');
+      const phoneCheck = requirePhoneSsoScan(scan, 'validate');
+      if (!phoneCheck.ok) return phoneCheck.response;
+      const validateProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
+      const requesterIp = getViewerIp(event);
+      const deviceTrustToken =
+        typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
+      const oauthInput = body.oauth;
+      const webauthnInput = body.webauthn;
+      let trustResult: DeviceTrustVerifyResult | null = null;
+      let proofOfLife = false;
+      let proofAnnotations: Record<string, unknown> = {};
+
+      if (deviceTrustToken) {
+        trustResult = await verifyDeviceTrust(
+          deviceTrustToken,
+          requesterIp,
+          checked.attestation.publicKey
+        );
+        if (!trustResult.ok) {
+          return jsonResp(401, {
+            error: 'device_trust_rejected',
+            reason: trustResult.reason,
+            clearDeviceTrust: true,
+          });
+        }
+        proofOfLife = true;
+        proofAnnotations = {
+          phone_webauthn_attested: true,
+          phone_webauthn_format: 'device_trust',
+          phone_device_trust_redeemed: true,
+        };
+      } else {
+        const proof = oauthInput
+          ? await verifyOAuthProofOfLife(oauthInput, s.nonce)
+          : await verifyWebAuthn(webauthnInput, s.nonce, checked.attestation.publicKey);
+        proofOfLife = proof.phone_webauthn_attested === true;
+        proofAnnotations = proof as unknown as Record<string, unknown>;
+      }
+
+      if (!proofOfLife) {
+        return jsonResp(401, {
+          error: 'proof_of_life_required',
+          annotations: proofAnnotations,
+        });
+      }
+      const verdict = evaluateSsoContinuity({
+        start: s.startProfile,
+        challenge: s.challengeProfile,
+        validate: validateProfile,
+      });
+      const approvedAt = verdict.ok ? now : undefined;
+      let nextDeviceTrust: string | null = null;
+      if (verdict.ok && !trustResult?.ok && proofAnnotations.phone_webauthn_attested === true) {
+        nextDeviceTrust = await mintDeviceTrust(
+          checked.attestation.publicKey,
+          checked.attestation.keyId,
+          requesterIp
+        );
+      }
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { PK: `SSO#${sessionId}`, SK: 'META' },
+          UpdateExpression:
+            'SET validateProfile = :v, verdict = :verdict, verdictReason = :reason, returnCodeConsumedAt = :now, proofAnnotations = :proof' +
+            (approvedAt ? ', approvedAt = :approvedAt' : ''),
+          ConditionExpression:
+            'attribute_exists(PK) AND attribute_not_exists(returnCodeConsumedAt)',
+          ExpressionAttributeValues: {
+            ':v': validateProfile,
+            ':verdict': verdict.ok ? 'approved' : 'failed',
+            ':reason': verdict.reason,
+            ':now': now,
+            ':proof': proofAnnotations,
+            ...(approvedAt ? { ':approvedAt': approvedAt } : {}),
+          },
+        })
+      );
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      };
+      return {
+        statusCode: verdict.ok ? 200 : 403,
+        headers,
+        ...(verdict.ok
+          ? {
+              cookies: [
+                `argus_sso_approval=${encodeURIComponent(sessionId!)}; Path=/merchant; Max-Age=600; Secure; HttpOnly; SameSite=Lax`,
+              ],
+            }
+          : {}),
+        body: JSON.stringify({
+          verdict: verdict.ok ? 'approved' : 'failed',
+          reason: verdict.reason,
+          reasons: verdict.reasons,
+          merchantSessionId: s.merchantSessionId,
+          nextDeviceTrust,
+        }),
+      };
+    }
+
+    case 'POST /api/sso/{id}/claim': {
+      const handle = normalizeHandle(body.handle);
+      if (!handle) {
+        return jsonResp(400, {
+          error: 'invalid_handle',
+          allowed: '3-64 chars, [a-z0-9._@-]',
+        });
+      }
+      const s = await loadSsoSession(sessionId!);
+      if (!s) return jsonResp(410, { error: 'sso_session_not_found' });
+      if (s.verdict !== 'approved' || !s.challengeProfile || !s.validateProfile) {
+        return jsonResp(409, { error: 'sso_session_not_approved', verdict: s.verdict });
+      }
+      if (s.claimHash) {
+        return jsonResp(409, {
+          error: 'session_already_entered',
+          code: hashToCode(s.claimHash),
+        });
+      }
+
+      const siteHost = desktopSiteHost(event);
+      const deviceKey = s.validateProfile.keyId || s.challengeProfile.keyId || s.startProfile.keyId;
+      if (!deviceKey) return jsonResp(409, { error: 'sso_session_missing_device_key' });
+
+      // Reuse the game/raffle rate limiter for SSO claims. The SSO flow
+      // is single-device, so its buckets map to the stable SDK key plus
+      // the observed start/return networks instead of phone+desktop.
+      const rl = await checkRaffleRateLimits({
+        phonePub: deviceKey,
+        desktopPub: s.startProfile.keyId ?? deviceKey,
+        desktopUa: 'sso-start',
+        desktopIp: s.startProfile.ip ?? '',
+        phoneUa: 'sso-validate',
+        phoneIp: s.validateProfile.ip ?? '',
+        authIdentity: `sso-device:${deviceKey}`,
+        siteHost,
+      });
+      if (!rl.ok) {
+        return jsonResp(429, {
+          error: 'rate_limited',
+          bucket: rl.tripped,
+          site: siteHost,
+        });
+      }
+
+      const { hash, code } = handleHash(handle);
+      const enteredAt = Math.floor(Date.now() / 1000);
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: { PK: `SSO#${sessionId}`, SK: 'META' },
+            UpdateExpression: 'SET claimHash = :h, claimEnteredAt = :t',
+            ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(claimHash)',
+            ExpressionAttributeValues: {
+              ':h': hash,
+              ':t': enteredAt,
+            },
+          })
+        );
+      } catch (err: unknown) {
+        const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+        if (isConflict) return jsonResp(409, { error: 'session_already_entered' });
+        throw err;
+      }
+
+      const entry = await incrementLeaderboard(handle);
+      const count = entry.count;
+      return jsonResp(200, { ok: true, code, count });
     }
 
     case 'GET /api/session/{id}/info': {

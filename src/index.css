@@ -14,6 +14,7 @@
       radial-gradient(1200px 600px at 50% -20%, rgba(77, 25, 121, 0.18), transparent 60%),
       radial-gradient(800px 400px at 90% 110%, rgba(77, 25, 121, 0.1), transparent 60%), #060608;
     color: rgb(243, 244, 246);
+    overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
@@ -842,5 +843,138 @@
   }
   .dialer-key-target {
     animation: none;
+  }
+}
+
+.sso-shell {
+  min-width: 0;
+  border: 1px solid rgb(42 42 48 / 0.9);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.015)),
+    rgb(14 14 18 / 0.88);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 24px 70px -34px rgb(0 0 0 / 0.85);
+  padding: 1.5rem;
+}
+
+.sso-side-panel {
+  min-width: 0;
+  border: 1px solid rgb(42 42 48 / 0.9);
+  border-radius: 8px;
+  background: rgb(10 10 13 / 0.72);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  padding: 1.25rem;
+}
+
+.sso-session {
+  min-width: 10rem;
+  border: 1px solid rgb(77 25 121 / 0.42);
+  border-radius: 8px;
+  background: rgb(77 25 121 / 0.12);
+  padding: 0.9rem 1rem;
+}
+
+.sso-check-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  border-top: 1px solid rgb(42 42 48 / 0.72);
+  padding-top: 1rem;
+}
+
+.sso-check-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.sso-route {
+  display: grid;
+  grid-template-columns: max-content minmax(1.5rem, 1fr) max-content minmax(1.5rem, 1fr) max-content;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.sso-route-node {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border: 1px solid rgb(42 42 48 / 0.9);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.035);
+  padding: 0.55rem 0.7rem;
+  color: rgb(148 148 158);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sso-route-node-active {
+  border-color: rgb(168 85 247 / 0.55);
+  background: rgb(77 25 121 / 0.18);
+  color: rgb(245 245 246);
+}
+
+.sso-route-node-done {
+  border-color: rgb(34 197 94 / 0.45);
+  background: rgb(34 197 94 / 0.12);
+  color: rgb(187 247 208);
+}
+
+.sso-route-line {
+  height: 1px;
+  min-width: 1.5rem;
+  background: rgb(42 42 48 / 0.95);
+}
+
+.sso-route-line-active {
+  background: linear-gradient(90deg, rgb(34 197 94 / 0.7), rgb(168 85 247 / 0.65));
+}
+
+.sso-input {
+  width: 100%;
+  border: 1px solid rgb(77 25 121 / 0.6);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 0.42);
+  padding: 0.95rem 1rem;
+  color: white;
+  font-family:
+    JetBrains Mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
+  font-size: 0.95rem;
+  outline: none;
+}
+
+.sso-input::placeholder {
+  color: rgb(148 148 158 / 0.78);
+}
+
+.sso-input:focus {
+  border-color: rgb(168 85 247 / 0.86);
+  box-shadow: 0 0 0 3px rgb(77 25 121 / 0.22);
+}
+
+@media (max-width: 480px) {
+  .sso-route {
+    grid-template-columns: minmax(0, 1fr) 0.75rem minmax(0, 1fr) 0.75rem minmax(0, 1fr);
+    gap: 0.35rem;
+  }
+
+  .sso-route-node {
+    gap: 0.28rem;
+    padding: 0.5rem 0.35rem;
+    font-size: 0.62rem;
   }
 }
