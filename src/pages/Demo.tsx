@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import QRCode from 'qrcode-svg';
+import { QrCanvas, buildQrMatrix, type QrMatrix } from '../lib/qr';
 import {
   fetchLeaderboard,
   fetchRaffleStatus,
@@ -113,38 +113,6 @@ function QrLoadingGlyphs() {
       </div>
     </div>
   );
-}
-
-type QrMatrix = { size: number; modules: boolean[][]; quiet: number };
-
-/**
- * Paints the QR module grid onto a <canvas> (flat pixels) instead of injecting
- * the SVG <rect> coordinate list into the DOM. A scraper can no longer read the
- * URL out of the markup — it has to capture pixels and run a QR decoder
- * (i.e. screenshot + extract). Same matrix, same encoded URL.
- */
-function QrCanvas({ matrix }: { matrix: QrMatrix }) {
-  const ref = useRef<HTMLCanvasElement | null>(null);
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-    const { size, modules, quiet } = matrix;
-    const span = size + quiet * 2;
-    const scale = 8; // backing px per module; CSS scales it to the slot
-    canvas.width = span * scale;
-    canvas.height = span * scale;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#000000';
-    for (let r = 0; r < size; r += 1) {
-      for (let c = 0; c < size; c += 1) {
-        if (modules[r][c]) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
-      }
-    }
-  }, [matrix]);
-  return <canvas ref={ref} />;
 }
 
 function QrPanel({ matrix, disabled = false }: { matrix: QrMatrix | null; disabled?: boolean }) {
@@ -338,20 +306,10 @@ export function Demo() {
     };
   }, [phase, sessionId]);
 
-  const qrMatrix = useMemo<QrMatrix | null>(() => {
-    if (!pairUrl) return null;
-    // Same content + ecl as before -> identical QR matrix; we just read the
-    // module grid and paint it to a canvas instead of emitting SVG into the DOM.
-    const qr = new QRCode({
-      content: pairUrl,
-      padding: 2,
-      color: '#000000',
-      background: '#ffffff',
-      ecl: 'M',
-      container: 'svg-viewbox',
-    });
-    return { size: qr.qrcode.moduleCount, modules: qr.qrcode.modules, quiet: 2 };
-  }, [pairUrl]);
+  const qrMatrix = useMemo<QrMatrix | null>(
+    () => (pairUrl ? buildQrMatrix(pairUrl) : null),
+    [pairUrl]
+  );
 
   const showPairing = phase === 'idle' || phase === 'scanning' || phase === 'waiting';
 
