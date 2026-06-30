@@ -3,9 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="theme-color" content="#4d1979" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>Pair · two-device verification</title>
+    <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+    <link
+      rel="preload"
+      href="/fonts/JetBrainsMono-Regular.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <title>Argus Pair · Stop bots. Prove the human.</title>
     <!-- Argus integrity SDK. Provides window.argus.run() / .signAssertion() /
          .getDevicePublicKey() used by the dual-scan co-attestation flow.
          `defer`: the SDK isn't touched until the user taps the button, so it
@@ -38,49 +46,63 @@
          scrollbars, and any html-level overflow can still leak. */
       html,
       body {
-        background: #0a0a0a;
+        background: #0d0f1a;
         color: rgba(255, 255, 255, 0.92);
         margin: 0;
       }
     </style>
   </head>
-  <body class="bg-bg text-white font-mono">
+  <body class="bg-bg-primary text-fg-primary">
     <!--
       Inline pre-React splash. Paints at first byte so the user sees the
       brand + a spinning indicator instead of a blank screen during the
-      ~1.5s bundle download + parse window on mobile 4G. React clobbers
-      `<div id="root">` once it mounts, so the splash naturally goes away
-      without a teardown step. Kept tiny on purpose — no external CSS,
-      no fonts, just inline styles.
+      ~1.5s bundle download + parse window on mobile 4G. React replaces
+      `#root`'s children when it mounts, so the splash naturally goes away
+      without a teardown step.
+
+      IMPORTANT: the flex/centering layout lives on the INNER `.splash`
+      wrapper, NOT on `#root`. React keeps `#root`'s own inline `style`
+      attribute after mount — if `display:flex; align-items:center` sat on
+      `#root`, the whole app would be shrink-wrapped and centered into a
+      narrow column. `#root` keeps only FOUC-safe paint + font props.
     -->
     <div
       id="root"
       style="
-        min-height: 100dvh;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 1.5rem;
-        background: #0a0a0a;
+        background: #0d0f1a;
         color: rgba(255, 255, 255, 0.92);
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-family:
+          'Inter',
+          system-ui,
+          -apple-system,
+          sans-serif;
       "
     >
-      <div style="font-size: 1.15rem; font-weight: 600; letter-spacing: 0.04em">
-        argus<span style="color: #b388ff">.pair</span>
-      </div>
       <div
-        aria-hidden="true"
         style="
-          width: 28px;
-          height: 28px;
-          border-radius: 50%;
-          border: 2px solid rgba(255, 255, 255, 0.18);
-          border-top-color: #b388ff;
-          animation: argusPairSpin 0.7s linear infinite;
+          min-height: 100dvh;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 1.5rem;
         "
-      ></div>
+      >
+        <div style="font-size: 1.15rem; font-weight: 600; letter-spacing: 0.04em">
+          argus<span style="color: #b388ff">.pair</span>
+        </div>
+        <div
+          aria-hidden="true"
+          style="
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.18);
+            border-top-color: #b388ff;
+            animation: argusPairSpin 0.7s linear infinite;
+          "
+        ></div>
+      </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

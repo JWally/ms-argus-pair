@@ -1,20 +1,26 @@
 /**
- * Brand mark — a small "P" rendered as a stylised paired-link glyph.
- * Used as the wordmark for the captcha; deliberately neutral, not
- * branded as the underlying detection service.
+ * Pair product mark — uses the same concentric "eye/target" glyph as the
+ * main Argus marketing site (ms-argus-www Logo), rendered in an accent box.
  */
-function BrandMark({ className = 'h-6 w-6' }: { className?: string }) {
+function BrandMark({ className = 'h-7 w-7' }: { className?: string }) {
   return (
-    <svg viewBox="0 0 32 32" className={className} aria-hidden>
-      <defs>
-        <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#7b34c5" />
-          <stop offset="100%" stopColor="#3f1466" />
-        </linearGradient>
-      </defs>
-      <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#brand-grad)" />
-      <path d="M11 9h7a5 5 0 0 1 0 10h-3v4h-4V9zm4 3v4h3a2 2 0 0 0 0-4h-3z" fill="#fff" />
-    </svg>
+    <span
+      className={`inline-flex items-center justify-center rounded-xl bg-accent text-white ${className}`}
+      aria-hidden
+    >
+      <svg
+        width="60%"
+        height="60%"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+      >
+        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
+        <path d="M12 6c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6z" />
+        <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
   );
 }
 
@@ -22,7 +28,7 @@ export function Wordmark({ className = '' }: { className?: string }) {
   return (
     <div className={`flex items-center gap-2 ${className}`}>
       <BrandMark className="h-7 w-7" />
-      <span className="text-base font-semibold tracking-tight text-white/90">Pair</span>
+      <span className="text-base font-semibold tracking-tight text-fg-primary">Argus Pair</span>
     </div>
   );
 }
