@@ -22,14 +22,19 @@ type UpMsg =
   | { event: 'result'; sessionId: string; verdict: string; reason: string | null }
   | { event: 'error'; message: string };
 
-function useHostOrigin(): string {
-  // The loader passes the host page's origin so we can target postMessage.
+const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
+
+/** Read the loader-provided config from the iframe URL (host origin + merchant CPI). */
+function useEmbedConfig(): { hostOrigin: string; cpi: string | undefined } {
   const params = new URLSearchParams(window.location.search);
-  return params.get('origin') || '*';
+  const hostOrigin = params.get('origin') || '*';
+  const rawCpi = params.get('cpi') || '';
+  // Only forward a well-formed CPI; otherwise fall back to the engine default.
+  return { hostOrigin, cpi: CPI_FORMAT.test(rawCpi) ? rawCpi : undefined };
 }
 
 export function Embed() {
-  const hostOrigin = useHostOrigin();
+  const { hostOrigin, cpi } = useEmbedConfig();
   const [matrix, setMatrix] = useState<QrMatrix | null>(null);
   const [status, setStatus] = useState('starting…');
   const [connected, setConnected] = useState(false);
@@ -42,15 +47,18 @@ export function Embed() {
     let cancelled = false;
     (async () => {
       try {
-        const session = await startDesktopSession({
-          onStatus: (s) => !cancelled && setStatus(s),
-          onPhoneConnected: () => {
-            if (cancelled) return;
-            setConnected(true);
-            postUp({ event: 'connected' });
+        const session = await startDesktopSession(
+          {
+            onStatus: (s) => !cancelled && setStatus(s),
+            onPhoneConnected: () => {
+              if (cancelled) return;
+              setConnected(true);
+              postUp({ event: 'connected' });
+            },
+            onError: (e) => postUp({ event: 'error', message: String(e) }),
           },
-          onError: (e) => postUp({ event: 'error', message: String(e) }),
-        });
+          { cpi }
+        );
         if (cancelled) {
           session.stop();
           return;
@@ -80,7 +88,7 @@ export function Embed() {
       cancelled = true;
       sessionRef.current?.stop();
     };
-  }, [hostOrigin]);
+  }, [hostOrigin, cpi]);
 
   return (
     <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg-primary p-4 text-fg-primary">

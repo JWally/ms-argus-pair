@@ -208,7 +208,19 @@ interface VerdictShape {
   annotations?: Record<string, unknown>;
 }
 
-export async function startDesktopSession(events: PairEvents = {}): Promise<DesktopSession> {
+export interface StartDesktopOptions {
+  /**
+   * Merchant CPI to attribute this pairing's attestation + usage to. Defaults
+   * to the build-pinned/test CPI when omitted, so the demo and /pair page are
+   * unaffected; the embeddable widget passes the host's `data-cpi` through here.
+   */
+  cpi?: string;
+}
+
+export async function startDesktopSession(
+  events: PairEvents = {},
+  opts: StartDesktopOptions = {}
+): Promise<DesktopSession> {
   events.onStatus?.('starting session');
 
   // Race the WS TCP+TLS handshake against the /session/start HTTP
@@ -375,7 +387,7 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     try {
       const argus = getArgus();
       const run = await argus.run({
-        cpi: ARGUS_CPI,
+        cpi: opts.cpi || ARGUS_CPI,
         timeoutMs: 30_000,
         attest: {
           purpose: ATTEST_PURPOSE,
