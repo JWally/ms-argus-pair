@@ -29,6 +29,12 @@ declare module 'qrcode-svg' {
   class QRCode {
     constructor(opts: QRCodeOptions | string);
     svg(opt?: { container?: QRCodeOptions['container'] }): string;
+    /** Underlying QR model — module grid, exposed for canvas rendering. */
+    readonly qrcode: {
+      moduleCount: number;
+      modules: boolean[][];
+      isDark(row: number, col: number): boolean;
+    };
   }
   export default QRCode;
 }

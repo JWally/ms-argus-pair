@@ -34,6 +34,7 @@ export default [
         atob: 'readonly',
         TextEncoder: 'readonly',
         TextDecoder: 'readonly',
+        HTMLCanvasElement: 'readonly',
         // Lib DOM types for WebRTC + Fetch in our pairing client.
         RTCPeerConnection: 'readonly',
         RTCSessionDescription: 'readonly',
