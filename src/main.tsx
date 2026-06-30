@@ -24,6 +24,7 @@ const MerchantValidate = lazy(() =>
 );
 const ClaimSpot = lazy(() => import('./pages/ClaimSpot').then((m) => ({ default: m.ClaimSpot })));
 const Metrics = lazy(() => import('./pages/Metrics').then((m) => ({ default: m.Metrics })));
+const Embed = lazy(() => import('./pages/Embed').then((m) => ({ default: m.Embed })));
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
@@ -40,6 +41,7 @@ createRoot(rootElement).render(
           <Route path="/claim" element={<ClaimSpot />} />
           <Route path="/metrics" element={<Metrics />} />
           <Route path="/pair/:roomId" element={<Pair />} />
+          <Route path="/embed" element={<Embed />} />
         </Routes>
       </Suspense>
     </BrowserRouter>
