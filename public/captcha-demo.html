@@ -65,9 +65,10 @@
       // result callback named in data-onresult
       function onArgusResult(r) {
         pushLog({ RESULT: r });
-        // In production: POST r.sessionId to your server, which calls
-        // GET /v1/session/{cpi}/{session_id} with the secret key to get the
-        // trusted verdict. Never trust r.verdict from the browser alone.
+        // In production: send r.token to your server, which POSTs it to
+        //   {pairOrigin}/api/verify   body { token, cpi }
+        // to get the trusted { valid, verdict, sessionId, cpi }. Never trust
+        // r.verdict from the browser alone — the token is the proof.
       }
       window.onArgusResult = onArgusResult;
     </script>

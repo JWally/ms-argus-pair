@@ -64,6 +64,8 @@ type SessionFieldBlob = Record<string, unknown>;
 export interface SessionMeta {
   nonce: string;
   expiresAt: number;
+  /** Merchant CPI this session is attributed to, when created via the embed widget. */
+  cpi?: string | null;
 }
 
 export interface PhoneBundle {

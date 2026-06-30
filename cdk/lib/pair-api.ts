@@ -85,8 +85,12 @@ import {
   type DeviceTrustVerifyResult,
 } from './pair-api/attestation/trust';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
+import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 
 const TABLE = process.env.TABLE_NAME!;
+
+/** Public merchant client id embedded in the widget; attributes a pairing. */
+const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
 
 const MERCHANT_API_URL = process.env.MERCHANT_API_URL || '';
 const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
@@ -609,6 +613,7 @@ interface SessionItem {
   SK: string;
   nonce: string;
   expiresAt: number;
+  cpi?: string | null;
   desktopAttestation?: StoredAttestation;
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
@@ -1290,6 +1295,7 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       SK: 'META',
       nonce: meta.nonce,
       expiresAt: meta.expiresAt,
+      cpi: meta.cpi ?? null,
       verdict: phone?.verdict ?? 'pending',
       verdictReason: phone?.reason ?? undefined,
       desktopAttestation: desktop as unknown as StoredAttestation | undefined,
@@ -1404,6 +1410,7 @@ const lambdaHandler = async (event: {
     'POST /api/raffle/entry',
     'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
+    'POST /api/verify',
   ]);
   if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
@@ -1512,8 +1519,12 @@ const lambdaHandler = async (event: {
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+      // Embeddable widget attributes the pairing to the merchant's CPI. Only a
+      // well-formed CPI is persisted; anything else stays null (demo/own-site).
+      const rawCpi = (body as { cpi?: unknown }).cpi;
+      const cpi = typeof rawCpi === 'string' && CPI_FORMAT.test(rawCpi) ? rawCpi : null;
       if (isValkeySessionsEnabled()) {
-        const created = await startSessionValkey(id, { nonce, expiresAt });
+        const created = await startSessionValkey(id, { nonce, expiresAt, cpi });
         if (!created) {
           // UUIDv4 collision — vanishingly rare, but mirrors the
           // DDB ConditionExpression rejection so the caller can retry.
@@ -1525,6 +1536,7 @@ const lambdaHandler = async (event: {
           SK: 'META',
           nonce,
           expiresAt,
+          cpi,
           verdict: 'pending',
         };
         await ddb.send(
@@ -2378,6 +2390,59 @@ const lambdaHandler = async (event: {
         verdict: s.verdict,
         reason: s.verdictReason ?? null,
         annotations: (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
+      });
+    }
+
+    // ── Embeddable widget: mint a signed verdict token (siteverify) ──────
+    // The desktop (embed iframe) calls this after the paired verdict, then
+    // postMessages the token to the host page. Auth is the same bootstrap
+    // wsToken as /result — only a session participant can mint.
+    case 'GET /api/session/{id}/verdict-token': {
+      const vtToken =
+        event.queryStringParameters?.t ||
+        (event.headers?.authorization || event.headers?.Authorization || '').replace(
+          /^Bearer\s+/i,
+          ''
+        );
+      const vtClaims = vtToken ? await verifyBootstrapToken(vtToken) : null;
+      if (!vtClaims || vtClaims.sessionId !== sessionId) {
+        return jsonResp(401, { error: 'verdict_token_unauthorized' });
+      }
+      const s = await loadSession(sessionId!);
+      if (!s) return jsonResp(404, { error: 'session_not_found' });
+      if (s.verdict === 'pending') return jsonResp(409, { error: 'verdict_pending' });
+      const secret = await getVerdictSecret();
+      if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
+      const token = signVerdict(secret, {
+        cpi: s.cpi ?? null,
+        sessionId: sessionId!,
+        verdict: s.verdict,
+        reason: s.verdictReason ?? null,
+      });
+      return jsonResp(200, { token });
+    }
+
+    // ── Server-to-server token verification (the host's backend calls this) ─
+    case 'POST /api/verify': {
+      const vToken = (body as { token?: unknown }).token;
+      if (typeof vToken !== 'string') return jsonResp(400, { error: 'missing_token' });
+      const secret = await getVerdictSecret();
+      if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
+      const result = verifyVerdictToken(secret, vToken);
+      if (!result.ok) return jsonResp(200, { valid: false, reason: result.reason });
+      // Optional tenant assertion: if the caller names its CPI, it must match.
+      const wantCpi = (body as { cpi?: unknown }).cpi;
+      if (typeof wantCpi === 'string' && result.claims.cpi !== wantCpi) {
+        return jsonResp(200, { valid: false, reason: 'cpi_mismatch' });
+      }
+      return jsonResp(200, {
+        valid: true,
+        cpi: result.claims.cpi,
+        sessionId: result.claims.sessionId,
+        verdict: result.claims.verdict,
+        reason: result.claims.reason,
+        iat: result.claims.iat,
+        exp: result.claims.exp,
       });
     }
 

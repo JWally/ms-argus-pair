@@ -168,6 +168,12 @@ export interface DesktopSession {
     reason: string | null;
     annotations?: Record<string, unknown>;
   }>;
+  /**
+   * Fetch a server-signed verdict token (after the verdict resolves) that the
+   * embed widget posts to the host for server-to-server verify. null when the
+   * verdict isn't final or signing isn't configured.
+   */
+  getVerdictToken: () => Promise<string | null>;
 }
 
 export interface SsoStartResult {
@@ -244,7 +250,10 @@ export async function startDesktopSession(
     : Promise.resolve(null);
 
   const [session, eagerWs] = await Promise.all([
-    jsonFetch<SessionStartResp>(`${API}/session/start`, { method: 'POST' }),
+    jsonFetch<SessionStartResp>(`${API}/session/start`, {
+      method: 'POST',
+      body: opts.cpi ? JSON.stringify({ cpi: opts.cpi }) : undefined,
+    }),
     eagerWsPromise,
   ]);
   if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
@@ -433,6 +442,19 @@ export async function startDesktopSession(
     }
   })();
 
+  const getVerdictToken = async (): Promise<string | null> => {
+    try {
+      const r = await jsonFetch<{ token?: string }>(
+        `${API}/session/${session.sessionId}/verdict-token?t=${encodeURIComponent(
+          session.ws.desktopToken
+        )}`
+      );
+      return r.token ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   return {
     sessionId: session.sessionId,
     pairUrl,
@@ -446,6 +468,7 @@ export async function startDesktopSession(
       }
     },
     result,
+    getVerdictToken,
   };
 }
 

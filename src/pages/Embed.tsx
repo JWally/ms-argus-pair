@@ -19,7 +19,13 @@ import { QrCanvas, buildQrMatrix, type QrMatrix } from '../lib/qr';
 type UpMsg =
   | { event: 'ready'; sessionId: string }
   | { event: 'connected' }
-  | { event: 'result'; sessionId: string; verdict: string; reason: string | null }
+  | {
+      event: 'result';
+      sessionId: string;
+      verdict: string;
+      reason: string | null;
+      token: string | null;
+    }
   | { event: 'error'; message: string };
 
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
@@ -70,11 +76,15 @@ export function Embed() {
 
         const verdict = await session.result;
         if (cancelled) return;
+        // Fetch the server-signed verdict token to hand the host for siteverify.
+        const token = await session.getVerdictToken();
+        if (cancelled) return;
         postUp({
           event: 'result',
           sessionId: session.sessionId,
           verdict: verdict.verdict,
           reason: verdict.reason,
+          token,
         });
         setStatus(verdict.verdict === 'paired' ? 'Paired ✓' : 'Pairing failed');
       } catch (e) {
