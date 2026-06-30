@@ -148,6 +148,14 @@ export class PairStack extends cdk.Stack {
       generateSecretString: { passwordLength: 64, excludePunctuation: true },
     });
 
+    // HMAC secret for embeddable-widget verdict tokens (siteverify). A separate
+    // key from device-trust for clean key separation; stored in Secrets Manager
+    // so issued verdict tokens survive Lambda redeploys.
+    const verdictSigningSecret = new secretsmanager.Secret(this, 'VerdictSigningSecret', {
+      description: 'HMAC secret for ms-argus-pair embed verdict tokens',
+      generateSecretString: { passwordLength: 64, excludePunctuation: true },
+    });
+
     // ── DDB: pair session state (TTL-managed) ──────────────────────────
     const table = new dynamodb.Table(this, 'PairSessions', {
       partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
@@ -211,6 +219,7 @@ export class PairStack extends cdk.Stack {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: allOrigins.join(','),
         DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
+        VERDICT_SIGNING_SECRET_ARN: verdictSigningSecret.secretArn,
         // Valkey rate-limit backend. USE_VALKEY_RATE_LIMITS=true switches
         // peek/check from 5 DDB calls to 1 pipelined Valkey round-trip.
         // Both code paths ship — flip the env to roll back without code.
@@ -242,6 +251,7 @@ export class PairStack extends cdk.Stack {
     });
     table.grantReadWriteData(pairFn);
     deviceTrustSecret.grantRead(pairFn);
+    verdictSigningSecret.grantRead(pairFn);
 
     // ── OAuth provider secrets ────────────────────────────────────────
     // Each provider's app secret lives in Secrets Manager so it stays
@@ -325,6 +335,18 @@ export class PairStack extends cdk.Stack {
     api.addRoutes({
       path: '/api/session/{id}/info',
       methods: [apigatewayv2.HttpMethod.GET],
+      integration,
+    });
+    // Embeddable widget: mint a signed verdict token (desktop participant),
+    // and server-to-server verify it (the host's backend).
+    api.addRoutes({
+      path: '/api/session/{id}/verdict-token',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/verify',
+      methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });
     api.addRoutes({

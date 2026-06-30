@@ -168,6 +168,12 @@ export interface DesktopSession {
     reason: string | null;
     annotations?: Record<string, unknown>;
   }>;
+  /**
+   * Fetch a server-signed verdict token (after the verdict resolves) that the
+   * embed widget posts to the host for server-to-server verify. null when the
+   * verdict isn't final or signing isn't configured.
+   */
+  getVerdictToken: () => Promise<string | null>;
 }
 
 export interface SsoStartResult {
@@ -208,7 +214,19 @@ interface VerdictShape {
   annotations?: Record<string, unknown>;
 }
 
-export async function startDesktopSession(events: PairEvents = {}): Promise<DesktopSession> {
+export interface StartDesktopOptions {
+  /**
+   * Merchant CPI to attribute this pairing's attestation + usage to. Defaults
+   * to the build-pinned/test CPI when omitted, so the demo and /pair page are
+   * unaffected; the embeddable widget passes the host's `data-cpi` through here.
+   */
+  cpi?: string;
+}
+
+export async function startDesktopSession(
+  events: PairEvents = {},
+  opts: StartDesktopOptions = {}
+): Promise<DesktopSession> {
   events.onStatus?.('starting session');
 
   // Race the WS TCP+TLS handshake against the /session/start HTTP
@@ -232,7 +250,10 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     : Promise.resolve(null);
 
   const [session, eagerWs] = await Promise.all([
-    jsonFetch<SessionStartResp>(`${API}/session/start`, { method: 'POST' }),
+    jsonFetch<SessionStartResp>(`${API}/session/start`, {
+      method: 'POST',
+      body: opts.cpi ? JSON.stringify({ cpi: opts.cpi }) : undefined,
+    }),
     eagerWsPromise,
   ]);
   if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
@@ -375,7 +396,7 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     try {
       const argus = getArgus();
       const run = await argus.run({
-        cpi: ARGUS_CPI,
+        cpi: opts.cpi || ARGUS_CPI,
         timeoutMs: 30_000,
         attest: {
           purpose: ATTEST_PURPOSE,
@@ -421,6 +442,19 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
     }
   })();
 
+  const getVerdictToken = async (): Promise<string | null> => {
+    try {
+      const r = await jsonFetch<{ token?: string }>(
+        `${API}/session/${session.sessionId}/verdict-token?t=${encodeURIComponent(
+          session.ws.desktopToken
+        )}`
+      );
+      return r.token ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   return {
     sessionId: session.sessionId,
     pairUrl,
@@ -434,6 +468,7 @@ export async function startDesktopSession(events: PairEvents = {}): Promise<Desk
       }
     },
     result,
+    getVerdictToken,
   };
 }
 
