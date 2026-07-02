@@ -44,6 +44,7 @@ export function Embed() {
   const [matrix, setMatrix] = useState<QrMatrix | null>(null);
   const [status, setStatus] = useState('starting…');
   const [connected, setConnected] = useState(false);
+  const [done, setDone] = useState<null | 'paired' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
 
   useEffect(() => {
@@ -86,10 +87,13 @@ export function Embed() {
           reason: verdict.reason,
           token,
         });
-        setStatus(verdict.verdict === 'paired' ? 'Paired ✓' : 'Pairing failed');
+        const ok = verdict.verdict === 'paired';
+        setStatus(ok ? 'Verified' : 'Pairing failed');
+        setDone(ok ? 'paired' : 'failed');
       } catch (e) {
         if (cancelled) return;
         setStatus('Error');
+        setDone('failed');
         postUp({ event: 'error', message: String(e) });
       }
     })();
@@ -104,7 +108,16 @@ export function Embed() {
     <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg-primary p-4 text-fg-primary">
       <div className="w-full max-w-[16rem]">
         <div className="qr-stage relative aspect-square w-full overflow-hidden rounded-lg bg-white p-3">
-          {matrix ? (
+          {done ? (
+            <div
+              className={`flex h-full flex-col items-center justify-center gap-2 text-center ${
+                done === 'paired' ? 'text-emerald-600' : 'text-rose-600'
+              }`}
+            >
+              <span className="text-5xl leading-none">{done === 'paired' ? '✓' : '✗'}</span>
+              <span className="text-base font-semibold">{status}</span>
+            </div>
+          ) : matrix ? (
             <div
               className={`qr-svg absolute inset-0 block aspect-square w-full ${
                 connected ? 'qr-blurred' : 'qr-arrived'
@@ -118,7 +131,7 @@ export function Embed() {
         </div>
       </div>
       <p className="text-sm text-fg-secondary" aria-live="polite">
-        {connected ? 'Phone connected — finishing…' : status}
+        {done ? status : connected ? 'Phone connected — finishing…' : status}
       </p>
     </div>
   );
