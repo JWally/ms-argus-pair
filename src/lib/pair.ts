@@ -361,6 +361,20 @@ export async function startDesktopSession(
     resolveResult = resolve;
     rejectResult = reject;
   });
+  // Settle exactly once. The WS verdict push (fast path, from /phone-attest)
+  // and the /result poll (fallback) race — whichever lands first wins; later
+  // calls and the expiry timer become no-ops.
+  let settled = false;
+  const settle = (v: VerdictShape) => {
+    if (settled) return;
+    settled = true;
+    resolveResult(v);
+  };
+  const fail = (e: unknown) => {
+    if (settled) return;
+    settled = true;
+    rejectResult(e);
+  };
 
   desktopConn.onMessage((msg) => {
     if (cancelled) return;
@@ -385,7 +399,7 @@ export async function startDesktopSession(
         console.warn(`[pair] dropping verdict with from=${msg.from} (not server)`);
         return;
       }
-      resolveResult({
+      settle({
         verdict: (data as { verdict: string }).verdict,
         reason: (data as { reason: string | null }).reason ?? null,
         annotations: (data as { annotations?: Record<string, unknown> }).annotations,
@@ -399,8 +413,37 @@ export async function startDesktopSession(
   const expiryMs = Math.max(0, session.expiresAt * 1000 - Date.now());
   window.setTimeout(() => {
     if (cancelled) return;
-    rejectResult(new Error('session expired'));
+    fail(new Error('session expired'));
   }, expiryMs);
+
+  // Poll fallback for the verdict. The WS push is the happy path, but if it
+  // never lands client-side (missed frame, socket churn) the desktop would
+  // otherwise hang at "finishing" until expiry. Poll GET /result with the
+  // desktop bootstrap token; 204 = still pending, 200 = terminal verdict.
+  (async () => {
+    const stepMs = 1500;
+    while (!cancelled && !settled) {
+      await new Promise((r) => window.setTimeout(r, stepMs));
+      if (cancelled || settled) return;
+      try {
+        const res = await fetch(
+          `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
+            session.ws.desktopToken
+          )}`,
+          { headers: { accept: 'application/json' } }
+        );
+        if (res.status === 200) {
+          settle((await res.json()) as VerdictShape);
+          return;
+        }
+        // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
+        // and let the WS push / expiry timer be the deciders.
+        if (res.status !== 204) return;
+      } catch {
+        // Transient network error — keep polling until settled or expiry.
+      }
+    }
+  })();
 
   // Background: scan + desktop-attest. When done, queue the desktop-
   // ready peer message (or send immediately if the phone is already up).
@@ -450,7 +493,7 @@ export async function startDesktopSession(
     } catch (e) {
       scanError = e as Error;
       events.onError?.(e);
-      rejectResult(e);
+      fail(e);
     }
   })();
 
@@ -476,7 +519,7 @@ export async function startDesktopSession(
       desktopConn.close();
       if (scanError) {
         // Surface the still-buffered error if nothing else has resolved.
-        rejectResult(scanError);
+        fail(scanError);
       }
     },
     result,
