@@ -12,7 +12,8 @@ function handler(event) {
     return request;
   }
 
-  if (uri.indexOf('/pair/') === 0) {
+  // /pair/<sessionId> and /p/<short-token> are both the phone entry.
+  if (uri.indexOf('/pair/') === 0 || uri.indexOf('/p/') === 0) {
     request.uri = '/phone.html';
     return request;
   }

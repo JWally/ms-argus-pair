@@ -1,23 +1,24 @@
 import { useEffect, useRef } from 'react';
 import QRCode from 'qrcode-svg';
+import { paintQr, type QrMatrix } from './qr-paint';
 
 /**
  * QR rendering for the pairing flow.
  *
  * This lives in lib/ (not in a page) because it's core product behavior: the
- * secure way we put a pairing URL on screen. The matrix is the same QR any
- * encoder would produce; the point is that we paint it to a <canvas> (flat
- * pixels) rather than emitting an SVG <rect> grid into the DOM — so the URL is
- * not a coordinate list a scraper can read, only pixels a decoder must extract.
+ * secure way we put a pairing token on screen. We paint it to a <canvas> (flat
+ * pixels) rather than an SVG <rect> grid — so the URL is not a coordinate list a
+ * scraper can read, only pixels a decoder must extract — and we apply the
+ * spatial-frequency **poison** (see qr-paint.ts) so a pixel-exact screenshot
+ * decoder fails while a phone's lens reads it. Speed-bump, not the lock; the
+ * single-use/TTL token is the wall.
  */
 
-/** A QR module grid: `size`×`size` booleans plus a quiet-zone margin (in modules). */
-export type QrMatrix = { size: number; modules: boolean[][]; quiet: number };
+export type { QrMatrix } from './qr-paint';
 
 /**
  * Build the QR module grid for `content`. Only `content` + ecl affect the grid,
- * so the scannable code is identical to the prior SVG render — we just expose
- * the model instead of a string of <rect>s.
+ * so the scannable code is identical to any encoder — we just expose the model.
  */
 export function buildQrMatrix(content: string, quiet = 2): QrMatrix {
   const qr = new QRCode({ content, ecl: 'M' });
@@ -25,30 +26,25 @@ export function buildQrMatrix(content: string, quiet = 2): QrMatrix {
 }
 
 /**
- * Paints a QR module grid onto a <canvas>. A scraper can no longer read the URL
- * out of the markup — it has to capture pixels and run a QR decoder
- * (i.e. screenshot + extract). Same matrix, same encoded URL.
+ * Paints a QR module grid onto a <canvas> with the poison pass (see qr-paint.ts).
+ * `poison` is the inverted-center width as a fraction of a module (default 0.18,
+ * the validated sweet spot); `poison={0}` renders a plain QR.
  */
-export function QrCanvas({ matrix }: { matrix: QrMatrix }) {
+export function QrCanvas({ matrix, poison = 0.18 }: { matrix: QrMatrix; poison?: number }) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
-    const { size, modules, quiet } = matrix;
-    const span = size + quiet * 2;
-    const scale = 8; // backing px per module; CSS scales it to the slot
-    canvas.width = span * scale;
-    canvas.height = span * scale;
+    const { data, width } = paintQr(matrix, { poison });
+    canvas.width = width;
+    canvas.height = width;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#000000';
-    for (let r = 0; r < size; r += 1) {
-      for (let c = 0; c < size; c += 1) {
-        if (modules[r][c]) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
-      }
-    }
-  }, [matrix]);
-  return <canvas ref={ref} />;
+    const img = ctx.createImageData(width, width);
+    img.data.set(data);
+    ctx.putImageData(img, 0, 0);
+  }, [matrix, poison]);
+  // Crisp pixels: the poison must reach the screen sharp (a bot's screenshot gets
+  // the poisoned centers); the phone's lens supplies the blur that recovers it.
+  return <canvas ref={ref} style={{ imageRendering: 'pixelated' }} />;
 }

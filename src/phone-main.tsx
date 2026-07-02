@@ -81,12 +81,18 @@ const state: Runtime = {
   startedInChallenge: Boolean(initialNonce),
   ctl: new AbortController(),
 };
-if (!sessionId) state.phase = 'error';
-
-render();
-window.requestAnimationFrame(() => {
-  void bootstrap();
-});
+// /p/<token> is the sparse-QR entry: redeem the short token for the connection
+// blob, then hand off to the normal /pair flow (below) untouched.
+const pairToken = window.location.pathname.match(/^\/p\/([A-Za-z0-9_-]+)/)?.[1];
+if (pairToken) {
+  void redeemPairTokenAndGo(pairToken);
+} else {
+  if (!sessionId) state.phase = 'error';
+  render();
+  window.requestAnimationFrame(() => {
+    void bootstrap();
+  });
+}
 
 window.addEventListener('pagehide', () => {
   state.ctl.abort();
@@ -104,6 +110,36 @@ if ('serviceWorker' in navigator) {
 function sessionIdFromPath(): string | null {
   const match = window.location.pathname.match(/^\/pair\/([^/]+)/);
   return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+/**
+ * Redeem the short pairing token (single-use) for {sessionId, wsUrl, e, pt, n},
+ * then navigate to /pair/{sessionId}#<fragment> — the exact URL the existing
+ * phone flow already knows how to consume. Same-origin `/api`.
+ */
+async function redeemPairTokenAndGo(token: string): Promise<void> {
+  try {
+    const res = await fetch('/api/pair-token/redeem', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    if (!res.ok) throw new Error(`redeem ${res.status}`);
+    const b = (await res.json()) as {
+      sessionId: string;
+      wsUrl: string;
+      e: string;
+      pt: string;
+      n: string;
+    };
+    const hash = new URLSearchParams({ wsUrl: b.wsUrl, e: b.e, pt: b.pt, n: b.n }).toString();
+    window.location.replace(
+      `/pair/${encodeURIComponent(b.sessionId)}${window.location.search}#${hash}`
+    );
+  } catch {
+    state.phase = 'error';
+    render();
+  }
 }
 
 function nonceFromPairHash(): string | null {

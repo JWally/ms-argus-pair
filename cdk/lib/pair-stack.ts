@@ -349,6 +349,17 @@ export class PairStack extends cdk.Stack {
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });
+    // Short pairing token: desktop mints (per-session), phone redeems (single-use).
+    api.addRoutes({
+      path: '/api/session/{id}/pair-token',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/pair-token/redeem',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
     api.addRoutes({
       path: '/api/session/{id}/desktop-attest',
       methods: [apigatewayv2.HttpMethod.POST],

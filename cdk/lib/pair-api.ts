@@ -86,6 +86,19 @@ import {
 } from './pair-api/attestation/trust';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
+import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
+import { getValkey } from './valkey-client';
+
+// Valkey-backed store for the short pairing token. `take` is an atomic GETDEL,
+// so a token can only be redeemed once (single-use).
+const pairTokenStore: KvStore = {
+  async set(key, value, ttlSec) {
+    await getValkey().set(key, value, 'EX', ttlSec);
+  },
+  async take(key) {
+    return getValkey().getdel(key);
+  },
+};
 
 const TABLE = process.env.TABLE_NAME!;
 
@@ -1411,6 +1424,7 @@ const lambdaHandler = async (event: {
     'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
     'POST /api/verify',
+    'POST /api/pair-token/redeem',
   ]);
   if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
@@ -2391,6 +2405,49 @@ const lambdaHandler = async (event: {
         reason: s.verdictReason ?? null,
         annotations: (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
       });
+    }
+
+    // ── Short pairing token: the sparse QR carries /p/<token>, phone redeems ─
+    // The desktop mints once it has the envelope. The spatial-frequency poison
+    // needs a sparse QR, so we no longer pack {wsUrl,e,pt,n} into the fragment.
+    // Auth = the same bootstrap wsToken as /result (only a participant mints).
+    case 'POST /api/session/{id}/pair-token': {
+      const mtToken =
+        event.queryStringParameters?.t ||
+        (event.headers?.authorization || event.headers?.Authorization || '').replace(
+          /^Bearer\s+/i,
+          ''
+        );
+      const mtClaims = mtToken ? await verifyBootstrapToken(mtToken) : null;
+      if (!mtClaims || mtClaims.sessionId !== sessionId) {
+        return jsonResp(401, { error: 'pair_token_unauthorized' });
+      }
+      const pb = body as { wsUrl?: unknown; e?: unknown; pt?: unknown; n?: unknown };
+      if (
+        typeof pb.wsUrl !== 'string' ||
+        typeof pb.e !== 'string' ||
+        typeof pb.pt !== 'string' ||
+        typeof pb.n !== 'string'
+      ) {
+        return jsonResp(400, { error: 'invalid_pair_blob' });
+      }
+      const token = await mintPairToken(pairTokenStore, {
+        sessionId: sessionId!,
+        wsUrl: pb.wsUrl,
+        e: pb.e,
+        pt: pb.pt,
+        n: pb.n,
+      });
+      return jsonResp(200, { token });
+    }
+
+    // Phone redeems the short token (single-use) for the connection blob.
+    case 'POST /api/pair-token/redeem': {
+      const rt = (body as { token?: unknown }).token;
+      if (typeof rt !== 'string') return jsonResp(400, { error: 'missing_token' });
+      const blob = await redeemPairToken(pairTokenStore, rt);
+      if (!blob) return jsonResp(410, { error: 'token_expired_or_used' });
+      return jsonResp(200, blob);
     }
 
     // ── Embeddable widget: mint a signed verdict token (siteverify) ──────
