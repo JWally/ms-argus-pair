@@ -312,13 +312,25 @@ export async function startDesktopSession(
   // for the desktop-ready WS message. desktopArgusSessionId and
   // desktopKeyId still arrive via desktop-ready and ship as top-level
   // POST body fields (no longer inside the phone's signed envelope).
-  const pairHash = new URLSearchParams({
-    wsUrl: session.ws.url,
-    e: desktopConn.envelope,
-    pt: session.ws.phoneToken,
-    n: session.nonce,
-  });
-  const pairUrl = `${pairOrigin}/pair/${session.sessionId}${debugParam}#${pairHash.toString()}`;
+  // Mint a short single-use token for the connection blob instead of packing
+  // {wsUrl,e,pt,n} into the URL fragment. Keeps the QR sparse (~33×33) so the
+  // spatial-frequency poison in qr-paint.ts survives a real camera read. Authed
+  // with the desktop's own wsToken (only a session participant can mint).
+  const { token: pairToken } = await jsonFetch<{ token: string }>(
+    `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
+      session.ws.desktopToken
+    )}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        wsUrl: session.ws.url,
+        e: desktopConn.envelope,
+        pt: session.ws.phoneToken,
+        n: session.nonce,
+      }),
+    }
+  );
+  const pairUrl = `${pairOrigin}/p/${pairToken}${debugParam}`;
   if (debugMode) {
     console.log('[argus-pair] pair URL:', pairUrl);
   }
