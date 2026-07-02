@@ -593,6 +593,14 @@ export async function validateSsoReturn({
   return result;
 }
 
+/** Result of a claim submission (the SSO name-claim gate). */
+export interface RaffleEntryResult {
+  ok: true;
+  /** Short public identifier (`xxxx-xxxx`) derived from the handle hash. */
+  code: string;
+  count: number;
+}
+
 export async function submitSsoClaim(
   sessionId: string,
   handle: string
@@ -1115,63 +1123,7 @@ export async function submitPhoneAttestation(
   }
 }
 
-// ── Raffle / leaderboard ─────────────────────────────────────────────────
-
-export interface RaffleEntryResult {
-  ok: true;
-  /** Short public identifier (`xxxx-xxxx`) derived from the email hash. */
-  code: string;
-  count: number;
-}
-
-export interface LeaderboardRow {
-  /** Short public identifier (`xxxx-xxxx`). The plaintext email is never returned. */
-  code: string;
-  count: number;
-  lastEntryAt: number;
-}
-
-/**
- * Claim a leaderboard entry against a paired sessionId. Server runs three
- * rate-limit buckets (phone pubkey, desktop pubkey, UA+IP) — any of them
- * tripping returns 429. A paired session is single-use; the second submit
- * for the same sessionId returns 409.
- */
-export async function submitRaffleEntry(
-  sessionId: string,
-  handle: string
-): Promise<RaffleEntryResult> {
-  return jsonFetch<RaffleEntryResult>(`${API}/raffle/entry`, {
-    method: 'POST',
-    body: JSON.stringify({ sessionId, handle: handle.trim().toLowerCase() }),
-  });
-}
-
-export async function fetchLeaderboard(): Promise<LeaderboardRow[]> {
-  const r = await jsonFetch<{ leaderboard: LeaderboardRow[] }>(`${API}/raffle/leaderboard`);
-  return r.leaderboard;
-}
-
-export type RaffleStatus =
-  | { status: 'ok'; used?: number; cap?: number; resetAt?: number; site?: string }
-  | { status: 'rate_limited'; used: number; cap: number; resetAt: number; site: string }
-  | { status: 'already_entered'; code: string }
-  | { status: 'not_paired'; verdict?: string };
-
-/**
- * Read-only probe of whether the current session can submit a raffle
- * entry right now. Used by the desktop UI to hide the form when the
- * caller has already hit their cap, instead of letting them fill it
- * in only to bonk with a 429. On any network/parse failure, callers
- * should default to showing the form — the entry endpoint will
- * return the real error.
- */
-export async function fetchRaffleStatus(sessionId: string): Promise<RaffleStatus> {
-  // Pass the page host as a query param so the server hashes the same
-  // siteHash that POST /entry sees (browsers don't send Origin on
-  // same-origin GETs). encodeURIComponent guards against weird hosts.
-  const site = encodeURIComponent(window.location.host);
-  return jsonFetch<RaffleStatus>(`${API}/raffle/status/${sessionId}?site=${site}`);
-}
+// Raffle/leaderboard frontend fetchers moved out with the marketing pages
+// (Demo/ClaimSpot → ms-argus-www). The /api/raffle/* backend stays.
 
 export { HttpError };

@@ -11,7 +11,6 @@ import './index.css';
 // ~150KB minified on the phone-side cold load.
 //
 // Named exports → default-export shape that React.lazy expects.
-const Demo = lazy(() => import('./pages/Demo').then((m) => ({ default: m.Demo })));
 const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));
 const MerchantSso = lazy(() =>
   import('./pages/MerchantSso').then((m) => ({ default: m.MerchantSso }))
@@ -22,8 +21,6 @@ const SsoChallenge = lazy(() =>
 const MerchantValidate = lazy(() =>
   import('./pages/MerchantValidate').then((m) => ({ default: m.MerchantValidate }))
 );
-const ClaimSpot = lazy(() => import('./pages/ClaimSpot').then((m) => ({ default: m.ClaimSpot })));
-const Metrics = lazy(() => import('./pages/Metrics').then((m) => ({ default: m.Metrics })));
 const Embed = lazy(() => import('./pages/Embed').then((m) => ({ default: m.Embed })));
 
 const rootElement = document.getElementById('root');
@@ -34,12 +31,11 @@ createRoot(rootElement).render(
     <BrowserRouter>
       <Suspense fallback={<Splash />}>
         <Routes>
-          <Route path="/" element={<Demo />} />
+          {/* Marketing moved to ms-argus-www (/captcha). This is the app
+              subdomain — no landing at `/`; entry points are the routes below. */}
           <Route path="/merchant" element={<MerchantSso />} />
           <Route path="/sso/challenge/:sessionId" element={<SsoChallenge />} />
           <Route path="/merchant/validate" element={<MerchantValidate />} />
-          <Route path="/claim" element={<ClaimSpot />} />
-          <Route path="/metrics" element={<Metrics />} />
           <Route path="/pair/:roomId" element={<Pair />} />
           <Route path="/embed" element={<Embed />} />
         </Routes>

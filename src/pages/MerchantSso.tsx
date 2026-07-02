@@ -36,14 +36,6 @@ export function MerchantSso() {
     <div className="mx-auto flex min-h-dvh max-w-6xl flex-col gap-8 px-5 py-6 sm:px-6 sm:py-10">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-edge/60 pb-4">
         <Wordmark />
-        <nav className="flex flex-wrap items-center gap-2">
-          <Link className="pill" to="/claim">
-            Claim
-          </Link>
-          <Link className="pill" to="/metrics">
-            Metrics
-          </Link>
-        </nav>
       </header>
 
       <main className="grid flex-1 gap-6 lg:grid-cols-[minmax(0,1fr)_23rem]">
