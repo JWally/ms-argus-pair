@@ -43,7 +43,6 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
-  QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
@@ -68,7 +67,6 @@ import {
   recordDesktopAttestationValkey,
   recordPhoneAttestationValkey,
   claimArgusValkey,
-  setRaffleHashValkey,
   type PhoneBundle,
 } from './session-store';
 import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
@@ -255,7 +253,6 @@ function isProjectionFresh(p: MerchantProjection | null): boolean {
 const RAFFLE_FALLBACK_SITE = 'unknown';
 const RAFFLE_BUCKET_MAX = 3;
 const RAFFLE_BUCKET_TTL_SECONDS = 2 * 3600;
-const RAFFLE_LEADERBOARD_TOP = 25;
 const HANDLE_RE = /^[a-z0-9._@-]{3,64}$/;
 
 const md5hex = (s: string) => createHash('md5').update(s).digest('hex');
@@ -299,17 +296,13 @@ async function incrementLeaderboard(handle: string): Promise<{
     new UpdateCommand({
       TableName: TABLE,
       Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
-      // `lbPk` and `code` aren't used by the increment itself — they
-      // exist so LeaderboardIndex (GSI) can serve the top-N Query
-      // without a Scan. `lbPk` is a constant partition key all
-      // leaderboard rows share; `code` is the user-facing 6-char
-      // handle code projected into the index so the read doesn't
-      // have to recompute it from PK on every page view.
-      UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, lbPk = :lb, code = :code',
+      // `code` is the user-facing 6-char handle code, persisted so callers
+      // don't recompute it from PK. (The LeaderboardIndex GSI + its `lbPk`
+      // write were removed with the dormant /api/raffle/* endpoints.)
+      UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, code = :code',
       ExpressionAttributeValues: {
         ':one': 1,
         ':t': Math.floor(Date.now() / 1000),
-        ':lb': 'LB',
         ':code': code,
       },
       ReturnValues: 'ALL_NEW',
@@ -339,25 +332,6 @@ interface RateLimitResult {
   siteHash?: string;
 }
 
-interface RatePeekResult {
-  /** Worst used count across the three buckets. */
-  used: number;
-  /** Configured cap (RAFFLE_BUCKET_MAX). */
-  cap: number;
-  /** Whether at least one bucket is at the cap (entry would 429). */
-  tripped: boolean;
-  /** Epoch seconds when the hour bucket rolls over. */
-  resetAt: number;
-  siteHash: string;
-}
-
-/**
- * Read-only counterpart to `checkRaffleRateLimits`. Probes each of the
- * three buckets WITHOUT incrementing so we can answer "would entry
- * succeed right now?" without consuming a slot. Used by GET
- * /api/raffle/status so the desktop UI can hide the raffle form when
- * the user has already hit their hourly cap.
- */
 /**
  * Inputs for the raffle rate-limit gate. Five orthogonal axes, any one
  * tripping → 429.
@@ -388,35 +362,6 @@ interface RateLimitInputs {
   siteHost: string;
 }
 
-/**
- * Resolve the auth-identity string from a session's annotations. Preferred
- * source order:
- *   1. OAuth subject (Google sub / GitHub id / Facebook user_id) — stable
- *      per provider account forever
- *   2. WebAuthn credentialId — stable per passkey (iCloud Keychain /
- *      Google Password Manager keep this across incognito)
- *   3. Phone Argus pubkey from the device-trust silent-reauth path —
- *      stable for any user whose HMAC token survived (implies they're
- *      NOT in incognito, so this is a useful fallback)
- * Returns null when none of the above are available — caller skips the
- * identity bucket and relies on the other four axes.
- */
-function resolveRaffleAuthIdentity(
-  annotations: Record<string, unknown>,
-  session: { phoneAttestation?: { publicKey?: string } }
-): string | null {
-  const sub = annotations.phone_oauth_subject;
-  if (typeof sub === 'string' && sub.length > 0) return `oauth:${sub}`;
-  const credId = annotations.phone_webauthn_credential_id;
-  if (typeof credId === 'string' && credId.length > 0) return `passkey:${credId}`;
-  const trustRedeemed = annotations.phone_device_trust_redeemed === true;
-  const pub = session.phoneAttestation?.publicKey;
-  if (trustRedeemed && typeof pub === 'string' && pub.length > 0) {
-    return `argus-pub:${pub}`;
-  }
-  return null;
-}
-
 /** Build the per-axis bucket keys. Identity bucket omitted when caller
  *  has no identity to bind to. */
 function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; buckets: string[] } {
@@ -444,60 +389,6 @@ function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; bucket
  */
 function isValkeyRateLimitsEnabled(): boolean {
   return process.env.USE_VALKEY_RATE_LIMITS === 'true';
-}
-
-async function peekRaffleRateLimits(inputs: RateLimitInputs): Promise<RatePeekResult> {
-  const { siteHash, buckets } = buildRaffleBuckets(inputs);
-  const hour = Math.floor(Date.now() / 3_600_000);
-  const resetAt = (hour + 1) * 3600;
-
-  if (isValkeyRateLimitsEnabled()) {
-    const { getValkey } = await import('./valkey-client');
-    const valkey = getValkey();
-    const pipeline = valkey.pipeline();
-    for (const k of buckets) {
-      pipeline.get(`pair:rl:${k}:${hour}`);
-    }
-    const results = (await pipeline.exec()) ?? [];
-    let used = 0;
-    for (const [, val] of results) {
-      const n = Number(val ?? 0);
-      if (n > used) used = n;
-    }
-    return {
-      used,
-      cap: RAFFLE_BUCKET_MAX,
-      tripped: used >= RAFFLE_BUCKET_MAX,
-      resetAt,
-      siteHash,
-    };
-  }
-
-  // DDB path — fallback / rollback target.
-  const reads = await Promise.all(
-    buckets.map((k) =>
-      ddb.send(
-        new GetCommand({
-          TableName: TABLE,
-          Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
-          ConsistentRead: false,
-          ProjectionExpression: 'ct',
-        })
-      )
-    )
-  );
-  let used = 0;
-  for (const r of reads) {
-    const ct = Number((r.Item as { ct?: number } | undefined)?.ct ?? 0);
-    if (ct > used) used = ct;
-  }
-  return {
-    used,
-    cap: RAFFLE_BUCKET_MAX,
-    tripped: used >= RAFFLE_BUCKET_MAX,
-    resetAt,
-    siteHash,
-  };
 }
 
 async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimitResult> {
@@ -1298,7 +1189,7 @@ async function verifyWebAuthn(
 
 async function loadSession(sessionId: string): Promise<SessionItem | null> {
   if (isValkeySessionsEnabled()) {
-    const { meta, desktop, phone, raffle } = await mgetSession(sessionId);
+    const { meta, desktop, phone } = await mgetSession(sessionId);
     if (!meta) return null;
     // Reassemble into the SessionItem shape so downstream callers see
     // the same fields regardless of backend. Optional fields stay
@@ -1313,10 +1204,8 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       verdictReason: phone?.reason ?? undefined,
       desktopAttestation: desktop as unknown as StoredAttestation | undefined,
       phoneAttestation: phone?.att as unknown as StoredAttestation | undefined,
-      // raffleHash / annotations live on the row in the DDB shape too,
-      // see the cast sites in /raffle/entry and /raffle/status.
+      // annotations live on the row in the DDB shape too.
       ...(phone?.annotations ? { annotations: phone.annotations } : {}),
-      ...(raffle ? { raffleHash: raffle.hash, raffleEnteredAt: raffle.enteredAt } : {}),
     } as unknown as SessionItem;
   }
   const res = await ddb.send(
@@ -1420,8 +1309,6 @@ const lambdaHandler = async (event: {
   const idLessRoutes = new Set([
     'POST /api/session/start',
     'POST /api/sso/start',
-    'POST /api/raffle/entry',
-    'GET /api/raffle/leaderboard',
     'GET /api/_valkey-debug',
     'POST /api/verify',
     'POST /api/pair-token/redeem',
@@ -2501,244 +2388,6 @@ const lambdaHandler = async (event: {
         iat: result.claims.iat,
         exp: result.claims.exp,
       });
-    }
-
-    case 'POST /api/raffle/entry': {
-      const sid = typeof body.sessionId === 'string' ? body.sessionId.toLowerCase() : undefined;
-      const handle = normalizeHandle(body.handle);
-      if (!sid || !SESSION_ID_RE.test(sid)) {
-        return jsonResp(400, { error: 'invalid_session_id' });
-      }
-      if (!handle) {
-        return jsonResp(400, {
-          error: 'invalid_handle',
-          allowed: '3-64 chars, [a-z0-9._@-]',
-        });
-      }
-      const s = await loadSession(sid);
-      // 410 (Gone) rather than 404 — CloudFront's errorResponses[404]
-      // rewrites any 404 from /api/* to /index.html, which trashes the
-      // JSON body the client expects. The pre-existing 404s on
-      // desktop-attest / phone-attest have the same latent bug but are
-      // never hit in practice (those flows always use a fresh sessionId
-      // from /start). Raffle entry is the first endpoint where a stale
-      // sessionId can realistically appear.
-      if (!s) return jsonResp(410, { error: 'session_not_found' });
-      if (s.verdict !== 'paired') {
-        return jsonResp(409, { error: 'session_not_paired', verdict: s.verdict });
-      }
-      const sRaffle = s as unknown as { raffleHash?: string };
-      if (sRaffle.raffleHash) {
-        return jsonResp(409, {
-          error: 'session_already_entered',
-          code: hashToCode(sRaffle.raffleHash),
-        });
-      }
-      const phonePub = s.phoneAttestation?.publicKey ?? '';
-      const desktopPub = s.desktopAttestation?.publicKey ?? '';
-      if (!phonePub || !desktopPub) {
-        return jsonResp(409, { error: 'session_missing_attestations' });
-      }
-      const desktopIp = getViewerIp(event);
-      const desktopUa = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
-      const siteHost = desktopSiteHost(event);
-      // Phone-side identifiers are observed during phone-attest and
-      // persisted on the session row's annotations; pull them back out
-      // for the rate-limit gate. Both are strings or absent.
-      const a = (s as { annotations?: Record<string, unknown> }).annotations ?? {};
-      const phoneUa = typeof a.phone_ua === 'string' ? a.phone_ua : '';
-      const phoneIp = typeof a.phone_ip === 'string' ? a.phone_ip : '';
-      const authIdentity = resolveRaffleAuthIdentity(a, s);
-
-      // Rate-limit BEFORE consuming the session: a 429 should leave the
-      // session usable so the user can re-submit after the hour rolls.
-      // Five buckets — see RateLimitInputs for the per-axis rationale.
-      const rl = await checkRaffleRateLimits({
-        phonePub,
-        desktopPub,
-        desktopUa,
-        desktopIp: String(desktopIp),
-        phoneUa,
-        phoneIp,
-        authIdentity,
-        siteHost,
-      });
-      if (!rl.ok) {
-        return jsonResp(429, {
-          error: 'rate_limited',
-          bucket: rl.tripped,
-          site: siteHost,
-        });
-      }
-
-      // Hash the handle before any persistence. We never store the
-      // submitted email anywhere — DDB only sees the hash + counter.
-      const { hash, code } = handleHash(handle);
-
-      // Atomically claim the session for this hash. Concurrent submits
-      // for the same sessionId: loser gets 409 here.
-      const enteredAt = Math.floor(Date.now() / 1000);
-      if (isValkeySessionsEnabled()) {
-        const claimed = await setRaffleHashValkey(sid, hash, enteredAt);
-        if (!claimed) {
-          return jsonResp(409, { error: 'session_already_entered' });
-        }
-      } else {
-        try {
-          await ddb.send(
-            new UpdateCommand({
-              TableName: TABLE,
-              Key: { PK: `SESSION#${sid}`, SK: 'META' },
-              UpdateExpression: 'SET raffleHash = :h, raffleEnteredAt = :t',
-              ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(raffleHash)',
-              ExpressionAttributeValues: {
-                ':h': hash,
-                ':t': enteredAt,
-              },
-            })
-          );
-        } catch (err: unknown) {
-          const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-          if (isConflict) {
-            return jsonResp(409, { error: 'session_already_entered' });
-          }
-          throw err;
-        }
-      }
-
-      const updated = await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
-          // `lbPk` and `code` aren't used by the increment itself — they
-          // exist so LeaderboardIndex (GSI) can serve the top-N Query
-          // without a Scan. `lbPk` is a constant partition key all
-          // leaderboard rows share; `code` is the user-facing 6-char
-          // handle code projected into the index so the read doesn't
-          // have to recompute it from PK on every page view.
-          UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, lbPk = :lb, code = :code',
-          ExpressionAttributeValues: {
-            ':one': 1,
-            ':t': Math.floor(Date.now() / 1000),
-            ':lb': 'LB',
-            ':code': code,
-          },
-          ReturnValues: 'ALL_NEW',
-        })
-      );
-      const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
-      return jsonResp(200, { ok: true, code, count });
-    }
-
-    case 'GET /api/raffle/status/{id}': {
-      // Read-only "would entry succeed?" probe. Lets the desktop UI
-      // hide the raffle form when the caller has already hit their
-      // hourly cap, instead of letting them fill it in only to bonk
-      // with a 429 at submit. Non-destructive — never increments any
-      // bucket. Falls through to "ok" on any failure so the worst
-      // case is the user sees the entry endpoint's real error once.
-      //
-      // Site override: browsers don't send `Origin` on same-origin
-      // GETs, so falling back to desktopSiteHost(event) would compute
-      // a different siteHash than POST /entry (which always gets
-      // Origin) and look at a different DDB row. Client passes the
-      // site as a query param to keep both ends aligned.
-      const sidStatus = sessionId!;
-      const sStatus = await loadSession(sidStatus);
-      if (!sStatus) return jsonResp(410, { error: 'session_not_found' });
-      if (sStatus.verdict !== 'paired') {
-        return jsonResp(200, { status: 'not_paired', verdict: sStatus.verdict });
-      }
-      const enteredHash = (sStatus as unknown as { raffleHash?: string }).raffleHash;
-      if (enteredHash) {
-        return jsonResp(200, {
-          status: 'already_entered',
-          code: hashToCode(enteredHash),
-        });
-      }
-      const phonePubStatus = sStatus.phoneAttestation?.publicKey ?? '';
-      const desktopPubStatus = sStatus.desktopAttestation?.publicKey ?? '';
-      if (!phonePubStatus || !desktopPubStatus) {
-        return jsonResp(200, { status: 'ok' });
-      }
-      const ipStatus = getViewerIp(event);
-      const uaStatus = event.headers?.['user-agent'] ?? event.headers?.['User-Agent'] ?? '';
-      // Prefer the explicit ?site=<host> query param: same-origin GETs
-      // don't carry the Origin header that desktopSiteHost falls back
-      // to, so without this the peek would hash a different siteHash
-      // than checkRaffleRateLimits sees at POST /entry time.
-      const siteQuery = (event.queryStringParameters?.site ?? '').toLowerCase();
-      const siteStatus = /^[a-z0-9.\-:]{1,253}$/.test(siteQuery)
-        ? siteQuery
-        : desktopSiteHost(event);
-      try {
-        // Pull phone-side identifiers and auth identity from the same
-        // session annotations the entry path will read — peek and check
-        // need to hash identical inputs.
-        const aStatus = (sStatus as { annotations?: Record<string, unknown> }).annotations ?? {};
-        const phoneUaStatus = typeof aStatus.phone_ua === 'string' ? aStatus.phone_ua : '';
-        const phoneIpStatus = typeof aStatus.phone_ip === 'string' ? aStatus.phone_ip : '';
-        const authIdStatus = resolveRaffleAuthIdentity(aStatus, sStatus);
-        const peek = await peekRaffleRateLimits({
-          phonePub: phonePubStatus,
-          desktopPub: desktopPubStatus,
-          desktopUa: uaStatus,
-          desktopIp: String(ipStatus),
-          phoneUa: phoneUaStatus,
-          phoneIp: phoneIpStatus,
-          authIdentity: authIdStatus,
-          siteHost: siteStatus,
-        });
-        return jsonResp(200, {
-          status: peek.tripped ? 'rate_limited' : 'ok',
-          used: peek.used,
-          cap: peek.cap,
-          resetAt: peek.resetAt,
-          site: siteStatus,
-        });
-      } catch {
-        // Degrade open — if DDB is having a moment, just let the UI
-        // show the form. The real entry endpoint will surface the
-        // actual error.
-        return jsonResp(200, { status: 'ok' });
-      }
-    }
-
-    case 'GET /api/raffle/leaderboard': {
-      // Single Query on LeaderboardIndex (GSI): partition lbPk="LB",
-      // sort by ct DESC, take Limit=25. Server-side sorted, no Scan,
-      // no client-side merge. Cost is O(top-N) regardless of total
-      // entries on the table. The GSI projection includes `code` and
-      // `lastEntryAt` so we have everything the response needs without
-      // a follow-up GetItem per row.
-      const r = await ddb.send(
-        new QueryCommand({
-          TableName: TABLE,
-          IndexName: 'LeaderboardIndex',
-          KeyConditionExpression: 'lbPk = :lb',
-          ExpressionAttributeValues: { ':lb': 'LB' },
-          ScanIndexForward: false,
-          Limit: RAFFLE_LEADERBOARD_TOP,
-        })
-      );
-      const out: { code: string; count: number; lastEntryAt: number }[] = (r.Items ?? []).map(
-        (it) => {
-          const row = it as { code?: string; ct?: number; lastEntryAt?: number };
-          return {
-            code: String(row.code ?? ''),
-            count: Number(row.ct ?? 0),
-            lastEntryAt: Number(row.lastEntryAt ?? 0),
-          };
-        }
-      );
-      return {
-        statusCode: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'public, max-age=10',
-        },
-        body: JSON.stringify({ leaderboard: out }),
-      };
     }
 
     default:

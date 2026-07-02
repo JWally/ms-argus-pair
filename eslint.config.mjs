@@ -7,7 +7,7 @@ import importX from 'eslint-plugin-import-x';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist', 'cdk.out', 'node_modules', '**/*.d.ts', 'scripts/jsQR.js'] },
+  { ignores: ['dist', 'cdk.out', 'node_modules', '**/*.d.ts', 'scripts/jsQR.js', 'loader'] },
   js.configs.recommended,
   {
     files: ['**/*.{ts,tsx}'],
