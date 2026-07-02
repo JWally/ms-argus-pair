@@ -561,6 +561,26 @@ export class PairStack extends cdk.Stack {
         },
       },
     });
+
+    // The embeddable widget (/embed) MUST be iframable by customer sites, so it
+    // can't carry X-Frame-Options: DENY. Same security headers minus frameOptions
+    // — framing is gated by the single-use token (and, later, originAllowlist),
+    // not by the frame header.
+    const embedHeaders = new ResponseHeadersPolicy(this, 'EmbedResponseHeaders', {
+      securityHeadersBehavior: {
+        strictTransportSecurity: {
+          accessControlMaxAge: cdk.Duration.days(365),
+          includeSubdomains: true,
+          preload: true,
+          override: true,
+        },
+        contentTypeOptions: { override: true },
+        referrerPolicy: {
+          referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+          override: true,
+        },
+      },
+    });
     const spaRouter = new CloudFrontFunction(this, 'SpaRouter', {
       code: FunctionCode.fromFile({
         filePath: path.join(__dirname, '../cloudfront/spa-router.js'),
@@ -588,6 +608,20 @@ export class PairStack extends cdk.Stack {
           cachePolicy: CachePolicy.CACHING_DISABLED,
           originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
           responseHeadersPolicy: siteHeaders,
+        },
+        // The embeddable widget route — served by index.html (via the SPA router
+        // CFF) but with frame-allowing headers so customer sites can iframe it.
+        '/embed': {
+          origin: s3Origin,
+          viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          cachePolicy: CachePolicy.CACHING_DISABLED,
+          responseHeadersPolicy: embedHeaders,
+          functionAssociations: [
+            {
+              function: spaRouter,
+              eventType: FunctionEventType.VIEWER_REQUEST,
+            },
+          ],
         },
         ...Object.fromEntries(
           ['*.js', '*.css', '*.woff*', '*.png', '*.jpg', '*.svg'].map((pattern) => [
