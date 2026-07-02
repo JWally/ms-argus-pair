@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { BrandMark } from '../components/Brand';
 import { startDesktopSession, type DesktopSession } from '../lib/pair';
 import { QrCanvas, buildQrMatrix, type QrMatrix } from '../lib/qr';
 
@@ -105,17 +106,30 @@ export function Embed() {
   }, [hostOrigin, cpi]);
 
   return (
-    <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg-primary p-4 text-fg-primary">
-      <div className="w-full max-w-[16rem]">
-        <div className="qr-stage relative aspect-square w-full overflow-hidden rounded-lg bg-white p-3">
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-5 bg-bg-primary p-5 text-fg-primary">
+      <div className="flex items-center gap-2">
+        <BrandMark className="h-5 w-5" />
+        <span className="text-sm font-semibold tracking-tight text-fg-primary">Argus</span>
+      </div>
+
+      <div className="w-full max-w-[15rem]">
+        <div className="qr-stage relative aspect-square w-full overflow-hidden rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
           {done ? (
-            <div
-              className={`flex h-full flex-col items-center justify-center gap-2 text-center ${
-                done === 'paired' ? 'text-emerald-600' : 'text-rose-600'
-              }`}
-            >
-              <span className="text-5xl leading-none">{done === 'paired' ? '✓' : '✗'}</span>
-              <span className="text-base font-semibold">{status}</span>
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+              <span
+                className={`flex h-14 w-14 items-center justify-center rounded-full text-3xl leading-none text-white ${
+                  done === 'paired' ? 'bg-emerald-500' : 'bg-rose-500'
+                }`}
+              >
+                {done === 'paired' ? '✓' : '✗'}
+              </span>
+              <span
+                className={`text-base font-semibold ${
+                  done === 'paired' ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {status}
+              </span>
             </div>
           ) : matrix ? (
             <div
@@ -126,12 +140,19 @@ export function Embed() {
               <QrCanvas matrix={matrix} />
             </div>
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-fg-muted">…</div>
+            <div className="flex h-full items-center justify-center">
+              <span className="spinner" />
+            </div>
           )}
         </div>
       </div>
-      <p className="text-sm text-fg-secondary" aria-live="polite">
-        {done ? status : connected ? 'Phone connected — finishing…' : status}
+
+      <p
+        className="flex items-center justify-center gap-2 text-sm text-fg-secondary"
+        aria-live="polite"
+      >
+        {connected && !done && <span className="spinner" />}
+        <span>{done ? status : connected ? 'Phone connected — finishing…' : status}</span>
       </p>
     </div>
   );

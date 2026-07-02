@@ -2,7 +2,7 @@
  * Pair product mark — uses the same concentric "eye/target" glyph as the
  * main Argus marketing site (ms-argus-www Logo), rendered in an accent box.
  */
-function BrandMark({ className = 'h-7 w-7' }: { className?: string }) {
+export function BrandMark({ className = 'h-7 w-7' }: { className?: string }) {
   return (
     <span
       className={`inline-flex items-center justify-center rounded-xl bg-accent text-white ${className}`}
