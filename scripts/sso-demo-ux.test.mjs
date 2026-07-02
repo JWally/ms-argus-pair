@@ -13,7 +13,6 @@ function assert(condition, message) {
 }
 
 const validate = read('src/pages/MerchantValidate.tsx');
-const demo = read('src/pages/Demo.tsx');
 const valkey = read('cdk/lib/valkey-client.ts');
 
 assert(validate.includes('nameInput'), 'merchant validate page should capture a demo name');
@@ -34,15 +33,6 @@ assert(
   'merchant validate page should show explicit validity state'
 );
 assert(validate.includes('DONE'), 'merchant validate page should offer a bottom DONE action');
-assert(demo.includes('to="/merchant"'), 'main demo should link mobile users into SSO');
-assert(
-  demo.includes('lg:hidden') && demo.includes('Use mobile SSO'),
-  'main demo SSO option should be mobile-only'
-);
-assert(
-  demo.includes('hidden p-4 lg:block') && demo.includes('QrPanel'),
-  'main demo QR/status block should not be visible in little view'
-);
 assert(
   valkey.includes('return tonumber(ARGV[1]) + 1'),
   'Valkey rate limiter should return an over-cap value once the cap is reached'

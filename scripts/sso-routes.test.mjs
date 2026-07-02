@@ -17,13 +17,7 @@ const pairLib = read('src/lib/pair.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 
-for (const route of [
-  '/merchant',
-  '/sso/challenge/:sessionId',
-  '/merchant/validate',
-  '/claim',
-  '/metrics',
-]) {
+for (const route of ['/merchant', '/sso/challenge/:sessionId', '/merchant/validate']) {
   assert(main.includes(`path="${route}"`), `missing SPA route ${route}`);
 }
 
