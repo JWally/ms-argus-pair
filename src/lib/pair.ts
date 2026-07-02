@@ -1124,6 +1124,8 @@ export async function submitPhoneAttestation(
 }
 
 // Raffle/leaderboard frontend fetchers moved out with the marketing pages
-// (Demo/ClaimSpot → ms-argus-www). The /api/raffle/* backend stays.
+// (Demo/ClaimSpot → ms-argus-www), then the dormant /api/raffle/* backend
+// was removed too. The shared rate limiter (checkRaffleRateLimits) lives on
+// for SSO claims.
 
 export { HttpError };

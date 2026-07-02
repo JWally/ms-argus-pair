@@ -8,7 +8,6 @@
  *   session:{id}:meta     {nonce, expiresAt}                       — 5min TTL
  *   session:{id}:desktop  {att: StoredAttestation}                 — 5min TTL
  *   session:{id}:phone    {att, verdict, reason, annotations}      — 5min TTL
- *   session:{id}:raffle   {hash, enteredAt}                        — 5min TTL
  *   claim:{argusSid}      {sessionId, role}                        — 24h TTL
  *
  * Every conditional write becomes a single `SET NX EX` — no scripts.
@@ -51,7 +50,6 @@ export function isValkeySessionsEnabled(): boolean {
 const metaKey = (id: string) => `session:{${id}}:meta`;
 const desktopKey = (id: string) => `session:{${id}}:desktop`;
 const phoneKey = (id: string) => `session:{${id}}:phone`;
-const raffleKey = (id: string) => `session:{${id}}:raffle`;
 const claimKey = (argusSid: string) => `claim:{${argusSid}}`;
 
 // ── Shared type — kept in sync with pair-api.ts ─────────────────────
@@ -75,13 +73,8 @@ export interface PhoneBundle {
   annotations: Record<string, unknown>;
 }
 
-export interface RaffleBundle {
-  hash: string;
-  enteredAt: number;
-}
-
 /**
- * MGETs the 4 session keys in one round-trip, returns the raw JSON
+ * MGETs the 3 session keys in one round-trip, returns the raw JSON
  * strings (or null for keys that don't exist). Caller decides how to
  * reassemble into the SessionItem shape.
  */
@@ -89,20 +82,17 @@ export async function mgetSession(sessionId: string): Promise<{
   meta: SessionMeta | null;
   desktop: SessionFieldBlob | null;
   phone: PhoneBundle | null;
-  raffle: RaffleBundle | null;
 }> {
   const valkey = getValkey();
-  const [meta, desktop, phone, raffle] = await valkey.mget(
+  const [meta, desktop, phone] = await valkey.mget(
     metaKey(sessionId),
     desktopKey(sessionId),
-    phoneKey(sessionId),
-    raffleKey(sessionId)
+    phoneKey(sessionId)
   );
   return {
     meta: meta ? (JSON.parse(meta) as SessionMeta) : null,
     desktop: desktop ? (JSON.parse(desktop) as SessionFieldBlob) : null,
     phone: phone ? (JSON.parse(phone) as PhoneBundle) : null,
-    raffle: raffle ? (JSON.parse(raffle) as RaffleBundle) : null,
   };
 }
 
@@ -201,24 +191,4 @@ export async function claimArgusValkey(
     }
   }
   return { ok: false, reason: 'already_claimed' };
-}
-
-/**
- * Atomic claim of the raffle slot on a session. Same NX pattern. Returns
- * false if the session has already entered the raffle.
- */
-export async function setRaffleHashValkey(
-  sessionId: string,
-  hash: string,
-  enteredAt: number
-): Promise<boolean> {
-  const valkey = getValkey();
-  const r = await valkey.set(
-    raffleKey(sessionId),
-    JSON.stringify({ hash, enteredAt } satisfies RaffleBundle),
-    'EX',
-    SESSION_TTL_SEC,
-    'NX'
-  );
-  return r === 'OK';
 }

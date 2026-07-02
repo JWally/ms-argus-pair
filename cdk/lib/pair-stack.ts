@@ -165,19 +165,6 @@ export class PairStack extends cdk.Stack {
       timeToLiveAttribute: 'expiresAt',
     });
 
-    // GSI: top-N leaderboard query. Every HANDLE# row sets `lbPk="LB"`
-    // and we sort by `ct` DESC, Limit=25. Replaces the full-table Scan
-    // that /api/raffle/leaderboard used to run. Single-PK hot-partition
-    // is fine for dev-jw; at prod scale the writes would need shard
-    // fan-out (`LB#${hour}` or `LB#${0-9}`).
-    table.addGlobalSecondaryIndex({
-      indexName: 'LeaderboardIndex',
-      partitionKey: { name: 'lbPk', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'ct', type: dynamodb.AttributeType.NUMBER },
-      projectionType: dynamodb.ProjectionType.INCLUDE,
-      nonKeyAttributes: ['code', 'lastEntryAt'],
-    });
-
     // ── Shared infra (VPC + Valkey) from ms-argus-infra via SSM ───────
     // VPC lookup is a synth-time context resolution (cached in
     // cdk.context.json). The other params are runtime-resolved tokens.
@@ -372,21 +359,6 @@ export class PairStack extends cdk.Stack {
     });
     api.addRoutes({
       path: '/api/session/{id}/result',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/raffle/entry',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/raffle/leaderboard',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/raffle/status/{id}',
       methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
