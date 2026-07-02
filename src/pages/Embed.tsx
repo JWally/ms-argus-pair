@@ -44,13 +44,6 @@ const COPY: Record<Phase, { title: string; sub: string }> = {
   failed: { title: "Couldn't verify", sub: 'Try again on a trusted network' },
 };
 
-const STATUS_LABEL: Record<Phase, string> = {
-  scanning: 'live · secure',
-  pairing: 'pairing',
-  verified: 'verified',
-  failed: 'blocked',
-};
-
 const svg = { fill: 'none', stroke: 'currentColor' } as const;
 
 const EyeMark = () => (
@@ -180,7 +173,6 @@ export function Embed() {
           </div>
           <div className="ax-stat">
             <span className="ax-dot" />
-            <span>{STATUS_LABEL[phase]}</span>
           </div>
         </div>
 

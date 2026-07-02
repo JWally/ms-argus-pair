@@ -111,6 +111,11 @@
   background: var(--state);
   animation: ax-ping 2.4s ease-out infinite;
 }
+/* Solid status LED once the verdict has settled — no "still working" pulse. */
+.aegis.verified .ax-dot,
+.aegis.failed .ax-dot {
+  animation: none;
+}
 
 /* ---- QR reticle ---- */
 .aegis .ax-scan {
