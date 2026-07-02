@@ -1,0 +1,372 @@
+/*
+ * Argus captcha widget — scoped visual system for the /embed surface.
+ *
+ * Design direction: the captcha as a live device handshake. A self-contained
+ * dark "secure module" whose hero is the real desktop <-> phone co-attestation,
+ * not a checkbox. Signature = the handshake track under the QR (dead -> live
+ * pulse -> sealed). QR sits in a camera reticle; readouts are set in the app's
+ * JetBrains Mono, the one human line in Inter.
+ *
+ * Everything is scoped under `.aegis` with `ax-*` class names so it can't
+ * collide with the pair app's global styles (.label, .bar, .node, ...).
+ */
+.aegis-stage {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: #07080e;
+}
+
+.aegis {
+  --ink: #0a0c14;
+  --ink-2: #0e1220;
+  --ink-3: #141a2b;
+  --line: #20263a;
+  --line-2: #2c3350;
+  --violet: #8b5cf6;
+  --violet-lit: #b7a0ff;
+  --mint: #35e0a1;
+  --red: #ff6b6b;
+  --fg: #eceaf6;
+  --muted: #8288a0;
+  --paper: #ffffff;
+  --state: var(--violet);
+
+  width: 100%;
+  max-width: 320px;
+  min-height: 400px;
+  margin: 0 auto;
+  padding: 18px 18px 16px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  color: var(--fg);
+  font-family: 'Inter', system-ui, sans-serif;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 30%), var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 24px 60px -30px rgba(0, 0, 0, 0.9);
+}
+.aegis::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(183, 160, 255, 0.5), transparent);
+  opacity: 0.6;
+}
+.aegis.pairing {
+  --state: var(--violet);
+}
+.aegis.verified {
+  --state: var(--mint);
+}
+.aegis.failed {
+  --state: var(--red);
+}
+
+/* ---- readout bar ---- */
+.aegis .ax-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.aegis .ax-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aegis .ax-eye {
+  width: 18px;
+  height: 18px;
+  color: var(--violet-lit);
+}
+.aegis .ax-name {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  color: var(--fg);
+}
+.aegis .ax-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--state) 78%, var(--fg));
+}
+.aegis .ax-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--state);
+  animation: ax-ping 2.4s ease-out infinite;
+}
+
+/* ---- QR reticle ---- */
+.aegis .ax-scan {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  margin: 16px auto 0;
+}
+.aegis .ax-tile {
+  position: absolute;
+  inset: 0;
+  background: var(--paper);
+  border-radius: 12px;
+  padding: 12px;
+  display: grid;
+  place-items: center;
+  transition:
+    filter 0.28s ease,
+    opacity 0.28s ease;
+}
+.aegis .ax-tile canvas,
+.aegis .ax-tile svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+}
+.aegis .ax-tile-load {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(10, 12, 20, 0.14);
+  border-top-color: var(--violet);
+  animation: ax-spin 0.7s linear infinite;
+}
+.aegis.pairing .ax-tile {
+  filter: blur(11px) saturate(0.25) contrast(0.9);
+}
+.aegis.verified .ax-tile,
+.aegis.failed .ax-tile {
+  opacity: 0;
+}
+
+.aegis .ax-seal {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--state) 32%, var(--line));
+  background: radial-gradient(
+    circle at 50% 44%,
+    color-mix(in srgb, var(--state) 18%, var(--ink-2)) 0%,
+    var(--ink-2) 68%
+  );
+}
+.aegis.verified .ax-seal,
+.aegis.failed .ax-seal {
+  display: grid;
+}
+.aegis .ax-ring {
+  width: 92px;
+  height: 92px;
+  color: var(--state);
+}
+
+/* corner ticks */
+.aegis .ax-tick {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--state);
+  opacity: 0.9;
+  transition: border-color 0.28s ease;
+}
+.aegis .ax-tick.tl {
+  top: -5px;
+  left: -5px;
+  border-right: 0;
+  border-bottom: 0;
+  border-top-left-radius: 6px;
+}
+.aegis .ax-tick.tr {
+  top: -5px;
+  right: -5px;
+  border-left: 0;
+  border-bottom: 0;
+  border-top-right-radius: 6px;
+}
+.aegis .ax-tick.bl {
+  bottom: -5px;
+  left: -5px;
+  border-right: 0;
+  border-top: 0;
+  border-bottom-left-radius: 6px;
+}
+.aegis .ax-tick.br {
+  bottom: -5px;
+  right: -5px;
+  border-left: 0;
+  border-top: 0;
+  border-bottom-right-radius: 6px;
+}
+
+/* ---- human line ---- */
+.aegis .ax-label {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.aegis .ax-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ---- handshake signature ---- */
+.aegis .ax-link {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.aegis .ax-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 62px;
+}
+.aegis .ax-chip {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--ink-3);
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  transition:
+    color 0.3s ease,
+    border-color 0.3s ease,
+    background 0.3s ease;
+}
+.aegis .ax-chip svg {
+  width: 17px;
+  height: 17px;
+}
+.aegis .ax-tag {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  transition: color 0.3s ease;
+}
+.aegis .ax-node.here .ax-chip {
+  color: var(--violet-lit);
+  border-color: color-mix(in srgb, var(--violet) 55%, var(--line-2));
+  background: color-mix(in srgb, var(--violet) 12%, var(--ink-3));
+}
+.aegis .ax-node.here .ax-tag {
+  color: color-mix(in srgb, var(--violet-lit) 70%, var(--muted));
+}
+.aegis.verified .ax-node.here .ax-chip {
+  color: var(--mint);
+  border-color: color-mix(in srgb, var(--mint) 55%, var(--line-2));
+  background: color-mix(in srgb, var(--mint) 12%, var(--ink-3));
+}
+.aegis .ax-track {
+  position: relative;
+  height: 22px;
+}
+.aegis .ax-rail {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background-image: linear-gradient(90deg, var(--line-2) 0 6px, transparent 6px 12px);
+  background-size: 12px 2px;
+}
+.aegis .ax-live {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 0;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: var(--state);
+  transition: width 0.5s ease;
+}
+.aegis.verified .ax-live,
+.aegis.failed .ax-live {
+  width: 100%;
+}
+.aegis .ax-pulse {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--violet-lit);
+  box-shadow: 0 0 10px 2px color-mix(in srgb, var(--violet) 70%, transparent);
+  opacity: 0;
+}
+.aegis.pairing .ax-pulse {
+  animation: ax-travel 1.15s ease-in-out infinite;
+}
+
+@keyframes ax-ping {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--state) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@keyframes ax-travel {
+  0% {
+    left: 4%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    left: 96%;
+    opacity: 0;
+  }
+}
+@keyframes ax-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aegis .ax-dot,
+  .aegis .ax-pulse,
+  .aegis .ax-tile-load {
+    animation: none !important;
+  }
+}
