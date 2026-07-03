@@ -24,6 +24,7 @@ import './embed.css';
 type UpMsg =
   | { event: 'ready'; sessionId: string }
   | { event: 'connected' }
+  | { event: 'size'; height: number }
   | {
       event: 'result';
       sessionId: string;
@@ -38,7 +39,7 @@ const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
 type Phase = 'scanning' | 'pairing' | 'verified' | 'failed';
 
 const COPY: Record<Phase, { title: string; sub: string }> = {
-  scanning: { title: 'Scan with your phone', sub: 'Point your camera at the code' },
+  scanning: { title: 'Scan with your phone', sub: 'Not scanning? Move closer or farther away' },
   pairing: { title: 'Phone connected — verifying…', sub: 'Checking this is a real device' },
   verified: { title: 'Verified', sub: "You're all set" },
   failed: { title: "Couldn't verify", sub: 'Try again on a trusted network' },
@@ -100,6 +101,45 @@ export function Embed() {
   const [connected, setConnected] = useState(false);
   const [done, setDone] = useState<null | 'paired' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
+  const moduleRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
+
+  // The host (loader or embedding page) reports its viewport width down to us
+  // — our own media queries only see the ≤320px iframe, never the host screen.
+  // Below the small-screen threshold we drop the handshake track.
+  useEffect(() => {
+    if (window.parent === window) return;
+    const onMsg = (e: MessageEvent) => {
+      if (e.source !== window.parent) return;
+      if (hostOrigin !== '*' && e.origin !== hostOrigin) return;
+      const d = e.data as { source?: string; event?: string; width?: number } | null;
+      if (
+        d?.source === 'argus-captcha-host' &&
+        d.event === 'viewport' &&
+        typeof d.width === 'number'
+      ) {
+        setCompact(d.width < 640);
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [hostOrigin]);
+
+  // Report the module's real height up so the loader can size the iframe to
+  // fit — the fixed fallback height otherwise leaves dead space around us.
+  useEffect(() => {
+    const el = moduleRef.current;
+    if (!el || window.parent === window) return;
+    const report = () =>
+      window.parent.postMessage(
+        { source: 'argus-captcha', event: 'size', height: Math.ceil(el.offsetHeight) },
+        hostOrigin
+      );
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    report();
+    return () => ro.disconnect();
+  }, [hostOrigin]);
 
   useEffect(() => {
     const postUp = (msg: UpMsg) =>
@@ -165,7 +205,7 @@ export function Embed() {
 
   return (
     <div className="aegis-stage">
-      <div className={`aegis ${phase}`}>
+      <div className={`aegis ${phase}${compact ? ' compact' : ''}`} ref={moduleRef}>
         <div className="ax-bar">
           <div className="ax-brand">
             <EyeMark />
