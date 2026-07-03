@@ -43,6 +43,7 @@ function nonceFromPairHash(): string | null {
   return params.get('n');
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 20; decompose, don't grow
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
   const initialNonce = nonceFromPairHash();
@@ -137,6 +138,7 @@ export function Pair() {
   // Returning devices still try silent device-trust redeem first inside
   // submitPhoneAttestation. Fresh devices pick a proof path from the
   // menu so Private Browsing does not blindly create passkeys forever.
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
   async function pair(proofMode: ProofChoice = 'passkey') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     const info = infoRef.current;

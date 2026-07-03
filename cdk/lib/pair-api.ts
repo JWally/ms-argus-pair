@@ -391,6 +391,7 @@ function isValkeyRateLimitsEnabled(): boolean {
   return process.env.USE_VALKEY_RATE_LIMITS === 'true';
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
 async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimitResult> {
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
@@ -1300,6 +1301,7 @@ const lambdaHandler = async (event: {
   queryStringParameters?: Record<string, string | undefined>;
   body?: string;
   headers?: Record<string, string | undefined>;
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 274; decompose, don't grow
 }) => {
   if (!originAllowed(event)) return jsonResp(403, { error: 'origin_not_allowed' });
 

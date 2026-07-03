@@ -13,6 +13,7 @@ import {
 import { clearTrustToken, loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 24; decompose, don't grow
 export function MerchantValidate() {
   const [params] = useSearchParams();
   const [result, setResult] = useState<SsoValidateResult | null>(null);
@@ -39,6 +40,7 @@ export function MerchantValidate() {
       return;
     }
     let cancelled = false;
+    // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
     (async () => {
       try {
         setPasskeySeen(hasPasskeyHint());
@@ -85,6 +87,7 @@ export function MerchantValidate() {
       ? 'NOT VERIFIED'
       : 'CHECKING';
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
   async function runProof(mode: 'passkey-create' | 'passkey-auth' | 'google') {
     const sessionId = params.get('session');
     const returnCode = params.get('code');
@@ -141,6 +144,7 @@ export function MerchantValidate() {
     }
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 19; decompose, don't grow
   async function submitName(e: { preventDefault(): void }) {
     e.preventDefault();
     const name = nameInput.trim();

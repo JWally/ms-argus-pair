@@ -565,6 +565,7 @@ export async function submitSsoChallenge(
   });
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
 export async function validateSsoReturn({
   sessionId,
   nonce,
@@ -1003,6 +1004,7 @@ export interface SubmitPhoneAttestationOptions {
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 44; decompose, don't grow
 export async function submitPhoneAttestation(
   sessionId: string,
   info: PhoneSessionInfo,
