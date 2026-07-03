@@ -71,15 +71,36 @@ interface CaptchaHandle {
       encodeURIComponent(hostOrigin);
     iframe.title = 'Argus device pairing';
     iframe.setAttribute('referrerpolicy', 'origin');
+    // color-scheme:normal keeps the iframe transparent — a light-host/dark-embed
+    // scheme mismatch would otherwise force an opaque canvas behind the widget.
+    // The 420px height is a pre-render fallback; the embed posts its real
+    // height via `size` events and we follow it.
     iframe.style.cssText =
-      'border:0;display:block;width:100%;max-width:340px;height:420px;color-scheme:light dark;';
+      'border:0;display:block;width:100%;max-width:320px;height:420px;color-scheme:normal;background:transparent;';
     slot.appendChild(iframe);
+
+    // Report the host viewport down so the widget can adapt to small screens —
+    // media queries inside the iframe only ever see the iframe's own width.
+    const sendViewport = () => {
+      iframe.contentWindow?.postMessage(
+        { source: 'argus-captcha-host', event: 'viewport', width: window.innerWidth },
+        origin
+      );
+    };
+    iframe.addEventListener('load', sendViewport);
+    window.addEventListener('resize', sendViewport);
 
     const onMsg = (e: MessageEvent) => {
       if (e.origin !== origin) return; // only trust the embed origin
       if (e.source !== iframe.contentWindow) return;
       const d = e.data as (Record<string, unknown> & { source?: string; event?: string }) | null;
       if (!d || d.source !== 'argus-captcha') return;
+      if (d.event === 'size' && typeof d.height === 'number') {
+        // Follow the widget's reported height (clamped — a compromised embed
+        // shouldn't be able to blow the iframe up over the host page).
+        iframe.style.height = Math.min(640, Math.max(260, Math.ceil(d.height))) + 'px';
+        return;
+      }
       if (typeof opts.onEvent === 'function') opts.onEvent(d);
       if (d.event === 'result' && onResult) {
         onResult({
@@ -95,6 +116,7 @@ interface CaptchaHandle {
     return {
       destroy() {
         window.removeEventListener('message', onMsg);
+        window.removeEventListener('resize', sendViewport);
         iframe.remove();
         slot.__argusMounted = false;
       },
