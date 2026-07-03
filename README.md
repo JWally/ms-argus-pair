@@ -24,7 +24,10 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
   function onPair(r) {
     // r = { sessionId, verdict, reason, token }
     // POST r.token to YOUR server → it calls POST {pairOrigin}/api/verify
-    // → trusted { valid, verdict, sessionId, cpi }. Never trust r.verdict alone.
+    // → trusted { valid, passed, verdict, sessionId, cpi }.
+    // Gate on `passed` (true only when verdict === "paired"), NOT `valid`
+    // — `valid` just means the signature is authentic; a real token can
+    // carry a "failed" verdict. Never trust the browser's r.verdict alone.
   }
 </script>
 ```
