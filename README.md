@@ -1,93 +1,171 @@
 # ms-argus-pair
 
-Phone-pair captcha demo. Desktop displays a QR; phone scans it; the two browsers
-form a WebRTC DataChannel over a same-origin HTTP-polling signaling broker. Once
-the channel opens, the phone sends a greeting and the desktop is "paired".
+The **Argus Captcha** — QR device-pairing as proof of humanity. A desktop page
+shows a QR; a real phone scans it; both sides run an Argus integrity scan; the
+phone adds proof-of-life (silent device-trust token, WebAuthn passkey, or
+Google sign-in); the server scores it all and hands back a **signed verdict
+token** the embedding site verifies server-to-server.
 
-This is the v0.1 skeleton — pairing UX only. No PAT, no WebAuthn, no
-persistent identity yet (those are v0.2/v0.3).
+One self-contained microservice: the pairing app + backend (deployed at
+`captcha-dev-jw.argus.pw`) plus the embeddable loader and its CDN
+(`static-captcha-dev-jw.argus.pw`). Marketing pages live in `ms-argus-www`;
+fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 
-## Architecture
+## Embed (what a customer writes)
+
+```html
+<script
+  src="https://static-captcha-dev-jw.argus.pw/captcha.js"
+  data-cpi="argus_cpi_live_..."
+  data-onresult="onPair"
+></script>
+<div class="argus-captcha"></div>
+<script>
+  function onPair(r) {
+    // r = { sessionId, verdict, reason, token }
+    // POST r.token to YOUR server → it calls POST {pairOrigin}/api/verify
+    // → trusted { valid, verdict, sessionId, cpi }. Never trust r.verdict alone.
+  }
+</script>
+```
+
+Or programmatically: `window.argusCaptcha.render(el, { cpi, onResult, onEvent })`.
+
+The loader (`loader/loader.ts`) injects a cross-origin iframe at
+`{EMBED_ORIGIN}/embed` and relays origin-checked postMessages up. The browser
+message is a **notification**; the HMAC-signed `token` verified via
+`POST /api/verify` is the proof. The loader carries no secrets.
+
+## How a pairing works
 
 ```
-Desktop (/)                Signaling (Lambda + DDB)              Phone (/pair/<uuid>)
-    │                              ▲                                    │
-    │  POST /api/rooms             │                                    │
-    │  GET  /api/rooms/:id/peers   │  same-origin via CloudFront        │
-    │  PUT  /api/rooms/:id/signal  │  /api/* → APIGW                    │
-    │  GET  /api/rooms/:id/signal  │                                    │
-    │  POST /api/rooms/:id/end     │                                    │
-    │                              │                                    │
-    └──── direct WebRTC DataChannel (host/srflx via STUN) ───────────────┘
+desktop /embed                      Lambda API + WS relay                    phone
+──────────────                      ─────────────────────                    ─────
+POST /api/session/start ──────────► session in Valkey (TTL'd)
+WS whoami (bootstrap token) ──────► sealed AES-GCM envelope back
+POST …/{id}/pair-token ───────────► 128-bit single-use token, TTL 300s
+render QR: /p/<token>  ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
+                                    POST /api/pair-token/redeem (GETDEL) ◄── redeem
+                                    → /pair/{id}#{wsUrl,e,pt,n}  (hash never hits the server)
+◄──────────── WS relay: phone-here / desktop-ready (sealed envelopes) ─────► WS whoami
+argus.run(desktop) ───────────────► desktop-attest                           argus.run(phone)
+                                                                             + proof-of-life
+                                    verdict computed on ◄─────────────────── phone-attest
+◄── verdict pushed over WS (or /result poll fallback)
 ```
 
-Signaling state lives in a single DynamoDB table with TTL=60s. Rooms accept at
-most two peers; the desktop is peerId=1, the phone is peerId=2.
+Key mechanics:
 
-## Hardening over upstream web-quaker
+- **Short-token QR.** The QR encodes only `/p/<128-bit token>` so it stays
+  sparse (~33×33). The token is single-use (atomic Valkey `GETDEL`) with a
+  5-minute TTL; redeeming returns the real session bundle, which travels to
+  `/pair/{id}` in the URL **hash** so it never reaches a server log.
+- **Poisoned QR.** `src/lib/qr-paint.ts` inverts a small square at each data
+  module's center: a camera lens averages it away, a pixel-exact screenshot
+  decoder fails ECC. A speed-bump against screenshot bots — the single-use
+  token is the actual lock.
+- **WS relay, not WebRTC.** Both sides authenticate to the WebSocket API with
+  HMAC bootstrap tokens (5-min TTL) and receive sealed AES-GCM envelopes; the
+  relay verifies envelope auth-tags, one live connection per {session, role},
+  and only relays between distinct roles of the same session. There is no
+  peer-to-peer channel and no STUN.
+- **Attestation + verdict.** Each side runs the Argus integrity SDK
+  (`argus.run`, purpose `argus-pair-v1`); the server fetches scan projections
+  from the merchant API and scores them (individual ≤ 30, total ≤ 50, PAT
+  floor 70). Missing or stale projections fail **closed**. Proof-of-life is
+  required: silent device-trust redeem (12h IndexedDB token) → WebAuthn →
+  Google OAuth.
+- **Desktop trusts only the server.** The verdict must arrive `from:'server'`
+  (WS push or authenticated `/result` poll) — a phone-side forgery via the
+  relay is ignored.
 
-- Room id is a UUIDv4 (122-bit entropy), not a 4-char code
-- TTL = 60s (was 1 hour)
-- Hard peer cap of 2, enforced atomically by a DDB conditional update
-- ICE candidate count capped at 30 per peer
-- Body size capped at 16KB before parsing
-- Origin header allowlist (in addition to APIGW CORS)
-- `/end` endpoint destroys the room after the channel opens
-- No `/start` endpoint (Quake-specific)
-- APIGW default-route throttling (50 burst / 20 rate)
+## SSO continuity (demo)
+
+A second flow (`/merchant` → `/sso/challenge/:id` → `/merchant/validate`)
+proving the _same phone, device, and network_ across a merchant round-trip:
+three Argus scans + 90s single-use return codes, evaluated by
+`cdk/lib/sso-continuity.ts` (same device keyId, same/nearby network, bounded
+risk drift). Approval sets a cookie and can mint a device-trust token.
+`POST /api/sso/{id}/claim` records a display-name claim.
+
+## Repo layout
+
+```
+ms-argus-pair/
+├── loader/loader.ts            # embeddable captcha.js (own build + CDN stack)
+├── src/
+│   ├── main.tsx                # SPA entry: /embed, /merchant, /sso/*, /merchant/validate
+│   ├── phone-main.tsx          # phone entry (vanilla DOM, phone.html): /pair/*, /p/*
+│   ├── lib/pair.ts             # session orchestration (desktop + phone)
+│   ├── lib/ws.ts               # WS client (whoami / message)
+│   ├── lib/qr.tsx, qr-paint.ts # canvas QR + anti-screenshot poison
+│   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)
+│   └── pages/                  # Embed, Pair, MerchantSso, SsoChallenge, MerchantValidate
+├── cdk/
+│   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
+│   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
+│   ├── lib/pair-api.ts               # the API Lambda (all HTTP routes)
+│   ├── lib/pair-api/                 # pair-token, verdict-token, attestation
+│   ├── lib/ws-handler.ts             # WS Lambda (whoami / message relay)
+│   ├── lib/session-store.ts, valkey-client.ts, sso-continuity.ts, oauth-providers.ts
+│   ├── lib/captcha-cdn/              # loader CDN stack (S3+CloudFront)
+│   └── cloudfront/spa-router.js      # CFF: /pair/*,/p/* → phone.html; SPA fallback
+└── scripts/                    # build-loader, SRI apply/assert, *.test.* hygiene suite
+```
+
+Routing: `index.html` serves the React SPA; `phone.html` is a separate
+lightweight entry so the phone paints instantly. A CloudFront Function maps
+`/pair/*` and `/p/*` to `phone.html`; `/api/*` goes to the HTTP API; `/embed`
+gets its own behavior without `X-Frame-Options: DENY` so customers can iframe
+it (everything else keeps DENY).
+
+Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
+holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection
+slots, SSO sessions, and the claim counter (and is the session fallback).
+Secrets Manager holds the device-trust, verdict-signing, and WS-envelope keys.
 
 ## Local development
 
 ```
 npm install
-npm run dev:signaling   # local in-memory broker on :9090
-npm run dev             # vite on :5173 (also exposed on LAN)
+npm run dev          # vite on :5173 (SPA only)
 ```
 
-Open http://localhost:5173 on the desktop. To pair a real phone you need HTTPS
-(WebRTC requires it on non-localhost origins) — easiest is to just `npm run
-deploy` and use the dev-jw URL.
+A real pairing needs HTTPS, the WS API, Valkey, and the merchant API — in
+practice, deploy to dev-jw and test there. `scripts/test-oauth/` has a
+localhost rig for iterating on OAuth verification in isolation.
 
-## Deploy
-
-```
-AWS_PROFILE=… AWS_REGION=us-east-1 npm run deploy
-```
-
-Stack: `ms-argus-pair-dev-jw`. Deployed at `https://captcha-dev-jw.argus.pw`.
-
-## File layout
+## Build, tests, deploy
 
 ```
-ms-argus-pair/
-├── cdk/
-│   ├── bin/app.ts              # CDK app entry
-│   └── lib/
-│       ├── pair-stack.ts       # S3+CF+APIGW+Lambda+DDB
-│       └── signaling.ts        # Lambda handler
-├── scripts/
-│   └── dev-signaling.mjs       # local in-memory broker
-├── src/
-│   ├── lib/pairing.ts          # WebRTC client (createRoom / joinRoom)
-│   ├── pages/
-│   │   ├── Demo.tsx            # desktop: shows QR
-│   │   └── Pair.tsx            # phone: joins room
-│   ├── main.tsx
-│   └── index.css
-├── public/favicon.svg
-├── index.html
-├── vite.config.ts
-├── tailwind.config.cjs
-├── tsconfig*.json
-└── eslint.config.mjs
+npm run deploy       # the only supported path — see below
 ```
 
-## Roadmap
+The deploy script (bash — `source .env` matters) computes the canonical host +
+WS URL, bakes `VITE_PAIR_URL_BASE` / `VITE_PAIR_WS_URL` into the SPA build and
+`EMBED_ORIGIN` into the loader, runs the hygiene suite, asserts the host
+actually landed in the bundle (`cdk/bin/assert-baked-host.mjs`), then
+`cdk deploy --all` with merchant + OAuth context flags. **Read `CLAUDE.md`
+before adding a context flag or touching the deploy chain** — the QR url-base
+baking has bitten twice.
 
-- v0.1 — pairing UX (this).
-- v0.2 — server-issued token, redemption path proven via DataChannel.
-- v0.3 — persistent ECDSA identity in IndexedDB; sign room creation and
-  redemption with it.
-- v0.4 — same-network co-location check from srflx ICE candidates.
-- v0.5 — Apple PAT integration; gate so PAT-presenting Safari users skip the
-  pairing step entirely.
+`npm run test:hygiene` chains the guard scripts: SRI correctness on every
+built asset, loader SRI, no dev proof-skip leaked into prod bundles, SPA-router
+and phone-entry invariants, QR poison geometry, pair-token semantics, WS
+single-connection, SSO routes/continuity. `test:cdk-hardening` asserts the
+synthesized CloudFront template (frame-deny, HSTS, no error-response SPA
+fallback, exactly one CFF).
+
+Stacks (stage `dev-jw`; no prod stage configured yet):
+
+- `ms-argus-pair-dev-jw` → `captcha-dev-jw.argus.pw` (alias `qr.arcades.click`)
+- `ms-argus-pair-captcha-dev-jw` → `static-captcha-dev-jw.argus.pw` (loader CDN)
+
+## Known gaps
+
+- OAuth: only Google is wired end-to-end on the client; GitHub/Facebook have
+  server-side verifiers but stub clients (`src/lib/oauth.ts`).
+- `originAllowlist` is stored per-CPI but not yet enforced (domain-locking).
+- The poisoned 33×33 QR has not been verified with a real phone scan
+  end-to-end since the short-token change.
+- `GET /api/_valkey-debug` is a temporary unauthenticated connectivity probe.
