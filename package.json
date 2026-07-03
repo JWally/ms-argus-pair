@@ -34,7 +34,8 @@
     "deploy": "source .env 2>/dev/null; PAIR_HOST=$(node cdk/bin/print-pair-host.mjs) && WS_URL=$(node cdk/bin/print-ws-url.mjs) && VITE_PAIR_URL_BASE=\"https://${PAIR_HOST}\" VITE_PAIR_WS_URL=\"${WS_URL}\" npm run build && EMBED_ORIGIN=\"https://${PAIR_HOST}\" npm run build:loader && npm run test:hygiene && node cdk/bin/assert-baked-host.mjs \"${PAIR_HOST}\" && npx cdk deploy --all -c merchantApiUrl=\"${MERCHANT_API_URL:-}\" -c merchantApiCredential=\"${MERCHANT_API_CREDENTIAL:-}\" -c merchantCpi=\"${MERCHANT_CPI:-}\" -c oauthGoogleClientId=\"${OAUTH_GOOGLE_CLIENT_ID:-}\" -c oauthGithubClientId=\"${OAUTH_GITHUB_CLIENT_ID:-}\" -c oauthGithubClientSecretArn=\"${OAUTH_GITHUB_CLIENT_SECRET_ARN:-}\" -c oauthFacebookAppId=\"${OAUTH_FACEBOOK_APP_ID:-}\" -c oauthFacebookAppSecretArn=\"${OAUTH_FACEBOOK_APP_SECRET_ARN:-}\" --require-approval never",
     "test": "vitest run",
     "test:watch": "vitest",
-    "duplication": "jscpd src cdk loader"
+    "duplication": "jscpd src cdk loader",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
