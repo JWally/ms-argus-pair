@@ -1,20 +1,22 @@
 /*
  * QR keyholder — owns the client ECDH private key and turns a sealed pair-token
- * into poisoned QR pixels, WITHOUT the plaintext ever touching the page realm.
+ * into poisoned QR pixels inside a dedicated Web Worker. The isolation is the
+ * point: CDP `addInitScript` / page-context `Runtime.evaluate` cannot read
+ * worker scope, so the descramble key and the plaintext pair-token live there,
+ * out of reach of a page-driving bot that runs AFTER the app starts.
  *
- * Two implementations behind one interface:
- *   - workerKeyholder: the SCIF path. The private key + descramble + render all
- *     live in a Web Worker (pair-qr-worker.ts); the page only sends pubkeys and
- *     receives pixels. This is what stops a page-context automation bot.
- *   - inlineKeyholder: fallback for environments without Worker (essentially
- *     none among real browsers). Same crypto, but in the page realm — so the
- *     plaintext is transiently page-visible. Kept so the widget always works.
+ * FAIL-CLOSED, no inline fallback. An inline (page-realm) descramble would let
+ * an attacker force the weak path just by deleting `window.Worker`, then read
+ * the plaintext token directly — strictly worse than the worker. Worker support
+ * is universal, so if the worker can't be created we render no QR rather than
+ * leak. (Note: a page realm the attacker fully owns BEFORE app start can still
+ * substitute the Worker constructor and wrap the real worker — that's the hard
+ * ceiling; the server-side pairing gate, not QR secrecy, is the actual lock.)
  *
- * The mint fetch itself stays in pair.ts (page realm) — it only carries pubkeys
- * and ciphertext, nothing secret.
+ * The mint fetch stays in pair.ts (page realm) — it only carries pubkeys and
+ * ciphertext, nothing secret.
  */
-import { exportPubRaw, genKeyPair } from './ecdh-seal';
-import { paintSecureQr, type SecureQrPixels } from './qr-secure';
+import { type SecureQrPixels } from './qr-secure';
 
 export interface QrKeyholder {
   /** Generate the ephemeral keypair; returns the public key (base64url) to mint with. */
@@ -24,18 +26,11 @@ export interface QrKeyholder {
   dispose(): void;
 }
 
+/** Create the SCIF worker keyholder. Throws (fails closed) if Worker is unavailable. */
 export function createQrKeyholder(base: string, debug: string): QrKeyholder {
-  if (typeof Worker !== 'undefined') {
-    try {
-      return workerKeyholder(base, debug);
-    } catch {
-      /* Worker construction blocked — fall back to inline. */
-    }
+  if (typeof Worker === 'undefined') {
+    throw new Error('Web Worker unavailable — cannot render the pairing QR securely');
   }
-  return inlineKeyholder(base, debug);
-}
-
-function workerKeyholder(base: string, debug: string): QrKeyholder {
   const worker = new Worker(new URL('./pair-qr-worker.ts', import.meta.url), { type: 'module' });
   const await1 = <T>(type: string): Promise<T> =>
     new Promise<T>((resolve, reject) => {
@@ -63,24 +58,6 @@ function workerKeyholder(base: string, debug: string): QrKeyholder {
     },
     dispose() {
       worker.terminate();
-    },
-  };
-}
-
-function inlineKeyholder(base: string, debug: string): QrKeyholder {
-  let priv: CryptoKey | null = null;
-  return {
-    async keygen() {
-      const pair = await genKeyPair();
-      priv = pair.privateKey;
-      return exportPubRaw(pair.publicKey);
-    },
-    render(enc, sPub) {
-      if (!priv) throw new Error('keygen not run');
-      return paintSecureQr(priv, sPub, enc, base, debug);
-    },
-    dispose() {
-      priv = null;
     },
   };
 }
