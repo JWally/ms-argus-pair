@@ -43,8 +43,11 @@ body:has(.aegis-stage) {
   --paper: #ffffff;
   --state: var(--violet);
 
+  /* Fluid: the host's iframe decides the width (the loader caps its iframe at
+     320px, so customer embeds are unchanged; wider hosts get a wider module).
+     640px is a sanity cap for unframed direct visits. */
   width: 100%;
-  max-width: 320px;
+  max-width: 640px;
   min-height: 400px;
   margin: 0 auto;
   padding: 18px 18px 16px;
@@ -129,8 +132,8 @@ body:has(.aegis-stage) {
 /* ---- QR reticle ---- */
 .aegis .ax-scan {
   position: relative;
-  width: 220px;
-  height: 220px;
+  width: min(248px, 100%);
+  aspect-ratio: 1;
   margin: 16px auto 0;
 }
 .aegis .ax-tile {
