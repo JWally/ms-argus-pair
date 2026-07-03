@@ -331,7 +331,10 @@ export async function startDesktopSession(
     }
   );
   const pairUrl = `${pairOrigin}/p/${pairToken}${debugParam}`;
-  if (debugMode) {
+  // Never print the pair URL in a production bundle — ?debug=true is
+  // attacker-supplyable, so this logged the redeemable token to anyone's
+  // console. import.meta.env.DEV is compiled out of the prod build.
+  if (debugMode && import.meta.env.DEV) {
     console.log('[argus-pair] pair URL:', pairUrl);
   }
   events.onStatus?.('waiting for phone');
