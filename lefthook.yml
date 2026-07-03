@@ -9,7 +9,9 @@ pre-commit:
       run: npx eslint {staged_files} --max-warnings 0 --no-warn-ignored
     typecheck:
       glob: '*.{ts,tsx}'
-      run: npx tsc --noEmit
+      # tsc -b, NOT --noEmit: the solution-style root tsconfig has files:[]
+      # so a bare --noEmit typechecks ZERO files and always exits 0.
+      run: npx tsc -b
 
 pre-push:
   parallel: true
@@ -20,6 +22,13 @@ pre-push:
       # sets VITE_PAIR_URL_BASE explicitly so the guard fires only when
       # someone runs cdk deploy directly without sourcing env.
       run: PAIR_ALLOW_ORIGIN_FALLBACK=1 npm run build && npm run test:hygiene
+    test:
+      # vitest unit tests (tests/**) — the TDD track. Build-artifact hygiene
+      # checks stay in the build command above.
+      run: npm test
+    duplication:
+      # jscpd ratchet (threshold in package.json "jscpd") — baseline 0.72%.
+      run: npm run duplication
     dead-code:
       # knip — unused exports / files / dependencies. Ratchet baseline
       # as of branch chore/add-quality-gates: clean. Any new unused

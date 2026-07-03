@@ -14,7 +14,7 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,json,md,yaml,yml,css,html}\"",
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "dead-code": "PAIR_ALLOW_ORIGIN_FALLBACK=1 knip",
     "test:argus-loader-sri": "node scripts/argus-loader-sri.test.mjs",
     "test:proof-menu": "node scripts/pair-proof-menu.test.mjs",
@@ -24,16 +24,17 @@
     "test:sso-routes": "node scripts/sso-routes.test.mjs",
     "test:sso-demo-ux": "node scripts/sso-demo-ux.test.mjs",
     "test:qr-connected": "node scripts/pair-qr-connected.test.mjs",
-    "test:qr-poison": "tsx scripts/qr-poison.test.mts",
-    "test:pair-token": "tsx scripts/pair-token.test.mts",
     "test:ws-single": "node scripts/ws-single-connection.test.mjs",
-    "test:hygiene": "node scripts/assert-build-hygiene.mjs && npm run test:argus-loader-sri && npm run test:proof-menu && npm run test:phone-scan-lazy && npm run test:phone-entry-build && npm run test:sso-continuity && npm run test:sso-routes && npm run test:sso-demo-ux && npm run test:qr-connected && npm run test:ws-single && npm run test:qr-poison && npm run test:pair-token",
+    "test:hygiene": "node scripts/assert-build-hygiene.mjs && npm run test:argus-loader-sri && npm run test:proof-menu && npm run test:phone-scan-lazy && npm run test:phone-entry-build && npm run test:sso-continuity && npm run test:sso-routes && npm run test:sso-demo-ux && npm run test:qr-connected && npm run test:ws-single && npm run test:spa-router",
     "test:spa-router": "node scripts/spa-router.test.mjs",
     "test:cdk-hardening": "node scripts/assert-cdk-hardening.mjs",
-    "quality": "npm run lint && npm run dead-code",
+    "quality": "npm run lint && npm run dead-code && npm run duplication && npm test",
     "cdk:synth": "npx cdk synth",
     "cdk:diff": "npx cdk diff",
-    "deploy": "source .env 2>/dev/null; PAIR_HOST=$(node cdk/bin/print-pair-host.mjs) && WS_URL=$(node cdk/bin/print-ws-url.mjs) && VITE_PAIR_URL_BASE=\"https://${PAIR_HOST}\" VITE_PAIR_WS_URL=\"${WS_URL}\" npm run build && EMBED_ORIGIN=\"https://${PAIR_HOST}\" npm run build:loader && npm run test:hygiene && node cdk/bin/assert-baked-host.mjs \"${PAIR_HOST}\" && npx cdk deploy --all -c merchantApiUrl=\"${MERCHANT_API_URL:-}\" -c merchantApiCredential=\"${MERCHANT_API_CREDENTIAL:-}\" -c merchantCpi=\"${MERCHANT_CPI:-}\" -c oauthGoogleClientId=\"${OAUTH_GOOGLE_CLIENT_ID:-}\" -c oauthGithubClientId=\"${OAUTH_GITHUB_CLIENT_ID:-}\" -c oauthGithubClientSecretArn=\"${OAUTH_GITHUB_CLIENT_SECRET_ARN:-}\" -c oauthFacebookAppId=\"${OAUTH_FACEBOOK_APP_ID:-}\" -c oauthFacebookAppSecretArn=\"${OAUTH_FACEBOOK_APP_SECRET_ARN:-}\" --require-approval never"
+    "deploy": "source .env 2>/dev/null; PAIR_HOST=$(node cdk/bin/print-pair-host.mjs) && WS_URL=$(node cdk/bin/print-ws-url.mjs) && VITE_PAIR_URL_BASE=\"https://${PAIR_HOST}\" VITE_PAIR_WS_URL=\"${WS_URL}\" npm run build && EMBED_ORIGIN=\"https://${PAIR_HOST}\" npm run build:loader && npm run test:hygiene && node cdk/bin/assert-baked-host.mjs \"${PAIR_HOST}\" && npx cdk deploy --all -c merchantApiUrl=\"${MERCHANT_API_URL:-}\" -c merchantApiCredential=\"${MERCHANT_API_CREDENTIAL:-}\" -c merchantCpi=\"${MERCHANT_CPI:-}\" -c oauthGoogleClientId=\"${OAUTH_GOOGLE_CLIENT_ID:-}\" -c oauthGithubClientId=\"${OAUTH_GITHUB_CLIENT_ID:-}\" -c oauthGithubClientSecretArn=\"${OAUTH_GITHUB_CLIENT_SECRET_ARN:-}\" -c oauthFacebookAppId=\"${OAUTH_FACEBOOK_APP_ID:-}\" -c oauthFacebookAppSecretArn=\"${OAUTH_FACEBOOK_APP_SECRET_ARN:-}\" --require-approval never",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "duplication": "jscpd src cdk loader"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
@@ -66,6 +67,9 @@
     "eslint-plugin-import-x": "^4.16.1",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-sonarjs": "^4.1.0",
+    "jscpd": "^5.0.11",
+    "jsqr": "^1.4.0",
     "knip": "^6.15.0",
     "lefthook": "^2.0.15",
     "postcss": "^8.5.6",
@@ -74,6 +78,11 @@
     "tailwindcss": "^3.4.19",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^4.1.9"
+  },
+  "jscpd": {
+    "threshold": 2,
+    "gitignore": true
   }
 }

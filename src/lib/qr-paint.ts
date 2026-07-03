@@ -35,6 +35,7 @@ export function isFunctionModule(r: number, c: number, n: number): boolean {
  * (~0.18 = validated sweet spot). `poison = 0` disables it. `scale` is backing
  * px per module — needs to be large enough to render the sub-module dot cleanly.
  */
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 16; decompose, don't grow
 export function paintQr(
   matrix: QrMatrix,
   { scale = 24, poison = 0.18 }: { scale?: number; poison?: number } = {}

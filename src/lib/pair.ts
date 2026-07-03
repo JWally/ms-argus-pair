@@ -565,6 +565,7 @@ export async function submitSsoChallenge(
   });
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
 export async function validateSsoReturn({
   sessionId,
   nonce,
@@ -1003,6 +1004,7 @@ export interface SubmitPhoneAttestationOptions {
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
 }
 
+// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 44; decompose, don't grow
 export async function submitPhoneAttestation(
   sessionId: string,
   info: PhoneSessionInfo,
@@ -1042,8 +1044,11 @@ export async function submitPhoneAttestation(
             // session (likely a retried request whose first response was
             // lost). Treat as success — fetch the existing verdict.
             if (postErr.status === 409 && postErr.bodyJson?.error === 'already_attested') {
+              // /result requires the bootstrap token — without ?t= the server
+              // 401s and this recovery path used to defeat itself (cleared the
+              // trust token and forced WebAuthn on an already-paired session).
               const fallback = await jsonFetch<AttestResponse>(
-                `${API}/session/${sessionId}/result`,
+                `${API}/session/${sessionId}/result?t=${encodeURIComponent(info.phoneToken)}`,
                 { method: 'GET' }
               );
               return fallback;

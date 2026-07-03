@@ -1,17 +1,17 @@
-#!/usr/bin/env tsx
 /*
  * Spec for the QR poison (src/lib/qr-paint.ts). The poison must:
  *   1. block a PIXEL-EXACT screenshot decoder (bot) at the default dose,
  *   2. still decode THROUGH A LENS (blur) — i.e. a real phone reads it,
  *   3. leave FUNCTION modules (finders/timing) untouched (locatability),
  *   4. produce a plain, decodable QR when poison is disabled.
- * Uses the real paintQr + a vendored jsQR; run via tsx in test:hygiene → deploy gate.
  */
 import { createRequire } from 'node:module';
+import { describe, expect, it } from 'vitest';
 import { paintQr, isFunctionModule, type QrMatrix } from '../src/lib/qr-paint';
 
 const require = createRequire(import.meta.url);
-const jsQR = require('./jsQR.js') as (
+const jsqrModule = require('jsqr') as { default?: unknown };
+const jsQR = (jsqrModule.default ?? jsqrModule) as (
   d: Uint8ClampedArray,
   w: number,
   h: number,
@@ -21,7 +21,9 @@ const QRCode = require('qrcode-svg') as new (o: { content: string; ecl: string }
   qrcode: { moduleCount: number; modules: boolean[][] };
 };
 
-const URL = 'https://captcha-dev-jw.argus.pw/j/9fK2xQ7bZ';
+const PAIR_URL = 'https://captcha-dev-jw.argus.pw/j/9fK2xQ7bZ';
+const SCALE = 24; // must match paintQr default
+
 function matrixFor(content: string): QrMatrix {
   const qr = new QRCode({ content, ecl: 'M' });
   return { size: qr.qrcode.moduleCount, modules: qr.qrcode.modules, quiet: 2 };
@@ -57,50 +59,29 @@ function blur(buf: { data: Uint8ClampedArray; width: number }, k: number) {
   return { data: out, width: w };
 }
 
-let failed = 0;
-const assert = (cond: unknown, msg: string) => {
-  if (cond) {
-    console.log(`  ✓ ${msg}`);
-  } else {
-    console.error(`  ✗ ${msg}`);
-    failed += 1;
-  }
-};
-
-const matrix = matrixFor(URL);
-console.log(`qr-poison: QR ${matrix.size}×${matrix.size}, default dose (poison=0.18)`);
-
-// 1. pixel-exact screenshot decoder is BLOCKED (wrong or no decode)
+const matrix = matrixFor(PAIR_URL);
 const poisoned = paintQr(matrix, { poison: 0.18 });
-assert(decode(poisoned) !== URL, 'pixel-exact screenshot does NOT decode the URL (bot blocked)');
 
-// 2. through a lens (blur ~= module/3) it DOES decode (phone reads)
-const scale = 24; // must match paintQr default
-assert(
-  decode(blur(poisoned, Math.round(scale * 0.35))) === URL,
-  'through-a-lens (blur) decodes the URL (phone reads)'
-);
+describe(`qr poison (QR ${matrix.size}×${matrix.size}, poison=0.18)`, () => {
+  it('pixel-exact screenshot does NOT decode the URL (bot blocked)', () => {
+    expect(decode(poisoned)).not.toBe(PAIR_URL);
+  });
 
-// 3. function modules are untouched — finder at (0,0) center pixel keeps its bit
-{
-  const { data, width } = poisoned;
-  const q = matrix.quiet;
-  const px = (0 + q) * scale + Math.floor(scale / 2);
-  const py = (0 + q) * scale + Math.floor(scale / 2);
-  const centerDark = data[(py * width + px) * 4] < 128;
-  assert(isFunctionModule(0, 0, matrix.size), 'sanity: (0,0) is a function (finder) module');
-  assert(
-    centerDark === matrix.modules[0][0],
-    'finder module center is NOT poisoned (keeps its bit)'
-  );
-}
+  it('through-a-lens (blur) decodes the URL (phone reads)', () => {
+    expect(decode(blur(poisoned, Math.round(SCALE * 0.35)))).toBe(PAIR_URL);
+  });
 
-// 4. poison disabled → plain, decodable QR
-assert(decode(paintQr(matrix, { poison: 0 })) === URL, 'poison=0 renders a plain QR that decodes');
+  it('finder module center is NOT poisoned (keeps its bit)', () => {
+    const { data, width } = poisoned;
+    const q = matrix.quiet;
+    const px = q * SCALE + Math.floor(SCALE / 2);
+    const py = q * SCALE + Math.floor(SCALE / 2);
+    const centerDark = data[(py * width + px) * 4] < 128;
+    expect(isFunctionModule(0, 0, matrix.size)).toBe(true);
+    expect(centerDark).toBe(matrix.modules[0][0]);
+  });
 
-if (failed) {
-  console.error(`qr-poison: ${failed} assertion(s) failed`);
-  process.exitCode = 1;
-} else {
-  console.log('qr-poison: all assertions passed');
-}
+  it('poison=0 renders a plain QR that decodes', () => {
+    expect(decode(paintQr(matrix, { poison: 0 }))).toBe(PAIR_URL);
+  });
+});

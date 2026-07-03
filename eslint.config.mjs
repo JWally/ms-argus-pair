@@ -1,4 +1,5 @@
 import js from '@eslint/js';
+import sonarjs from 'eslint-plugin-sonarjs';
 import tsPlugin from '@typescript-eslint/eslint-plugin';
 import tsParser from '@typescript-eslint/parser';
 import reactPlugin from 'eslint-plugin-react';
@@ -63,12 +64,16 @@ export default [
       react: reactPlugin,
       'react-hooks': reactHooks,
       'import-x': importX,
+      sonarjs,
     },
     settings: { react: { version: 'detect' } },
     rules: {
       ...tsPlugin.configs.recommended.rules,
       ...reactPlugin.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
+      // Ratchet: the ceiling is the current worst offender (see comment where
+      // it's set) — lower it as functions get decomposed, never raise it.
+      'sonarjs/cognitive-complexity': ['error', 15],
       'react/react-in-jsx-scope': 'off',
       'react/prop-types': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
