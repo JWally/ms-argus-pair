@@ -10,8 +10,20 @@
  * defense-in-depth speed-bump, NOT the lock. See ms-argus-captcha/BLOG_1.md.
  */
 
+import QRCode from 'qrcode-svg';
+
 /** A QR module grid: `size`×`size` booleans plus a quiet-zone margin (in modules). */
 export type QrMatrix = { size: number; modules: boolean[][]; quiet: number };
+
+/**
+ * Build the QR module grid for `content` (pure — no DOM/React, so it runs in the
+ * QR worker). Only `content` + ecl affect the grid, so the scannable code is
+ * identical to any encoder; we just expose the model for the poison pass.
+ */
+export function buildQrMatrix(content: string, quiet = 2): QrMatrix {
+  const qr = new QRCode({ content, ecl: 'M' });
+  return { size: qr.qrcode.moduleCount, modules: qr.qrcode.modules, quiet };
+}
 
 /**
  * Function modules (finders, separators, timing, single alignment of small

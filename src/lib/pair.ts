@@ -34,6 +34,8 @@
  */
 
 import { connectAndWhoami, openWs, type WsConnection } from './ws';
+import { createQrKeyholder } from './qr-keyholder';
+import { type SecureQrPixels } from './qr-secure';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -160,7 +162,12 @@ export interface PairEvents {
 
 export interface DesktopSession {
   sessionId: string;
-  pairUrl: string;
+  /**
+   * The poisoned QR as a raw pixel buffer, descrambled + painted inside the QR
+   * SCIF worker. The plaintext pair URL never crosses into this (page) realm —
+   * only pixels do. The consumer blits it with putImageData.
+   */
+  qr: SecureQrPixels;
   expiresAt: number;
   stop: () => void;
   result: Promise<{
@@ -316,26 +323,34 @@ export async function startDesktopSession(
   // {wsUrl,e,pt,n} into the URL fragment. Keeps the QR sparse (~33×33) so the
   // spatial-frequency poison in qr-paint.ts survives a real camera read. Authed
   // with the desktop's own wsToken (only a session participant can mint).
-  const { token: pairToken } = await jsonFetch<{ token: string }>(
-    `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
-      session.ws.desktopToken
-    )}`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        wsUrl: session.ws.url,
-        e: desktopConn.envelope,
-        pt: session.ws.phoneToken,
-        n: session.nonce,
-      }),
-    }
-  );
-  const pairUrl = `${pairOrigin}/p/${pairToken}${debugParam}`;
-  // Never print the pair URL in a production bundle — ?debug=true is
-  // attacker-supplyable, so this logged the redeemable token to anyone's
-  // console. import.meta.env.DEV is compiled out of the prod build.
-  if (debugMode && import.meta.env.DEV) {
-    console.log('[argus-pair] pair URL:', pairUrl);
+  //
+  // The token is delivered SEALED: the QR keyholder (a Web Worker) mints an
+  // ephemeral ECDH pubkey, we send it up, the server seals the token to it, and
+  // the worker descrambles + paints the poisoned QR — the plaintext token never
+  // exists in this page realm, so a page-driving bot can't lift it from the mint
+  // response. Only the poisoned pixel buffer crosses back. See qr-keyholder.ts.
+  const keyholder = createQrKeyholder(pairOrigin, debugParam);
+  let qr: SecureQrPixels;
+  try {
+    const cPub = await keyholder.keygen();
+    const { enc, sPub } = await jsonFetch<{ enc: string; sPub: string }>(
+      `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
+        session.ws.desktopToken
+      )}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          wsUrl: session.ws.url,
+          e: desktopConn.envelope,
+          pt: session.ws.phoneToken,
+          n: session.nonce,
+          cPub,
+        }),
+      }
+    );
+    qr = await keyholder.render(enc, sPub);
+  } finally {
+    keyholder.dispose();
   }
   events.onStatus?.('waiting for phone');
 
@@ -515,7 +530,7 @@ export async function startDesktopSession(
 
   return {
     sessionId: session.sessionId,
-    pairUrl,
+    qr,
     expiresAt: session.expiresAt,
     stop: () => {
       cancelled = true;

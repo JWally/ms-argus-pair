@@ -40,8 +40,7 @@ export async function loadTrustToken(): Promise<string | null> {
     return await new Promise<string | null>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
       const req = tx.objectStore(STORE).get(KEY);
-      req.onsuccess = () =>
-        resolve(typeof req.result === 'string' ? (req.result as string) : null);
+      req.onsuccess = () => resolve(typeof req.result === 'string' ? (req.result as string) : null);
       req.onerror = () => reject(req.error);
     });
   } catch {
