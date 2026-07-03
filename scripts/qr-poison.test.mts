@@ -5,13 +5,14 @@
  *   2. still decode THROUGH A LENS (blur) — i.e. a real phone reads it,
  *   3. leave FUNCTION modules (finders/timing) untouched (locatability),
  *   4. produce a plain, decodable QR when poison is disabled.
- * Uses the real paintQr + a vendored jsQR; run via tsx in test:hygiene → deploy gate.
+ * Uses the real paintQr + the jsqr package; run via tsx in test:hygiene → deploy gate.
  */
 import { createRequire } from 'node:module';
 import { paintQr, isFunctionModule, type QrMatrix } from '../src/lib/qr-paint';
 
 const require = createRequire(import.meta.url);
-const jsQR = require('./jsQR.js') as (
+const jsqrModule = require('jsqr') as { default?: unknown };
+const jsQR = (jsqrModule.default ?? jsqrModule) as (
   d: Uint8ClampedArray,
   w: number,
   h: number,

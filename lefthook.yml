@@ -9,7 +9,9 @@ pre-commit:
       run: npx eslint {staged_files} --max-warnings 0 --no-warn-ignored
     typecheck:
       glob: '*.{ts,tsx}'
-      run: npx tsc --noEmit
+      # tsc -b, NOT --noEmit: the solution-style root tsconfig has files:[]
+      # so a bare --noEmit typechecks ZERO files and always exits 0.
+      run: npx tsc -b
 
 pre-push:
   parallel: true
