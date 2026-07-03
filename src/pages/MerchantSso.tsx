@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Wordmark } from '../components/Brand';
 import { IconCheck, IconPhone, IconShield } from '../components/Icons';
 import { startSsoSession } from '../lib/pair';
@@ -85,9 +85,10 @@ export function MerchantSso() {
             >
               {status === 'profiling' ? 'Profiling...' : 'Continue'}
             </button>
-            <Link className="btn px-6 py-4 text-base" to="/">
+            {/* The QR demo lives on the marketing site — this app has no "/" route. */}
+            <a className="btn px-6 py-4 text-base" href="https://www-dev-jw.argus.pw/captcha">
               QR demo
-            </Link>
+            </a>
           </div>
           {error && (
             <div className="mt-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
