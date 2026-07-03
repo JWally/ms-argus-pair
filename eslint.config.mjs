@@ -38,6 +38,9 @@ export default [
         HTMLCanvasElement: 'readonly',
         HTMLDivElement: 'readonly',
         ResizeObserver: 'readonly',
+        Worker: 'readonly',
+        self: 'readonly',
+        CryptoKey: 'readonly',
         // Lib DOM types for WebRTC + Fetch in our pairing client.
         RTCPeerConnection: 'readonly',
         RTCSessionDescription: 'readonly',

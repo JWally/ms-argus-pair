@@ -54,6 +54,13 @@ import type {
 import middy from '@middy/core';
 import type { MiddlewareObj } from '@middy/core';
 import {
+  genKeyPair,
+  importPubRaw,
+  exportPubRaw,
+  deriveAesKey,
+  seal,
+} from '../../src/lib/ecdh-seal';
+import {
   isOAuthProvider,
   verifyOAuth,
   type OAuthProvider,
@@ -85,6 +92,8 @@ import {
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
+// Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
+// crypto.subtle code both sides so the contract can't drift.
 import { getValkey } from './valkey-client';
 
 // Valkey-backed store for the short pairing token. `take` is an atomic GETDEL,
@@ -2311,7 +2320,13 @@ const lambdaHandler = async (event: {
       if (!mtClaims || mtClaims.sessionId !== sessionId) {
         return jsonResp(401, { error: 'pair_token_unauthorized' });
       }
-      const pb = body as { wsUrl?: unknown; e?: unknown; pt?: unknown; n?: unknown };
+      const pb = body as {
+        wsUrl?: unknown;
+        e?: unknown;
+        pt?: unknown;
+        n?: unknown;
+        cPub?: unknown;
+      };
       if (
         typeof pb.wsUrl !== 'string' ||
         typeof pb.e !== 'string' ||
@@ -2327,6 +2342,25 @@ const lambdaHandler = async (event: {
         pt: pb.pt,
         n: pb.n,
       });
+      // When the client sends its ephemeral ECDH public key (`cPub`), seal the
+      // token to it so the plaintext only ever exists inside the client's QR
+      // worker — never in the page realm a bot can read. Ephemeral-ephemeral:
+      // a fresh server keypair per mint, nothing stored. Legacy callers that
+      // omit cPub still get the plaintext token (they hold the wsToken anyway).
+      if (typeof pb.cPub === 'string') {
+        try {
+          const serverPair = await genKeyPair();
+          const aesKey = await deriveAesKey(serverPair.privateKey, await importPubRaw(pb.cPub));
+          const enc = await seal(aesKey, token);
+          const sPub = await exportPubRaw(serverPair.publicKey);
+          return jsonResp(200, { enc, sPub });
+        } catch (e) {
+          console.warn(
+            `[pair] pair-token seal failed, refusing plaintext: ${(e as Error).message}`
+          );
+          return jsonResp(400, { error: 'bad_client_pubkey' });
+        }
+      }
       return jsonResp(200, { token });
     }
 

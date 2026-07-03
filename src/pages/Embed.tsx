@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { startDesktopSession, type DesktopSession } from '../lib/pair';
-import { QrCanvas, buildQrMatrix, type QrMatrix } from '../lib/qr';
 import './embed.css';
 
 /**
@@ -97,11 +96,12 @@ function useEmbedConfig(): { hostOrigin: string; cpi: string | undefined } {
 
 export function Embed() {
   const { hostOrigin, cpi } = useEmbedConfig();
-  const [matrix, setMatrix] = useState<QrMatrix | null>(null);
+  const [qrReady, setQrReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [done, setDone] = useState<null | 'paired' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
   const moduleRef = useRef<HTMLDivElement | null>(null);
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [compact, setCompact] = useState(false);
 
   // The host (loader or embedding page) reports its viewport width down to us
@@ -164,7 +164,18 @@ export function Embed() {
           return;
         }
         sessionRef.current = session;
-        setMatrix(buildQrMatrix(session.pairUrl));
+        // Blit the poisoned pixel buffer the QR worker painted. The plaintext
+        // pair URL never reached this realm — only these pixels did.
+        const canvas = qrCanvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (canvas && ctx) {
+          canvas.width = session.qr.width;
+          canvas.height = session.qr.width;
+          const img = ctx.createImageData(session.qr.width, session.qr.width);
+          img.data.set(session.qr.data);
+          ctx.putImageData(img, 0, 0);
+          setQrReady(true);
+        }
         postUp({ event: 'ready', sessionId: session.sessionId });
 
         const verdict = await session.result;
@@ -218,7 +229,13 @@ export function Embed() {
 
         <div className="ax-scan">
           <div className="ax-tile">
-            {matrix ? <QrCanvas matrix={matrix} /> : <span className="ax-tile-load" />}
+            {/* Crisp pixels: the poison must reach the screen sharp; the phone's
+                lens supplies the blur that recovers the true code. */}
+            <canvas
+              ref={qrCanvasRef}
+              style={{ imageRendering: 'pixelated', display: qrReady ? 'block' : 'none' }}
+            />
+            {!qrReady && <span className="ax-tile-load" />}
           </div>
           <div className="ax-seal">
             {phase === 'verified' ? <SealCheck /> : phase === 'failed' ? <SealCross /> : null}
