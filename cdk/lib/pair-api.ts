@@ -2382,7 +2382,11 @@ const lambdaHandler = async (event: {
         return jsonResp(200, { valid: false, reason: 'cpi_mismatch' });
       }
       return jsonResp(200, {
+        // `valid` = the token's signature is authentic and unexpired. It does
+        // NOT mean the human passed — a genuine token can carry a "failed"
+        // verdict. `passed` is the admit/deny bit merchants should gate on.
         valid: true,
+        passed: result.claims.verdict === 'paired',
         cpi: result.claims.cpi,
         sessionId: result.claims.sessionId,
         verdict: result.claims.verdict,
