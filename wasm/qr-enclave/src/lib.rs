@@ -15,6 +15,14 @@
 
 use qrcode::{EcLevel, QrCode};
 
+// Tiny allocator instead of std's dlmalloc — trims a few KB off the wasm. The
+// enclave renders one QR then the worker is terminated, but FreeListAllocator
+// frees anyway so repeated renders wouldn't leak. Single-threaded: wasm is.
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: lol_alloc::AssumeSingleThreaded<lol_alloc::FreeListAllocator> =
+    unsafe { lol_alloc::AssumeSingleThreaded::new(lol_alloc::FreeListAllocator::new()) };
+
 const SCALE: usize = 24; // backing px per module — matches qr-paint.ts
 const QUIET: usize = 2; // quiet-zone margin in modules
 const POISON: f64 = 0.18; // inverted-center width as a fraction of a module
@@ -77,11 +85,15 @@ fn fill(data: &mut [u8], width: usize, mx: usize, my: usize, w: usize, v: u8) {
 pub fn render_core(scrambled: &[u8], base: &str, suffix: &str) -> Vec<u8> {
     let mut token_bytes = scrambled.to_vec();
     fib_unscramble(&mut token_bytes);
-    // The URL exists only here, in wasm memory, for the lifetime of this call.
-    let token = String::from_utf8_lossy(&token_bytes);
-    let url = format!("{base}/p/{token}{suffix}");
+    // Build the URL as raw bytes (no format!/String → no core::fmt bloat). The
+    // URL exists only here, in wasm memory, for the lifetime of this call.
+    let mut url = Vec::with_capacity(base.len() + 3 + token_bytes.len() + suffix.len());
+    url.extend_from_slice(base.as_bytes());
+    url.extend_from_slice(b"/p/");
+    url.extend_from_slice(&token_bytes);
+    url.extend_from_slice(suffix.as_bytes());
 
-    let code = match QrCode::with_error_correction_level(url.as_bytes(), EcLevel::M) {
+    let code = match QrCode::with_error_correction_level(&url, EcLevel::M) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
