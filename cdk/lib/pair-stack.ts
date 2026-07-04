@@ -221,6 +221,11 @@ export class PairStack extends cdk.Stack {
         // after smoke-testing /session/start and /info through the
         // Valkey backend.
         USE_VALKEY_SESSIONS: 'true',
+        // Dev/test stage: allow the CDP virtual authenticator through WebAuthn
+        // proof-of-life (so the demo + automated/red-team runs work). Prod
+        // stages OMIT this → pair-api rejects virtual authenticators. Flip to
+        // a stage check when a prod PairStack exists.
+        PAIR_ALLOW_TEST_AUTHENTICATORS: 'true',
         // Merchant-API access for the verdict-time scan lookup. When these
         // are absent the verdict logic degrades to "skipped" rather than
         // blocking on Argus availability.

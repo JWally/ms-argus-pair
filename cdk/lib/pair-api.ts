@@ -61,6 +61,7 @@ import {
   sealBytes,
 } from '../../src/lib/ecdh-seal';
 import { fibScramble } from '../../src/lib/fib-scramble';
+import { isVirtualAuthenticator } from './pair-api/virtual-authenticator';
 import {
   isOAuthProvider,
   verifyOAuth,
@@ -949,8 +950,16 @@ interface WebAuthnAnnotations {
   phone_webauthn_credential_id?: string;
   phone_webauthn_credential_backed_up?: boolean;
   phone_webauthn_user_verified?: boolean;
+  /** The authenticator is a known virtual/test one (CDP). Automation signal. */
+  phone_webauthn_virtual?: boolean;
   phone_webauthn_error?: string;
 }
+
+// Off by default → prod rejects virtual authenticators as proof-of-life. Set
+// true only on test/dev stages (lets automated happy-path + red-team runs
+// isolate the desktop-score gate). Known-AAGUID list + check in
+// ./pair-api/virtual-authenticator.ts (unit-tested).
+const ALLOW_TEST_AUTHENTICATORS = process.env.PAIR_ALLOW_TEST_AUTHENTICATORS === 'true';
 
 // ── Passkey persistence (resident credentials) ─────────────────────────
 //
@@ -1145,6 +1154,19 @@ async function verifyWebAuthn(
       return { phone_webauthn_attested: false, phone_webauthn_error: 'not_verified' };
     }
     const info = verification.registrationInfo;
+    const virtual = isVirtualAuthenticator(info.aaguid);
+    if (virtual && !ALLOW_TEST_AUTHENTICATORS) {
+      // CDP virtual authenticator (browser automation) — not a real device, so
+      // it isn't proof of a human present. Fail proof-of-life. Real platform
+      // authenticators never report this AAGUID, so this can't false-positive
+      // an iOS/Android user. Don't persist its credential either.
+      return {
+        phone_webauthn_attested: false,
+        phone_webauthn_error: 'virtual_authenticator',
+        phone_webauthn_virtual: true,
+        phone_webauthn_aaguid: info.aaguid,
+      };
+    }
     // Persist the credential if the authenticator gave us a resident
     // credentialId. Catches failures silently — the verdict still
     // succeeds on the registration alone; a missing passkey row just
@@ -1189,6 +1211,9 @@ async function verifyWebAuthn(
       phone_webauthn_credential_id: info.credential?.id,
       phone_webauthn_credential_backed_up: info.credentialBackedUp,
       phone_webauthn_user_verified: info.userVerified,
+      // Still flag it for telemetry/scoring even when the test-stage escape
+      // hatch let it through — so a virtual authenticator is never invisible.
+      ...(virtual ? { phone_webauthn_virtual: true } : {}),
     };
   } catch (e) {
     return {
