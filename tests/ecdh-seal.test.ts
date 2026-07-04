@@ -2,7 +2,8 @@
  * TDD spec for the isomorphic ECIES seal used to deliver the pair-token QR.
  * Locks the crypto contract the Lambda (seal side) and the worker (open side)
  * must agree on byte-for-byte. Runs under Node's WebCrypto — the same subtle
- * API the browser worker uses.
+ * API the browser worker uses. Byte-level: the payload is the fib-scrambled
+ * token, and `openBytes` never TextDecodes it into a JS string.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -10,24 +11,26 @@ import {
   exportPubRaw,
   importPubRaw,
   deriveAesKey,
-  seal,
-  open,
+  sealBytes,
+  openBytes,
 } from '../src/lib/ecdh-seal.ts';
+
+const bytes = (s: string) => new TextEncoder().encode(s);
+const str = (b: Uint8Array) => new TextDecoder().decode(b);
 
 /** Full round-trip: server seals for the worker; worker opens. */
 async function roundTrip(plaintext: string): Promise<string> {
   const worker = await genKeyPair(); // ephemeral, in the worker realm
   const server = await genKeyPair(); // ephemeral, per-mint on the server
 
-  // Wire: worker sends its pub up; server sends its pub back with the blob.
   const workerPub = await importPubRaw(await exportPubRaw(worker.publicKey));
   const serverPub = await importPubRaw(await exportPubRaw(server.publicKey));
 
   const serverKey = await deriveAesKey(server.privateKey, workerPub);
-  const blob = await seal(serverKey, plaintext);
+  const blob = await sealBytes(serverKey, bytes(plaintext));
 
   const workerKey = await deriveAesKey(worker.privateKey, serverPub);
-  return open(workerKey, blob);
+  return str(await openBytes(workerKey, blob));
 }
 
 describe('ecdh-seal', () => {
@@ -36,17 +39,14 @@ describe('ecdh-seal', () => {
     expect(await roundTrip(token)).toBe(token);
   });
 
-  it('round-trips arbitrary UTF-8', async () => {
-    expect(await roundTrip('https://captcha-dev-jw.argus.pw/p/xÿ→✓')).toBe(
-      'https://captcha-dev-jw.argus.pw/p/xÿ→✓'
-    );
+  it('round-trips arbitrary bytes', async () => {
+    expect(await roundTrip('scrambled\x00\xff\x01bytes')).toBe('scrambled\x00\xff\x01bytes');
   });
 
   it('raw public key export is the 65-byte uncompressed point (~88 b64url chars)', async () => {
     const { publicKey } = await genKeyPair();
     const raw = await exportPubRaw(publicKey);
     expect(raw).toMatch(/^[A-Za-z0-9_-]+$/);
-    // 65 bytes → 87 base64url chars (no padding).
     expect(raw.length).toBeGreaterThanOrEqual(86);
   });
 
@@ -60,11 +60,10 @@ describe('ecdh-seal', () => {
       server.privateKey,
       await importPubRaw(await exportPubRaw(worker.publicKey))
     );
-    const blob = await seal(serverKey, 'secret-token');
+    const blob = await sealBytes(serverKey, bytes('secret-token'));
 
-    // Attacker holds a different private key → derives a different AES key.
     const attackerKey = await deriveAesKey(attacker.privateKey, serverPub);
-    await expect(open(attackerKey, blob)).rejects.toBeDefined();
+    await expect(openBytes(attackerKey, blob)).rejects.toBeDefined();
   });
 
   it('a tampered blob fails the GCM tag', async () => {
@@ -78,8 +77,8 @@ describe('ecdh-seal', () => {
       worker.privateKey,
       await importPubRaw(await exportPubRaw(server.publicKey))
     );
-    const blob = await seal(serverKey, 'secret-token');
+    const blob = await sealBytes(serverKey, bytes('secret-token'));
     const flipped = blob.slice(0, -2) + (blob.endsWith('A') ? 'B' : 'A');
-    await expect(open(workerKey, flipped)).rejects.toBeDefined();
+    await expect(openBytes(workerKey, flipped)).rejects.toBeDefined();
   });
 });

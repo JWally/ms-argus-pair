@@ -92,25 +92,27 @@ export function deriveAesKey(priv: CryptoKey, peerPub: CryptoKey): Promise<Crypt
   );
 }
 
-// ── AES-GCM seal / open ────────────────────────────────────────────────────
+// ── AES-GCM seal / open (bytes) ─────────────────────────────────────────────
+//
+// Byte-level on purpose: the payload is the fib-scrambled token (see
+// fib-scramble.ts), not a string. Keeping it as bytes means `open` never
+// TextDecodes a plaintext URL into a JS string — the scrambled bytes go
+// straight to the wasm enclave, which un-scrambles + rasters in its own memory.
 
-/** Seal plaintext → base64url(iv[12] || ciphertext||tag). */
-export async function seal(aesKey: CryptoKey, plaintext: string): Promise<string> {
+/** Seal bytes → base64url(iv[12] || ciphertext||tag). */
+export async function sealBytes(aesKey: CryptoKey, bytes: Uint8Array): Promise<string> {
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(
-    await SUBTLE.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(plaintext))
-  );
+  const ct = new Uint8Array(await SUBTLE.encrypt({ name: 'AES-GCM', iv }, aesKey, bytes));
   const out = new Uint8Array(iv.length + ct.length);
   out.set(iv, 0);
   out.set(ct, iv.length);
   return b64urlFromBytes(out);
 }
 
-/** Open a base64url(iv||ct) blob. Throws on a bad tag (tamper / wrong key). */
-export async function open(aesKey: CryptoKey, blob: string): Promise<string> {
+/** Open a base64url(iv||ct) blob to bytes. Throws on a bad tag (tamper / wrong key). */
+export async function openBytes(aesKey: CryptoKey, blob: string): Promise<Uint8Array> {
   const raw = bytesFromB64url(blob);
   const iv = raw.subarray(0, 12);
   const ct = raw.subarray(12);
-  const pt = await SUBTLE.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
-  return new TextDecoder().decode(pt);
+  return new Uint8Array(await SUBTLE.decrypt({ name: 'AES-GCM', iv }, aesKey, ct));
 }

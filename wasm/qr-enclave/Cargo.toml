@@ -1,0 +1,20 @@
+[package]
+name = "qr-enclave"
+version = "0.1.0"
+edition = "2021"
+description = "QR SCIF: un-scramble the pair token and raster the poisoned QR entirely in wasm linear memory, emitting only pixels."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+rqrr = "0.7"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"

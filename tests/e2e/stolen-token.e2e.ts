@@ -20,8 +20,9 @@ import {
   exportPubRaw,
   importPubRaw,
   deriveAesKey,
-  open,
+  openBytes,
 } from '../../src/lib/ecdh-seal.ts';
+import { fibScramble } from '../../src/lib/fib-scramble.ts';
 
 const HOST = process.env.PAIR_HOST ?? 'https://captcha-dev-jw.argus.pw';
 
@@ -64,7 +65,11 @@ async function stealToken(s: SessionStart): Promise<{ token: string; sealed: boo
   const sealed =
     typeof mint.enc === 'string' && typeof mint.sPub === 'string' && !('token' in mint);
   const aes = await deriveAesKey(client.privateKey, await importPubRaw(mint.sPub!));
-  return { token: await open(aes, mint.enc!), sealed };
+  // AES-open yields the fib-scrambled token bytes; un-scramble to the token
+  // (what the wasm enclave does internally — replicated here to model a bot
+  // that reversed it). fibScramble is self-inverse.
+  const token = new TextDecoder().decode(fibScramble(await openBytes(aes, mint.enc!)));
+  return { token, sealed };
 }
 
 describe('stolen pair-token cannot forge a pairing (e2e)', () => {
