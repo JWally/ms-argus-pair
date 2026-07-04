@@ -25,7 +25,19 @@ type InMsg =
 const ctx = self as unknown as {
   onmessage: ((e: MessageEvent<InMsg>) => void) | null;
   postMessage(message: unknown, transfer?: ArrayBufferLike[]): void;
+  location: { protocol: string };
 };
+
+// Provenance tripwire. This worker is ALWAYS a static same-origin module asset
+// (Vite emits /assets/pair-qr-worker-*.js; dev serves it over http). It is
+// never legitimately blob-backed. So a `blob:` self.location means we were
+// substituted via the known `createObjectURL(new Blob([rewrittenSource]))`
+// worker-wrapper attack (red-team, 2026-07-04) — refuse to decrypt/render so a
+// tampered copy can't leak the token, and so the QR simply never appears in a
+// wrapped session. A determined attacker can strip this after rewriting the
+// source, so it's a bar-raiser (forces the pure-optical path), not a wall.
+// If a blob-worker fallback is ever legitimately shipped, revisit this.
+const BLOB_PROVENANCE = ctx.location?.protocol === 'blob:';
 
 let priv: CryptoKey | null = null;
 let wasmReady: Promise<unknown> | null = null;
@@ -33,6 +45,10 @@ let wasmReady: Promise<unknown> | null = null;
 ctx.onmessage = async (e) => {
   const msg = e.data;
   try {
+    if (BLOB_PROVENANCE) {
+      ctx.postMessage({ type: 'error', message: 'blob_worker_provenance_refused' });
+      return;
+    }
     if (msg.type === 'keygen') {
       wasmReady ??= init(); // warm the wasm while the QR round-trips the server
       const pair = await genKeyPair();
