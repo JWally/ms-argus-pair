@@ -1,0 +1,16 @@
+{
+  "name": "qr-enclave",
+  "type": "module",
+  "description": "QR SCIF: un-scramble the pair token and raster the poisoned QR entirely in wasm linear memory, emitting only pixels.",
+  "version": "0.1.0",
+  "files": [
+    "qr_enclave_bg.wasm",
+    "qr_enclave.js",
+    "qr_enclave.d.ts"
+  ],
+  "main": "qr_enclave.js",
+  "types": "qr_enclave.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -8,7 +8,17 @@ import importX from 'eslint-plugin-import-x';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist', 'cdk.out', 'node_modules', '**/*.d.ts', 'scripts/jsQR.js', 'loader'] },
+  {
+    ignores: [
+      'dist',
+      'cdk.out',
+      'node_modules',
+      '**/*.d.ts',
+      'loader',
+      'wasm/*/pkg', // generated wasm-bindgen glue
+      'wasm/*/target',
+    ],
+  },
   js.configs.recommended,
   {
     files: ['**/*.{ts,tsx}'],

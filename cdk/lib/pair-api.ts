@@ -58,8 +58,9 @@ import {
   importPubRaw,
   exportPubRaw,
   deriveAesKey,
-  seal,
+  sealBytes,
 } from '../../src/lib/ecdh-seal';
+import { fibScramble } from '../../src/lib/fib-scramble';
 import {
   isOAuthProvider,
   verifyOAuth,
@@ -2351,7 +2352,10 @@ const lambdaHandler = async (event: {
         try {
           const serverPair = await genKeyPair();
           const aesKey = await deriveAesKey(serverPair.privateKey, await importPubRaw(pb.cPub));
-          const enc = await seal(aesKey, token);
+          // Fib-scramble the token before sealing so the AES plaintext (what a
+          // JS `subtle.decrypt` hook would see) is scrambled bytes, not the
+          // token. The wasm enclave un-scrambles + rasters in its own memory.
+          const enc = await sealBytes(aesKey, fibScramble(new TextEncoder().encode(token)));
           const sPub = await exportPubRaw(serverPair.publicKey);
           return jsonResp(200, { enc, sPub });
         } catch (e) {

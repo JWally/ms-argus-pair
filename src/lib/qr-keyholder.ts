@@ -16,7 +16,11 @@
  * The mint fetch stays in pair.ts (page realm) — it only carries pubkeys and
  * ciphertext, nothing secret.
  */
-import { type SecureQrPixels } from './qr-secure';
+/** Poisoned QR as a raw RGBA pixel buffer (square; width px per side). */
+export interface SecureQrPixels {
+  data: Uint8ClampedArray;
+  width: number;
+}
 
 export interface QrKeyholder {
   /** Generate the ephemeral keypair; returns the public key (base64url) to mint with. */

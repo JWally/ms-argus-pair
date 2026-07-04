@@ -34,8 +34,7 @@
  */
 
 import { connectAndWhoami, openWs, type WsConnection } from './ws';
-import { createQrKeyholder } from './qr-keyholder';
-import { type SecureQrPixels } from './qr-secure';
+import { createQrKeyholder, type SecureQrPixels } from './qr-keyholder';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
