@@ -24,11 +24,8 @@ import { PolicyStatement, CanonicalUserPrincipal } from 'aws-cdk-lib/aws-iam';
 import { BucketDeployment, Source, CacheControl } from 'aws-cdk-lib/aws-s3-deployment';
 import { HostedZone, ARecord, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { CloudFrontTarget } from 'aws-cdk-lib/aws-route53-targets';
-import {
-  Certificate,
-  CertificateValidation,
-  ICertificate,
-} from 'aws-cdk-lib/aws-certificatemanager';
+import type { ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
+import { Certificate, CertificateValidation } from 'aws-cdk-lib/aws-certificatemanager';
 
 // ESM has no __dirname; derive it from import.meta.url.
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));

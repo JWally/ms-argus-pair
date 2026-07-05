@@ -1,5 +1,6 @@
 node_modules
 dist
+coverage
 cdk.out
 cdk.context.json
 .env

@@ -1,5 +1,6 @@
-import { Stack, StackProps } from 'aws-cdk-lib';
-import { Construct } from 'constructs';
+import type { StackProps } from 'aws-cdk-lib';
+import { Stack } from 'aws-cdk-lib';
+import type { Construct } from 'constructs';
 import { StaticSiteConstruct } from './static-site';
 
 export interface CaptchaCdnStackProps extends StackProps {

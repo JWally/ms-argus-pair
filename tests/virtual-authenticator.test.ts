@@ -1,7 +1,7 @@
 /*
  * Locks the virtual-authenticator AAGUID check. The load-bearing invariant is
  * NEGATIVE: it must reject the CDP virtual authenticator WITHOUT ever
- * false-positiving a real device — real iOS/Android platform authenticators
+ * false-positive a real device — real iOS/Android platform authenticators
  * report all-zero AAGUIDs for privacy, and hardware keys report real vendor
  * AAGUIDs. Rejecting either would break real users (the exact regression the
  * old "gate on non-zero AAGUID" attempt caused).

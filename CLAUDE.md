@@ -3,6 +3,59 @@
 Operational notes that bite when ignored. Auto-loaded into the assistant's
 context every session.
 
+## Shared engineering guide
+
+Read `/home/justin/Dev/ARGUS_ENGINEERING_GUIDE.md` before making code changes.
+Repo-local notes in this file are more specific and win on conflicts, but the
+shared guide is the default standard for structure, naming, tests, docs, and
+LLM-generated code hygiene.
+
+In particular: prefer TDD for logic/security changes, keep new code small and
+domain-grouped, update docs before finishing, and use the repo's automated
+quality gates as ratchets rather than bypassing them.
+
+## Testing model: unit, integration, e2e
+
+Use three test layers in this repo:
+
+- **Unit tests** live in `tests/**/*.test.ts` and run with `npm test`. Use them
+  for pure logic: verdict scoring, token mint/redeem, WebAuthn assurance,
+  crypto wrappers, parsing, and small helpers.
+- **Integration tests** should live in `tests/integration/**/*.integration.ts`
+  once added. Use them to put Pair into a named state and call API/module
+  boundaries with fake stores, fake clocks, fake projections, fake secrets, and
+  fake WS publishers. These should cover positive and negative state-machine
+  cases without live AWS.
+- **E2E tests** live in `tests/e2e/**/*.e2e.ts` and run with
+  `npm run test:e2e`. They drive the deployed stack/browser and are for live
+  wiring, not branch coverage.
+
+For new Pair behavior, write or update the test plan before implementation when
+practical:
+
+```text
+Need: behavior X.
+Unit tests: A, B, C should fail first.
+Integration tests: X, Y, Z should fail first.
+E2E or attack harness: live case if the risk crosses browser/process boundaries.
+```
+
+Good Pair integration-test targets:
+
+- `/api/session/start -> desktop-attest -> phone-attest` happy path with clean
+  fake projections.
+- Missing or mismatched `desktopEnvelope` fails closed.
+- Replayed desktop or phone Argus session IDs fail.
+- Forged weak WebAuthn plus missing/dirty projections fails.
+- Weak WebAuthn does not mint durable device trust unless the assurance policy
+  explicitly allows it.
+- Known virtual authenticator AAGUID fails outside explicit dev/test mode.
+
+The desired shape is an injectable Pair API core, for example
+`createPairApi({ sessionStore, projectionStore, passkeyStore, tokenStore, clock,
+secrets, wsPublisher })`, so integration tests do not need live AWS to prove the
+state machine.
+
 ## Deploys: every new context flag has to be plumbed in **two** places
 
 CDK context (`-c key=value`) is only read by `cdk/bin/app.ts` if that file

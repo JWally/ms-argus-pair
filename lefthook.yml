@@ -26,6 +26,10 @@ pre-push:
       # vitest unit tests (tests/**) — the TDD track. Build-artifact hygiene
       # checks stay in the build command above.
       run: npm test
+    coverage:
+      # Low initial thresholds in vitest.config.ts; ratchet upward as modules
+      # are extracted and tested.
+      run: npm run test:coverage
     duplication:
       # jscpd ratchet (threshold in package.json "jscpd") — baseline 0.72%.
       run: npm run duplication
@@ -36,3 +40,10 @@ pre-push:
       # intentional latent code (e.g. OAuth provider scaffolds) with a
       # `@public` JSDoc tag on the export.
       run: npm run dead-code
+    boundaries:
+      # Dependency graph boundaries: no cycles and no UI/server layering leaks.
+      run: npm run boundaries
+    spell:
+      # Terminology/identifier drift check. Add intentional domain terms to
+      # cspell.json rather than letting typos become API names.
+      run: npm run spell

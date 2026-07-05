@@ -7,5 +7,22 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+      include: ['cdk/lib/**/*.ts', 'src/lib/**/*.ts', 'src/lib/**/*.tsx', 'src/pages/**/*.tsx'],
+      exclude: [
+        'cdk/lib/pair-stack.ts',
+        'cdk/lib/ws-stack.ts',
+        'cdk/lib/valkey-stack.ts',
+        'src/**/*.d.ts',
+      ],
+      thresholds: {
+        lines: 3,
+        functions: 5,
+        branches: 1,
+        statements: 3,
+      },
+    },
   },
 });
