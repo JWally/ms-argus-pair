@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { verifyWebAuthnProof } from '../cdk/lib/pair-api/proof-of-life.ts';
+import {
+  isProofOfLifeSatisfied,
+  verifyProofOfLife,
+  verifyWebAuthnProof,
+} from '../cdk/lib/pair-api/proof-of-life.ts';
 import type { PasskeyStore } from '../cdk/lib/pair-api/passkey-store.ts';
 
 const passkeyStore: PasskeyStore = {
@@ -20,6 +24,25 @@ function verify(webauthn: unknown) {
     expectedOrigin: 'https://captcha-dev-jw.argus.pw',
     allowTestAuthenticators: false,
     passkeyStore,
+  });
+}
+
+function verifySelectedProof(input: {
+  webauthn?: unknown;
+  oauth?: unknown;
+  trustRedeemed?: boolean;
+}) {
+  return verifyProofOfLife({
+    webauthn: input.webauthn,
+    oauth: input.oauth,
+    expectedNonce: 'nonce',
+    argusPubkey: 'argus-pubkey',
+    rpId: 'captcha-dev-jw.argus.pw',
+    expectedOrigin: 'https://captcha-dev-jw.argus.pw',
+    allowTestAuthenticators: false,
+    passkeyStore,
+    trustRedeemed: input.trustRedeemed === true,
+    deviceTrustFormat: 'device_trust_redeem',
   });
 }
 
@@ -50,6 +73,42 @@ describe('verifyWebAuthnProof', () => {
     ).resolves.toEqual({
       phone_webauthn_attested: false,
       phone_webauthn_error: 'credential_not_registered',
+    });
+  });
+});
+
+describe('verifyProofOfLife', () => {
+  it('uses device-trust redemption before OAuth or WebAuthn', async () => {
+    const proof = await verifySelectedProof({
+      trustRedeemed: true,
+      oauth: { provider: 'google' },
+      webauthn: null,
+    });
+
+    expect(proof).toEqual({
+      phone_webauthn_attested: true,
+      phone_webauthn_user_verified: true,
+      phone_webauthn_format: 'device_trust_redeem',
+    });
+    expect(isProofOfLifeSatisfied(proof)).toBe(true);
+  });
+
+  it('treats present but malformed OAuth as an OAuth proof failure', async () => {
+    const proof = await verifySelectedProof({ oauth: { provider: 'google' } });
+
+    expect(proof).toEqual({
+      phone_webauthn_attested: false,
+      phone_oauth_error: 'missing_or_malformed',
+    });
+    expect(isProofOfLifeSatisfied(proof)).toBe(false);
+  });
+
+  it('falls back to WebAuthn when no OAuth or device-trust proof is present', async () => {
+    const proof = await verifySelectedProof({ webauthn: null });
+
+    expect(proof).toEqual({
+      phone_webauthn_attested: false,
+      phone_webauthn_error: 'missing',
     });
   });
 });

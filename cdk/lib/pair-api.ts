@@ -55,12 +55,6 @@ import {
   sealBytes,
 } from '../../src/lib/ecdh-seal';
 import { fibScramble } from '../../src/lib/fib-scramble';
-import {
-  isOAuthProvider,
-  verifyOAuth,
-  type OAuthProvider,
-  type OAuthVerifyResult,
-} from './oauth-providers';
 import { mintBootstrapToken, openEnvelope, postToPeer, verifyBootstrapToken } from './ws-handler';
 import {
   isValkeySessionsEnabled,
@@ -85,7 +79,12 @@ import {
   type DeviceTrustVerifyResult,
 } from './pair-api/attestation/trust';
 import { createDdbPasskeyStore } from './pair-api/passkey-store';
-import { verifyWebAuthnProof, type WebAuthnAnnotations } from './pair-api/proof-of-life';
+import {
+  isProofOfLifeSatisfied,
+  verifyProofOfLife,
+  type OAuthAnnotations,
+  type WebAuthnAnnotations,
+} from './pair-api/proof-of-life';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
@@ -972,79 +971,6 @@ async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null>
   return (res.Item as SsoSessionItem | undefined) ?? null;
 }
 
-// ── OAuth proof-of-life ────────────────────────────────────────────────
-//
-// Same shape as WebAuthnAnnotations so the verdict branch below stays
-// homogeneous: `phone_webauthn_attested` is the unified proof-of-life
-// boolean, regardless of how the proof was produced (WebAuthn,
-// device-trust redeem, or OAuth completion). Provider-specific fields
-// surface on top for fraud correlation.
-//
-// On nonce binding: the OAuth verifier checks the token's nonce
-// (Google OIDC) or relies on the client's state round-trip (GitHub /
-// Facebook). Either way, replay across pair sessions fails because
-// each pair session.nonce is unique.
-
-interface OAuthAnnotations extends WebAuthnAnnotations {
-  phone_oauth_provider?: OAuthProvider;
-  phone_oauth_subject?: string;
-  phone_oauth_email_verified?: boolean;
-  phone_oauth_real_user_hint?: 'likely_real' | 'unknown' | 'unsupported';
-  phone_oauth_error?: string;
-}
-
-interface OAuthInput {
-  provider: unknown;
-  token: unknown;
-}
-
-function readOAuthInput(raw: unknown): { provider: OAuthProvider; token: string } | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const o = raw as OAuthInput;
-  if (!isOAuthProvider(o.provider)) return null;
-  if (typeof o.token !== 'string' || o.token.length === 0) return null;
-  return { provider: o.provider, token: o.token };
-}
-
-async function verifyOAuthProofOfLife(
-  rawInput: unknown,
-  expectedNonce: string
-): Promise<OAuthAnnotations> {
-  const input = readOAuthInput(rawInput);
-  if (!input) {
-    return { phone_webauthn_attested: false, phone_oauth_error: 'missing_or_malformed' };
-  }
-  let result: OAuthVerifyResult;
-  try {
-    result = await verifyOAuth(input.provider, {
-      token: input.token,
-      expectedNonce,
-    });
-  } catch (e) {
-    return {
-      phone_webauthn_attested: false,
-      phone_oauth_provider: input.provider,
-      phone_oauth_error: (e as Error).message,
-    };
-  }
-  if (!result.ok) {
-    return {
-      phone_webauthn_attested: false,
-      phone_oauth_provider: input.provider,
-      phone_oauth_error: result.reason ?? 'verify_failed',
-    };
-  }
-  return {
-    phone_webauthn_attested: true,
-    phone_webauthn_user_verified: true,
-    phone_webauthn_format: `oauth_${result.provider}`,
-    phone_oauth_provider: result.provider,
-    phone_oauth_subject: result.subject,
-    phone_oauth_email_verified: result.emailVerified,
-    phone_oauth_real_user_hint: result.realUserHint,
-  };
-}
-
 const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
@@ -1347,27 +1273,24 @@ const lambdaHandler = async (event: {
             clearDeviceTrust: true,
           });
         }
-        proofOfLife = true;
-        proofAnnotations = {
-          phone_webauthn_attested: true,
-          phone_webauthn_format: 'device_trust',
-          phone_device_trust_redeemed: true,
-        };
-      } else {
-        const proof = oauthInput
-          ? await verifyOAuthProofOfLife(oauthInput, s.nonce)
-          : await verifyWebAuthnProof({
-              webauthn: webauthnInput,
-              expectedNonce: s.nonce,
-              argusPubkey: checked.attestation.publicKey,
-              rpId: WEBAUTHN_RP_ID,
-              expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
-              allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
-              passkeyStore,
-            });
-        proofOfLife = proof.phone_webauthn_attested === true;
-        proofAnnotations = proof as unknown as Record<string, unknown>;
       }
+      const proof = await verifyProofOfLife({
+        webauthn: webauthnInput,
+        oauth: oauthInput,
+        expectedNonce: s.nonce,
+        argusPubkey: checked.attestation.publicKey,
+        rpId: WEBAUTHN_RP_ID,
+        expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+        allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
+        passkeyStore,
+        trustRedeemed: trustResult?.ok === true,
+        deviceTrustFormat: 'device_trust',
+      });
+      proofOfLife = isProofOfLifeSatisfied(proof);
+      proofAnnotations = {
+        ...(proof as unknown as Record<string, unknown>),
+        ...(trustResult?.ok ? { phone_device_trust_redeemed: true } : {}),
+      };
 
       if (!proofOfLife) {
         return jsonResp(401, {
@@ -1770,23 +1693,18 @@ const lambdaHandler = async (event: {
       // → OAuth (if client sent an oauth field) → WebAuthn (legacy). Only
       // one path runs per request; the unified annotations shape lets the
       // downstream verdict code stay homogeneous.
-      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = trustResult?.ok
-        ? Promise.resolve<WebAuthnAnnotations>({
-            phone_webauthn_attested: true,
-            phone_webauthn_user_verified: true,
-            phone_webauthn_format: 'device_trust_redeem',
-          } as WebAuthnAnnotations)
-        : oauthInput
-          ? verifyOAuthProofOfLife(oauthInput, s.nonce)
-          : verifyWebAuthnProof({
-              webauthn: webauthnInput,
-              expectedNonce: s.nonce,
-              argusPubkey: att.publicKey,
-              rpId: WEBAUTHN_RP_ID,
-              expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
-              allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
-              passkeyStore,
-            });
+      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = verifyProofOfLife({
+        webauthn: webauthnInput,
+        oauth: oauthInput,
+        expectedNonce: s.nonce,
+        argusPubkey: att.publicKey,
+        rpId: WEBAUTHN_RP_ID,
+        expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+        allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
+        passkeyStore,
+        trustRedeemed: trustResult?.ok === true,
+        deviceTrustFormat: 'device_trust_redeem',
+      });
 
       const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
         fetchProjection(s.desktopAttestation.argusSessionId),
@@ -1803,7 +1721,7 @@ const lambdaHandler = async (event: {
       // both paths above — the trust-redeem branch synthesizes it as
       // true. Without proof of life, fail the pair even when integrity
       // scans look clean — design intent is `magic-token || webauthn`.
-      const proofOfLife = (webauthnResult as WebAuthnAnnotations).phone_webauthn_attested === true;
+      const proofOfLife = isProofOfLifeSatisfied(webauthnResult);
 
       let verdict: Verdict;
       let reason: string;

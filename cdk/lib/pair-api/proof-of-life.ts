@@ -4,6 +4,12 @@ import type {
   RegistrationResponseJSON,
   WebAuthnCredential,
 } from '@simplewebauthn/server';
+import {
+  isOAuthProvider,
+  verifyOAuth,
+  type OAuthProvider,
+  type OAuthVerifyResult,
+} from '../oauth-providers';
 import { isVirtualAuthenticator } from './virtual-authenticator';
 import type { PasskeyStore } from './passkey-store';
 
@@ -33,6 +39,31 @@ export interface VerifyWebAuthnOptions {
   passkeyStore: PasskeyStore;
 }
 
+export interface OAuthAnnotations extends WebAuthnAnnotations {
+  phone_oauth_provider?: OAuthProvider;
+  phone_oauth_subject?: string;
+  phone_oauth_email_verified?: boolean;
+  phone_oauth_real_user_hint?: 'likely_real' | 'unknown' | 'unsupported';
+  phone_oauth_error?: string;
+}
+
+export type ProofOfLifeAnnotations = WebAuthnAnnotations | OAuthAnnotations;
+
+interface OAuthInput {
+  provider: unknown;
+  token: unknown;
+}
+
+export interface VerifyProofOfLifeOptions extends VerifyWebAuthnOptions {
+  oauth: unknown;
+  trustRedeemed: boolean;
+  deviceTrustFormat: string;
+}
+
+type WebAuthnReadResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; annotations: WebAuthnAnnotations };
+
 function publicKeyBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64');
 }
@@ -47,6 +78,23 @@ function base64ToBytes(s: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+function readWebAuthnRecord(webauthn: unknown): WebAuthnReadResult {
+  if (!webauthn || typeof webauthn !== 'object') {
+    return {
+      ok: false,
+      annotations: { phone_webauthn_attested: false, phone_webauthn_error: 'missing' },
+    };
+  }
+  const value = webauthn as Record<string, unknown>;
+  if (typeof value.error === 'string') {
+    return {
+      ok: false,
+      annotations: { phone_webauthn_attested: false, phone_webauthn_error: value.error },
+    };
+  }
+  return { ok: true, value };
+}
+
 /**
  * Verify a stored-passkey authentication assertion. Returns the same
  * annotations shape as verifyWebAuthnProof() so the verdict branch can stay
@@ -56,13 +104,8 @@ async function verifyPasskeyAuthentication(
   opts: VerifyWebAuthnOptions
 ): Promise<WebAuthnAnnotations> {
   const { webauthn, expectedNonce, argusPubkey, expectedOrigin, rpId, passkeyStore } = opts;
-  if (!webauthn || typeof webauthn !== 'object') {
-    return { phone_webauthn_attested: false, phone_webauthn_error: 'missing' };
-  }
-  const w = webauthn as Record<string, unknown>;
-  if (typeof w.error === 'string') {
-    return { phone_webauthn_attested: false, phone_webauthn_error: w.error };
-  }
+  const read = readWebAuthnRecord(webauthn);
+  if (!read.ok) return read.annotations;
   const auth = webauthn as AuthenticationResponseJSON;
   if (!auth.id) {
     return { phone_webauthn_attested: false, phone_webauthn_error: 'missing_credential_id' };
@@ -111,6 +154,77 @@ async function verifyPasskeyAuthentication(
   }
 }
 
+function readOAuthInput(raw: unknown): { provider: OAuthProvider; token: string } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as OAuthInput;
+  if (!isOAuthProvider(o.provider)) return null;
+  if (typeof o.token !== 'string' || o.token.length === 0) return null;
+  return { provider: o.provider, token: o.token };
+}
+
+export async function verifyOAuthProofOfLife(
+  rawInput: unknown,
+  expectedNonce: string
+): Promise<OAuthAnnotations> {
+  const input = readOAuthInput(rawInput);
+  if (!input) {
+    return { phone_webauthn_attested: false, phone_oauth_error: 'missing_or_malformed' };
+  }
+  let result: OAuthVerifyResult;
+  try {
+    result = await verifyOAuth(input.provider, {
+      token: input.token,
+      expectedNonce,
+    });
+  } catch (e) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: (e as Error).message,
+    };
+  }
+  if (!result.ok) {
+    return {
+      phone_webauthn_attested: false,
+      phone_oauth_provider: input.provider,
+      phone_oauth_error: result.reason ?? 'verify_failed',
+    };
+  }
+  return {
+    phone_webauthn_attested: true,
+    phone_webauthn_user_verified: true,
+    phone_webauthn_format: `oauth_${result.provider}`,
+    phone_oauth_provider: result.provider,
+    phone_oauth_subject: result.subject,
+    phone_oauth_email_verified: result.emailVerified,
+    phone_oauth_real_user_hint: result.realUserHint,
+  };
+}
+
+export function deviceTrustProofAnnotations(format: string): WebAuthnAnnotations {
+  return {
+    phone_webauthn_attested: true,
+    phone_webauthn_user_verified: true,
+    phone_webauthn_format: format,
+  };
+}
+
+export function isProofOfLifeSatisfied(annotations: ProofOfLifeAnnotations): boolean {
+  return annotations.phone_webauthn_attested === true;
+}
+
+export async function verifyProofOfLife(
+  opts: VerifyProofOfLifeOptions
+): Promise<ProofOfLifeAnnotations> {
+  if (opts.trustRedeemed) {
+    return deviceTrustProofAnnotations(opts.deviceTrustFormat);
+  }
+  if (opts.oauth) {
+    return verifyOAuthProofOfLife(opts.oauth, opts.expectedNonce);
+  }
+  return verifyWebAuthnProof(opts);
+}
+
 /**
  * Verify the phone's WebAuthn proof-of-life ceremony.
  *
@@ -123,14 +237,9 @@ export async function verifyWebAuthnProof(
 ): Promise<WebAuthnAnnotations> {
   const { webauthn, expectedNonce, argusPubkey, expectedOrigin, rpId, allowTestAuthenticators } =
     opts;
-  if (!webauthn || typeof webauthn !== 'object') {
-    return { phone_webauthn_attested: false, phone_webauthn_error: 'missing' };
-  }
-  const w = webauthn as Record<string, unknown>;
-  if (typeof w.error === 'string') {
-    return { phone_webauthn_attested: false, phone_webauthn_error: w.error };
-  }
-  const response = w.response as Record<string, unknown> | undefined;
+  const read = readWebAuthnRecord(webauthn);
+  if (!read.ok) return read.annotations;
+  const response = read.value.response as Record<string, unknown> | undefined;
   const isAuthentication =
     typeof response?.signature === 'string' && typeof response?.authenticatorData === 'string';
   if (isAuthentication) {
