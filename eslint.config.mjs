@@ -162,6 +162,7 @@ export default [
       'max-lines-per-function': 'off',
       'max-params': 'off',
       'max-statements': 'off',
+      'security/detect-object-injection': 'off',
       'sonarjs/cognitive-complexity': 'off',
     },
   },
