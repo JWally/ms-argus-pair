@@ -79,7 +79,7 @@ interface WhoamiResp {
 
 /**
  * Open a WebSocket and wait for the TCP+TLS handshake to complete.
- * Splitting open() from whoami() lets callers parallelise the WS
+ * Splitting open() from whoami() lets callers parallelize the WS
  * handshake with /session/start — the token comes from the HTTP
  * response but $connect doesn't require it, so the WS handshake can
  * race the HTTP round-trip and the two latencies overlap instead of
@@ -98,7 +98,7 @@ export async function openWs(url: string): Promise<WebSocket> {
  *
  * Pass `existingWs` when the caller has already opened the socket via
  * openWs() — this is the parallel-handshake path. Without it, we open
- * the socket here (the original behaviour, retained for callers that
+ * the socket here (the original behavior, retained for callers that
  * don't have a static URL available before /session/start completes).
  */
 export async function connectAndWhoami(opts: {
