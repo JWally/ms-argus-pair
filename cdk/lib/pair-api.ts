@@ -55,7 +55,7 @@ import {
   sealBytes,
 } from '../../src/lib/ecdh-seal';
 import { fibScramble } from '../../src/lib/fib-scramble';
-import { mintBootstrapToken, openEnvelope, postToPeer, verifyBootstrapToken } from './ws-handler';
+import { mintBootstrapToken, openEnvelope, verifyBootstrapToken } from './ws-handler';
 import {
   isValkeySessionsEnabled,
   mgetSession,
@@ -68,7 +68,9 @@ import {
 import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
 import {
   validateAttestInput,
-  verifyAttestation,
+  validatePairAttestationBody,
+  validateSsoAttestation,
+  verifyPairAttestationPayload,
   type AttestationInput,
   type EnvelopeDecoded,
 } from './pair-api/attestation/envelope';
@@ -85,9 +87,20 @@ import {
   type OAuthAnnotations,
   type WebAuthnAnnotations,
 } from './pair-api/proof-of-life';
+import {
+  classifyScan,
+  computeVerdict,
+  isProjectionFresh,
+  projectionAgeSeconds,
+  PROJECTION_FRESHNESS_WINDOW_SECONDS,
+  summarizeDesktopScan,
+  type ClassifiedScan,
+  type MerchantProjection,
+} from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
+import { pushVerdictToDesktop } from './pair-api/verdict-push';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
 // crypto.subtle code both sides so the contract can't drift.
 import { getValkey } from './valkey-client';
@@ -114,21 +127,6 @@ const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-// Verdict thresholds (per spec). Individual = max(automation, device_tampering,
-// network_tampering) for one side. Total = sum of the two sides' individual
-// scores.
-const INDIVIDUAL_SCORE_LIMIT = 30;
-const TOTAL_SCORE_LIMIT = 50;
-// #13: PAT is a strong Apple-device signal but FARMABLE (the upstream
-// /v1/pat-attestation challenge is unbound + not single-use). So PAT is no
-// longer an unconditional golden ticket. It EXTENDS the per-side score
-// tolerance from INDIVIDUAL_SCORE_LIMIT up to PAT_SCORE_FLOOR for an
-// attested side, but cannot whitewash hard automation/tampering evidence
-// (score >= floor), and no longer exempts the datacenter or total-score
-// checks. A genuine Apple device scores well under 30, so this never costs a
-// legit PAT user; it only denies a farmed PAT stapled onto a dirty device.
-const PAT_SCORE_FLOOR = 70;
 
 // WebAuthn RP identifier. Must match the rpId the phone passes to
 // startRegistration on the client (window.location.hostname).
@@ -201,19 +199,6 @@ export async function claimArgusSessionId(
   }
 }
 
-// ── projection freshness ──────────────────────────────────────────────────
-//
-// Secondary defense. Even if the single-use ledger somehow misses (e.g.,
-// race resolved in attacker's favor on a multi-region write, or a future
-// edit drops the ledger), require the projection's scan timestamp to be
-// recent. 180s comfortably covers the user flow: desktop scan + QR + phone
-// scan + tap is typically 30-90s; 180s leaves slack for slow phones.
-//
-// Strict: a missing created_at on the projection (legacy records pre-
-// dating the field) is treated as STALE. Real argus scans backfill this
-// field; only ancient cached projections wouldn't have it.
-const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
-
 // ── proof-of-life requirement (toggle) ─────────────────────────────────────
 //
 // The design intent was `magic-token || webauthn`: a pair only succeeds if the
@@ -231,17 +216,6 @@ const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
 // wiring from CLAUDE.md). SECURITY NOTE: optional weakens the anti-bot bar to
 // "clean scan on both sides."
 const REQUIRE_PROOF_OF_LIFE = process.env.PAIR_REQUIRE_PROOF_OF_LIFE === 'true';
-
-function projectionAgeSeconds(p: MerchantProjection | null): number | null {
-  if (!p || typeof p.created_at !== 'number') return null;
-  return Math.round((Date.now() - p.created_at) / 1000);
-}
-
-function isProjectionFresh(p: MerchantProjection | null): boolean {
-  const age = projectionAgeSeconds(p);
-  if (age === null) return false;
-  return age >= -PROJECTION_FRESHNESS_WINDOW_SECONDS && age <= PROJECTION_FRESHNESS_WINDOW_SECONDS;
-}
 
 // ── Raffle / leaderboard ──────────────────────────────────────────────────
 //
@@ -549,49 +523,6 @@ interface SsoSessionItem {
   approvedAt?: number;
 }
 
-// ── Verdict pipeline ───────────────────────────────────────────────────────
-
-interface MerchantProjection {
-  automation?: number;
-  device_tampering?: number;
-  network_tampering?: number;
-  /** Epoch ms; null on legacy records. From ms-argus-api MerchantSafeResponse. */
-  created_at?: number | null;
-  verdict?: string;
-  identification?: {
-    browserDetails?: {
-      device?: string | null;
-      os?: string | null;
-    };
-  };
-  tags?: string[];
-  // Apple Private Access Token — present on Safari/iOS when issuer succeeds.
-  // Exact field name in the projection varies; we look in both `pat_*` and
-  // tag form. See ms-argus-api `project_argus_pat.md` memory.
-  pat_attested?: boolean;
-}
-
-interface ClassifiedScan {
-  individualScore: number; // max of three tampering axes (0-100)
-  isPhone: boolean;
-  isDatacenter: boolean;
-  isProxy: boolean;
-  patAttested: boolean;
-  ok: boolean; // basic projection-level verdict pass
-  // Display fields surfaced into the side-by-side comparison panel.
-  browserName: string | null;
-  browserVersion: string | null;
-  os: string | null;
-  ip: string | null;
-  ua: string | null;
-  asnName: string | null;
-  city: string | null;
-  country: string | null;
-  isMobileNetwork: boolean;
-  isVpn: boolean;
-  raw?: MerchantProjection; // for debug
-}
-
 function splitCredential(credential: string): { keyId: string; token: string } {
   const idx = credential.indexOf('.');
   if (idx <= 0) throw new Error('credential malformed: missing keyId.token separator');
@@ -629,108 +560,18 @@ async function fetchProjection(argusSessionId: string): Promise<MerchantProjecti
   }
 }
 
-/** Lowercased tag check, defensive against missing/empty tags array. */
-function hasTagLike(tags: string[] | undefined, ...patterns: string[]): boolean {
-  if (!Array.isArray(tags) || tags.length === 0) return false;
-  const lc = tags.map((t) => String(t).toLowerCase());
-  return patterns.some((p) => {
-    const needle = p.toLowerCase();
-    return lc.some((t) => t.includes(needle));
-  });
-}
-
-function classifyScan(p: MerchantProjection | null, side: string): ClassifiedScan | null {
-  if (!p) return null;
-  const individualScore = Math.max(
-    p.automation ?? 0,
-    p.device_tampering ?? 0,
-    p.network_tampering ?? 0
-  );
-
-  // Argus's projection fields drift across pipeline versions, so look in
-  // every plausible spot for the mobile/desktop signal. Cast through
-  // Record<string, unknown> to read fields not in our narrow TS type.
-  const projAny = p as unknown as Record<string, unknown>;
-  const bd = (projAny.identification as Record<string, unknown> | undefined)?.browserDetails as
-    | Record<string, unknown>
-    | undefined;
-  const deviceLabel = String(bd?.device ?? '').toLowerCase();
-  const deviceType = String(bd?.deviceType ?? '').toLowerCase();
-  const platform = String(bd?.platform ?? '').toLowerCase();
-  const os = String(bd?.os ?? '').toLowerCase();
-  const ua = String(bd?.userAgent ?? '');
-
-  // Treat as phone if ANY of:
-  //   - device or deviceType is "mobile" or "tablet"
-  //   - platform/os matches a phone OS (iOS, Android, iPadOS)
-  //   - userAgent contains the canonical mobile markers
-  const phoneSignals = [deviceLabel, deviceType, platform, os].some(
-    (v) => v === 'mobile' || v === 'tablet' || v === 'phone'
-  );
-  const phoneOsRe = /\b(ios|ipados|android|iphone|ipod)\b/i;
-  const isPhone =
-    phoneSignals ||
-    phoneOsRe.test(os) ||
-    phoneOsRe.test(platform) ||
-    /Mobile|Android|iPhone|iPad|iPod/.test(ua);
-
-  const ipInfo = projAny.ipInfo as
-    | {
-        asn?: { organization?: string | null };
-        datacenter?: { result?: boolean };
-        mobile?: { result?: boolean };
-        vpn?: { result?: boolean };
-        hosting?: { result?: boolean };
-      }
-    | undefined;
-  const ipLocation = projAny.ipLocation as
-    | { city?: string | null; country?: string | null }
-    | undefined;
-
-  const isProxy = hasTagLike(p.tags, 'proxy') || ipInfo?.hosting?.result === true;
-  const isDatacenter =
-    hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn') ||
-    ipInfo?.datacenter?.result === true;
-  // Argus emits `apple_attested` as a top-level tag when
-  // integrity.pat.attested === true (see ms-argus-api merchant-
-  // projection buildTags rule). Match exactly that — earlier spellings
-  // (pat_attested / apple_pat) never existed in the projection schema.
-  const patAttested = p.pat_attested === true || hasTagLike(p.tags, 'apple_attested');
-  const ok = (p.verdict ?? 'PASS').toUpperCase() === 'PASS';
-
-  const browserName = (bd?.browserName as string | null | undefined) ?? null;
-  const browserVersion = (bd?.browserVersion as string | null | undefined) ?? null;
-  const osLabel = (bd?.os as string | null | undefined) ?? null;
-  const ip = (projAny.ip as string | null | undefined) ?? null;
-  const asnName = ipInfo?.asn?.organization ?? null;
-  const city = ipLocation?.city ?? null;
-  const country = ipLocation?.country ?? null;
-  const isMobileNetwork = ipInfo?.mobile?.result === true;
-  const isVpn = ipInfo?.vpn?.result === true;
-
-  console.log(
-    `[pair] classifyScan side=${side} score=${individualScore} isPhone=${isPhone} isProxy=${isProxy} isDC=${isDatacenter} pat=${patAttested} verdict=${p.verdict} ` +
-      `device=${JSON.stringify({ deviceLabel, deviceType, platform, os, ua: ua.slice(0, 80) })} tags=${JSON.stringify(p.tags ?? null)}`
-  );
-
-  return {
-    individualScore,
-    isPhone,
-    isDatacenter,
-    isProxy,
-    patAttested,
-    ok,
-    browserName,
-    browserVersion,
-    os: osLabel,
-    ip,
-    ua: ua || null,
-    asnName,
-    city,
-    country,
-    isMobileNetwork,
-    isVpn,
-  };
+async function authenticateSessionParticipant(
+  event: {
+    queryStringParameters?: Record<string, string | undefined>;
+    headers?: Record<string, string | undefined>;
+  },
+  sessionId: string
+): Promise<boolean> {
+  const token =
+    event.queryStringParameters?.t ||
+    (event.headers?.authorization || event.headers?.Authorization || '').replace(/^Bearer\s+/i, '');
+  const claims = token ? await verifyBootstrapToken(token) : null;
+  return claims?.sessionId === sessionId;
 }
 
 function ssoProfileFromScan(
@@ -770,153 +611,6 @@ function requirePhoneSsoScan(
 
 function hashSsoReturnCode(code: string): string {
   return createHash('sha256').update(`argus-pair-sso-return:${code}`).digest('hex');
-}
-
-function validateSsoAttestation(
-  body: Record<string, unknown>,
-  expected: { role: string; sessionId?: string; nonce?: string; returnCode?: string }
-): { ok: true; attestation: AttestationInput } | { ok: false; status: number; body: unknown } {
-  const att = validateAttestInput(body);
-  const argusSessionId = body.argusSessionId as string | undefined;
-  if (!argusSessionId || !att) {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: 'missing_argusSessionId_or_attestation' },
-    };
-  }
-  const verified = verifyAttestation(att);
-  if (!verified.ok || !verified.decoded) {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: 'attestation_invalid', reason: verified.reason },
-    };
-  }
-  const payload = verified.decoded.payload as {
-    role?: string;
-    ssoSessionId?: string;
-    nonce?: string;
-    returnCode?: string;
-  };
-  if (payload.role !== expected.role) {
-    return { ok: false, status: 400, body: { error: 'payload_role_mismatch' } };
-  }
-  if (expected.sessionId && payload.ssoSessionId !== expected.sessionId) {
-    return { ok: false, status: 400, body: { error: 'payload_session_mismatch' } };
-  }
-  if (expected.nonce && payload.nonce !== expected.nonce) {
-    return { ok: false, status: 400, body: { error: 'payload_nonce_mismatch' } };
-  }
-  if (expected.returnCode && payload.returnCode !== expected.returnCode) {
-    return { ok: false, status: 400, body: { error: 'payload_return_code_mismatch' } };
-  }
-  return { ok: true, attestation: att };
-}
-
-interface VerdictResult {
-  verdict: Verdict;
-  reason: string;
-  annotations: Record<string, unknown>;
-}
-
-/**
- * Apply the rules from the spec:
- *   Hard deny — any of:
- *     1. either side on a proxy
- *     2. either side individual score >= 30
- *     3. sum of scores >= 50
- *     4. both sides classified as desktop/laptop
- *   PAT (#13): extends a side's score tolerance to PAT_SCORE_FLOOR — NOT an
- *     unconditional override. It does not whitewash hard evidence (score >=
- *     floor) and does not exempt the datacenter or total-score checks.
- *   Soft rules: DC OK on desktop, NOT OK on phone.
- *   Allow-with-annotation: both sides classified as phone.
- *   VPN: no penalty either way (already absent from rules above).
- */
-function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): VerdictResult {
-  const annotations: Record<string, unknown> = {
-    desktop_score: desktop.individualScore,
-    phone_score: phone.individualScore,
-    total_score: desktop.individualScore + phone.individualScore,
-    pat_used_desktop: desktop.patAttested,
-    pat_used_phone: phone.patAttested,
-    desktop_is_phone: desktop.isPhone,
-    phone_is_phone: phone.isPhone,
-    desktop_dc_asn: desktop.isDatacenter,
-    phone_dc_asn: phone.isDatacenter,
-    phone_to_phone: desktop.isPhone && phone.isPhone,
-    // Per-side display fields for the side-by-side comparison panel.
-    desktop_browser_name: desktop.browserName,
-    desktop_browser_version: desktop.browserVersion,
-    desktop_os: desktop.os,
-    desktop_ip: desktop.ip,
-    desktop_ua: desktop.ua,
-    desktop_asn_name: desktop.asnName,
-    desktop_city: desktop.city,
-    desktop_country: desktop.country,
-    desktop_is_mobile_network: desktop.isMobileNetwork,
-    desktop_is_proxy: desktop.isProxy,
-    desktop_is_vpn: desktop.isVpn,
-    phone_browser_name: phone.browserName,
-    phone_browser_version: phone.browserVersion,
-    phone_os: phone.os,
-    phone_ip: phone.ip,
-    // Phone UA + IP feed the per-phone rate-limit bucket on raffle entry.
-    // Without them, an incognito phone regenerates its Argus pubkey each
-    // session and the pubkey bucket is useless. UA + IP are stable per
-    // physical phone (UA never changes mid-session, IP rarely does).
-    phone_ua: phone.ua,
-    phone_asn_name: phone.asnName,
-    phone_city: phone.city,
-    phone_country: phone.country,
-    phone_is_mobile_network: phone.isMobileNetwork,
-    phone_is_proxy: phone.isProxy,
-    phone_is_vpn: phone.isVpn,
-  };
-
-  // Hard #1 — proxy on either side. No golden ticket overrides this.
-  if (desktop.isProxy) return { verdict: 'failed', reason: 'desktop_on_proxy', annotations };
-  if (phone.isProxy) return { verdict: 'failed', reason: 'phone_on_proxy', annotations };
-
-  // Score gate (#13). PAT extends tolerance to PAT_SCORE_FLOOR but cannot
-  // override hard evidence at/above the floor. A side passes if its score is
-  // under the normal limit, OR (PAT-attested AND under the higher floor).
-  const scoreOk = (s: ClassifiedScan) =>
-    s.individualScore < INDIVIDUAL_SCORE_LIMIT ||
-    (s.patAttested && s.individualScore < PAT_SCORE_FLOOR);
-  if (!scoreOk(desktop)) {
-    return { verdict: 'failed', reason: 'desktop_score_high', annotations };
-  }
-  if (!scoreOk(phone)) {
-    return { verdict: 'failed', reason: 'phone_score_high', annotations };
-  }
-
-  // Total score — always enforced (#13). PAT no longer grants a both-sides
-  // exemption: two farmed PATs must not stack borderline scores past the cap.
-  // Two genuine Apple devices score far below this, so legit pairs are safe.
-  const totalScore = desktop.individualScore + phone.individualScore;
-  if (totalScore >= TOTAL_SCORE_LIMIT) {
-    return { verdict: 'failed', reason: 'total_score_high', annotations };
-  }
-
-  // Phone-on-datacenter — hard deny (#13). PAT no longer exempts: a genuine
-  // Apple device is never on a datacenter IP, so PAT + datacenter egress
-  // means a farmed/relayed token. (Proxy is already an unconditional deny.)
-  if (phone.isDatacenter) {
-    return { verdict: 'failed', reason: 'phone_on_datacenter', annotations };
-  }
-
-  // Both-desktop is the only "shape" deny. Both-phone is allowed (annotated).
-  if (!desktop.isPhone && !phone.isPhone) {
-    return { verdict: 'failed', reason: 'both_sides_desktop', annotations };
-  }
-
-  return {
-    verdict: 'paired',
-    reason: annotations.phone_to_phone ? 'paired_phone_to_phone' : 'paired_desktop_and_phone',
-    annotations,
-  };
 }
 
 /**
@@ -1446,28 +1140,18 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/session/{id}/desktop-attest': {
-      const argusSessionId = body.argusSessionId as string | undefined;
-      const att = validateAttestInput(body);
-      if (!argusSessionId || !att) {
-        return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
-      }
+      const pairBody = validatePairAttestationBody(body);
+      if (!pairBody.ok) return jsonResp(pairBody.status, pairBody.body);
+      const { argusSessionId, attestation: att } = pairBody;
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(404, { error: 'session_not_found' });
       if (s.desktopAttestation) return jsonResp(409, { error: 'already_attested' });
-      const v = verifyAttestation(att);
-      if (!v.ok || !v.decoded) {
-        return jsonResp(400, { error: 'attestation_invalid', reason: v.reason });
-      }
-      const payload = v.decoded.payload as { sessionId?: string; nonce?: string; role?: string };
-      if (payload.sessionId !== sessionId) {
-        return jsonResp(400, { error: 'payload_session_mismatch' });
-      }
-      if (payload.nonce !== s.nonce) {
-        return jsonResp(400, { error: 'payload_nonce_mismatch' });
-      }
-      if (payload.role !== 'desktop') {
-        return jsonResp(400, { error: 'payload_role_mismatch' });
-      }
+      const verified = verifyPairAttestationPayload(att, {
+        role: 'desktop',
+        sessionId: sessionId!,
+        nonce: s.nonce,
+      });
+      if (!verified.ok) return jsonResp(verified.status, verified.body);
       // Claim the argusSessionId before storing — closes Tier-1 recycling.
       const desktopClaim = await claimArgusSessionId(argusSessionId, sessionId!, 'desktop');
       if (!desktopClaim.ok) {
@@ -1480,7 +1164,7 @@ const lambdaHandler = async (event: {
         ...att,
         argusSessionId,
         receivedAt: Math.floor(Date.now() / 1000),
-        envelopeDecoded: v.decoded,
+        envelopeDecoded: verified.decoded,
       };
       if (isValkeySessionsEnabled()) {
         const claimed = await recordDesktopAttestationValkey(
@@ -1515,26 +1199,7 @@ const lambdaHandler = async (event: {
         const proj = await fetchProjection(argusSessionId);
         const c = classifyScan(proj, 'desktop');
         if (c) {
-          clean =
-            c.patAttested &&
-            !c.isProxy &&
-            !c.isDatacenter &&
-            c.individualScore < INDIVIDUAL_SCORE_LIMIT;
-          summary = {
-            score: c.individualScore,
-            pat_attested: c.patAttested,
-            is_proxy: c.isProxy,
-            is_datacenter: c.isDatacenter,
-            is_vpn: c.isVpn,
-            is_mobile_network: c.isMobileNetwork,
-            browser_name: c.browserName,
-            browser_version: c.browserVersion,
-            os: c.os,
-            ip: c.ip,
-            asn_name: c.asnName,
-            city: c.city,
-            country: c.country,
-          };
+          ({ clean, summary } = summarizeDesktopScan(c));
         }
       } catch (e) {
         console.warn(`[pair] desktop-attest optimistic classify failed: ${(e as Error).message}`);
@@ -1544,8 +1209,9 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/session/{id}/phone-attest': {
-      const argusSessionId = body.argusSessionId as string | undefined;
-      const att = validateAttestInput(body);
+      const pairBody = validatePairAttestationBody(body);
+      if (!pairBody.ok) return jsonResp(pairBody.status, pairBody.body);
+      const { argusSessionId, attestation: att } = pairBody;
       // WebAuthn now arrives as a sibling field (not inside the Argus
       // envelope payload) so the client can run WebAuthn + Argus scan in
       // parallel. Both still bind to the session nonce, verified
@@ -1562,9 +1228,6 @@ const lambdaHandler = async (event: {
       // clear the stale token and fall back to fresh WebAuthn or OAuth.
       const deviceTrustToken =
         typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
-      if (!argusSessionId || !att) {
-        return jsonResp(400, { error: 'missing_argusSessionId_or_attestation' });
-      }
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(404, { error: 'session_not_found' });
       if (!s.desktopAttestation) {
@@ -1588,24 +1251,12 @@ const lambdaHandler = async (event: {
           reason: 'This QR code is already paired with a different device.',
         });
       }
-      const v = verifyAttestation(att);
-      if (!v.ok || !v.decoded) {
-        return jsonResp(400, { error: 'attestation_invalid', reason: v.reason });
-      }
-      const payload = v.decoded.payload as {
-        sessionId?: string;
-        nonce?: string;
-        role?: string;
-      };
-      if (payload.sessionId !== sessionId) {
-        return jsonResp(400, { error: 'payload_session_mismatch' });
-      }
-      if (payload.nonce !== s.nonce) {
-        return jsonResp(400, { error: 'payload_nonce_mismatch' });
-      }
-      if (payload.role !== 'phone') {
-        return jsonResp(400, { error: 'payload_role_mismatch' });
-      }
+      const verified = verifyPairAttestationPayload(att, {
+        role: 'phone',
+        sessionId: sessionId!,
+        nonce: s.nonce,
+      });
+      if (!verified.ok) return jsonResp(verified.status, verified.body);
       // SECURITY (#8) — cross-sign / authenticate the desktop binding.
       //
       // The binding used to be trusted from `body.desktopArgusSessionId` /
@@ -1663,7 +1314,7 @@ const lambdaHandler = async (event: {
         ...att,
         argusSessionId,
         receivedAt: Math.floor(Date.now() / 1000),
-        envelopeDecoded: v.decoded,
+        envelopeDecoded: verified.decoded,
       };
       // If the phone presented a device-trust token, verify it FIRST.
       // Strict IP-pin: any failure → 401 + clear-token signal to client.
@@ -1909,35 +1560,13 @@ const lambdaHandler = async (event: {
       // path; fire-and-forget — push failure does not fail the response.
       // Reuse the desktopEnv we already authenticated above (#8) — same sealed
       // envelope, already verified session/role-bound, so no need to re-open.
-      const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
-      if (!mgmtEndpoint) {
-        console.warn('[pair] WS_MGMT_ENDPOINT not configured; skipping verdict push');
-      } else {
-        console.log(
-          `[pair] verdict-push: posting to cid=${desktopEnv.connectionId} verdict=${verdict}`
-        );
-        // Wrap in the same shape the WS handler uses for relayed peer
-        // messages — `action:'message'` + `data:{kind,...}` — so the
-        // desktop's persistent fanout in src/lib/ws.ts dispatches it
-        // through onMessage exactly like phone-here / desktop-ready.
-        // Without `action:'message'` the fanout silently drops it.
-        const push = await postToPeer(mgmtEndpoint, desktopEnv.connectionId, {
-          action: 'message',
-          from: 'server',
-          sessionId,
-          data: {
-            kind: 'verdict',
-            verdict,
-            reason,
-            annotations,
-          },
-        });
-        if (push.ok) {
-          console.log(`[pair] verdict-push: ok cid=${desktopEnv.connectionId}`);
-        } else {
-          console.warn(`[pair] verdict-push failed: ${push.reason}`);
-        }
-      }
+      await pushVerdictToDesktop({
+        desktopEnv,
+        sessionId: sessionId!,
+        verdict,
+        reason,
+        annotations,
+      });
       return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
     }
 
@@ -1949,14 +1578,7 @@ const lambdaHandler = async (event: {
       // wsToken minted at /session/start (desktop holds desktopToken; the
       // phone holds phoneToken from the QR hash). 5-min TTL matches the
       // session TTL, so it covers the whole polling window.
-      const resultToken =
-        event.queryStringParameters?.t ||
-        (event.headers?.authorization || event.headers?.Authorization || '').replace(
-          /^Bearer\s+/i,
-          ''
-        );
-      const resultClaims = resultToken ? await verifyBootstrapToken(resultToken) : null;
-      if (!resultClaims || resultClaims.sessionId !== sessionId) {
+      if (!(await authenticateSessionParticipant(event, sessionId!))) {
         return jsonResp(401, { error: 'result_unauthorized' });
       }
       const s = await loadSession(sessionId!);
@@ -1984,14 +1606,7 @@ const lambdaHandler = async (event: {
     // needs a sparse QR, so we no longer pack {wsUrl,e,pt,n} into the fragment.
     // Auth = the same bootstrap wsToken as /result (only a participant mints).
     case 'POST /api/session/{id}/pair-token': {
-      const mtToken =
-        event.queryStringParameters?.t ||
-        (event.headers?.authorization || event.headers?.Authorization || '').replace(
-          /^Bearer\s+/i,
-          ''
-        );
-      const mtClaims = mtToken ? await verifyBootstrapToken(mtToken) : null;
-      if (!mtClaims || mtClaims.sessionId !== sessionId) {
+      if (!(await authenticateSessionParticipant(event, sessionId!))) {
         return jsonResp(401, { error: 'pair_token_unauthorized' });
       }
       const pb = body as {

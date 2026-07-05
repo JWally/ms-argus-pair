@@ -45,6 +45,24 @@ export interface VerifyResult {
   decoded?: EnvelopeDecoded;
 }
 
+export type PairAttestationRole = 'desktop' | 'phone';
+
+export type PairAttestationPayloadResult =
+  | { ok: true; decoded: EnvelopeDecoded }
+  | { ok: false; status: number; body: unknown };
+
+export type SsoAttestationResult =
+  | { ok: true; attestation: AttestationInput }
+  | { ok: false; status: number; body: unknown };
+
+export type PairAttestationBodyResult =
+  | { ok: true; argusSessionId: string; attestation: AttestationInput }
+  | {
+      ok: false;
+      status: 400;
+      body: { error: 'missing_argusSessionId_or_attestation' };
+    };
+
 /**
  * Base64url → Buffer. Pads as needed; assumes valid base64url
  * alphabet, throws otherwise (caller wraps in try/catch).
@@ -79,8 +97,8 @@ export function p1363ToDer(sig: Buffer): Buffer {
  */
 function trimLeadZero(b: Buffer): Buffer {
   let i = 0;
-  while (i < b.length - 1 && b[i] === 0) i++;
-  if (b[i] & 0x80) return Buffer.concat([Buffer.from([0]), b.subarray(i)]);
+  while (i < b.length - 1 && b.readUInt8(i) === 0) i++;
+  if (b.readUInt8(i) & 0x80) return Buffer.concat([Buffer.from([0]), b.subarray(i)]);
   return b.subarray(i);
 }
 
@@ -167,4 +185,83 @@ export function validateAttestInput(body: Record<string, unknown>): AttestationI
     publicKey: att.publicKey,
     keyId: att.keyId,
   };
+}
+
+export function validatePairAttestationBody(
+  body: Record<string, unknown>
+): PairAttestationBodyResult {
+  const attestation = validateAttestInput(body);
+  const argusSessionId = body.argusSessionId as string | undefined;
+  if (!argusSessionId || !attestation) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'missing_argusSessionId_or_attestation' },
+    };
+  }
+  return { ok: true, argusSessionId, attestation };
+}
+
+function invalidAttestationResult(reason: string | undefined) {
+  return {
+    ok: false as const,
+    status: 400,
+    body: { error: 'attestation_invalid', reason },
+  };
+}
+
+export function verifyPairAttestationPayload(
+  attestation: AttestationInput,
+  expected: { role: PairAttestationRole; sessionId: string; nonce: string }
+): PairAttestationPayloadResult {
+  const verified = verifyAttestation(attestation);
+  if (!verified.ok || !verified.decoded) {
+    return invalidAttestationResult(verified.reason);
+  }
+  const payload = verified.decoded.payload as {
+    sessionId?: string;
+    nonce?: string;
+    role?: string;
+  };
+  if (payload.sessionId !== expected.sessionId) {
+    return { ok: false, status: 400, body: { error: 'payload_session_mismatch' } };
+  }
+  if (payload.nonce !== expected.nonce) {
+    return { ok: false, status: 400, body: { error: 'payload_nonce_mismatch' } };
+  }
+  if (payload.role !== expected.role) {
+    return { ok: false, status: 400, body: { error: 'payload_role_mismatch' } };
+  }
+  return { ok: true, decoded: verified.decoded };
+}
+
+export function validateSsoAttestation(
+  body: Record<string, unknown>,
+  expected: { role: string; sessionId?: string; nonce?: string; returnCode?: string }
+): SsoAttestationResult {
+  const pairBody = validatePairAttestationBody(body);
+  if (!pairBody.ok) return pairBody;
+  const verified = verifyAttestation(pairBody.attestation);
+  if (!verified.ok || !verified.decoded) {
+    return invalidAttestationResult(verified.reason);
+  }
+  const payload = verified.decoded.payload as {
+    role?: string;
+    ssoSessionId?: string;
+    nonce?: string;
+    returnCode?: string;
+  };
+  if (payload.role !== expected.role) {
+    return { ok: false, status: 400, body: { error: 'payload_role_mismatch' } };
+  }
+  if (expected.sessionId && payload.ssoSessionId !== expected.sessionId) {
+    return { ok: false, status: 400, body: { error: 'payload_session_mismatch' } };
+  }
+  if (expected.nonce && payload.nonce !== expected.nonce) {
+    return { ok: false, status: 400, body: { error: 'payload_nonce_mismatch' } };
+  }
+  if (expected.returnCode && payload.returnCode !== expected.returnCode) {
+    return { ok: false, status: 400, body: { error: 'payload_return_code_mismatch' } };
+  }
+  return { ok: true, attestation: pairBody.attestation };
 }
