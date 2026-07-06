@@ -368,6 +368,8 @@ export async function startDesktopSession(
   let phoneEnvelope: string | null = null;
   let bufferedReady: Record<string, unknown> | null = null;
   let notifiedPhoneConnected = false;
+  let isDesktopWsConnected = true;
+  let hasStartedResultPoll = false;
 
   const sendReadyIfBothUp = () => {
     if (phoneEnvelope && bufferedReady) {
@@ -399,6 +401,40 @@ export async function startDesktopSession(
     settled = true;
     rejectResult(e);
   };
+  const startResultPoll = (initialDelayMs: number) => {
+    if (hasStartedResultPoll) return;
+    hasStartedResultPoll = true;
+    (async () => {
+      let stepMs = initialDelayMs;
+      while (!cancelled && !settled) {
+        await new Promise((r) => window.setTimeout(r, stepMs));
+        stepMs = Math.min(10_000, Math.max(2_000, Math.round(stepMs * 1.5)));
+        if (cancelled || settled) return;
+        try {
+          const res = await fetch(
+            `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
+              session.ws.desktopToken
+            )}`,
+            { headers: { accept: 'application/json' } }
+          );
+          if (res.status === 200) {
+            settle((await res.json()) as VerdictShape);
+            return;
+          }
+          // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
+          // and let the WS push / expiry timer be the deciders.
+          if (res.status !== 204) return;
+        } catch {
+          // Transient network error — keep polling until settled or expiry.
+        }
+      }
+    })();
+  };
+
+  desktopConn.onDisconnect(() => {
+    isDesktopWsConnected = false;
+    if (notifiedPhoneConnected) startResultPoll(0);
+  });
 
   desktopConn.onMessage((msg) => {
     if (cancelled) return;
@@ -409,6 +445,7 @@ export async function startDesktopSession(
       if (!notifiedPhoneConnected) {
         notifiedPhoneConnected = true;
         events.onPhoneConnected?.();
+        startResultPoll(isDesktopWsConnected ? 20_000 : 0);
       }
       sendReadyIfBothUp();
     } else if (data.kind === 'verdict') {
@@ -440,34 +477,10 @@ export async function startDesktopSession(
     fail(new Error('session expired'));
   }, expiryMs);
 
-  // Poll fallback for the verdict. The WS push is the happy path, but if it
-  // never lands client-side (missed frame, socket churn) the desktop would
-  // otherwise hang at "finishing" until expiry. Poll GET /result with the
-  // desktop bootstrap token; 204 = still pending, 200 = terminal verdict.
-  (async () => {
-    const stepMs = 1500;
-    while (!cancelled && !settled) {
-      await new Promise((r) => window.setTimeout(r, stepMs));
-      if (cancelled || settled) return;
-      try {
-        const res = await fetch(
-          `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
-            session.ws.desktopToken
-          )}`,
-          { headers: { accept: 'application/json' } }
-        );
-        if (res.status === 200) {
-          settle((await res.json()) as VerdictShape);
-          return;
-        }
-        // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
-        // and let the WS push / expiry timer be the deciders.
-        if (res.status !== 204) return;
-      } catch {
-        // Transient network error — keep polling until settled or expiry.
-      }
-    }
-  })();
+  // WS verdict push is the primary path. /result is now only a delayed fallback
+  // after the phone has appeared, or immediate fallback if the desktop socket
+  // disconnects during that phase. This avoids hammering /result while the QR is
+  // simply sitting on screen waiting to be scanned.
 
   // Background: scan + desktop-attest. When done, queue the desktop-
   // ready peer message (or send immediately if the phone is already up).

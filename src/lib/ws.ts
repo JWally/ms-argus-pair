@@ -34,6 +34,8 @@ export interface WsConnection {
   sendPeer(peerEnvelope: string, data: unknown): void;
   /** Subscribe to ALL relayed peer messages. Returns an unsubscribe fn. */
   onMessage(handler: (msg: PeerMessage) => void): () => void;
+  /** Subscribe to socket close/error. Returns an unsubscribe fn. */
+  onDisconnect(handler: () => void): () => void;
   /** Resolves with the first peer message satisfying `predicate`. */
   waitForMessage(
     predicate: (msg: PeerMessage) => boolean,
@@ -125,6 +127,12 @@ export async function connectAndWhoami(opts: {
   // rejected (e.g. cross_session, envelope_expired). Silent drops here
   // were what made the first dev-jw run look like a hang.
   const peerHandlers = new Set<(msg: PeerMessage) => void>();
+  const disconnectHandlers = new Set<() => void>();
+  const notifyDisconnect = () => {
+    for (const handler of disconnectHandlers) handler();
+  };
+  ws.addEventListener('close', notifyDisconnect);
+  ws.addEventListener('error', notifyDisconnect);
   ws.addEventListener('message', (ev) => {
     if (typeof ev.data === 'string') {
       const trimmed = ev.data.trim();
@@ -181,6 +189,10 @@ export async function connectAndWhoami(opts: {
       peerHandlers.add(handler);
       return () => peerHandlers.delete(handler);
     },
+    onDisconnect(handler) {
+      disconnectHandlers.add(handler);
+      return () => disconnectHandlers.delete(handler);
+    },
     waitForMessage(predicate, timeoutMs = 60_000) {
       return new Promise<PeerMessage>((resolve, reject) => {
         const t = window.setTimeout(() => {
@@ -199,6 +211,8 @@ export async function connectAndWhoami(opts: {
     },
     close() {
       try {
+        ws.removeEventListener('close', notifyDisconnect);
+        ws.removeEventListener('error', notifyDisconnect);
         ws.close();
       } catch {
         /* ignore */
