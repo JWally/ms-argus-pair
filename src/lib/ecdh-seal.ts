@@ -60,6 +60,7 @@ function bytesFromB64url(s: string): Uint8Array {
   const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
+  // eslint-disable-next-line security/detect-object-injection -- bounded decode into byte array.
   for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
   return out;
 }
@@ -94,10 +95,9 @@ export function deriveAesKey(priv: CryptoKey, peerPub: CryptoKey): Promise<Crypt
 
 // ── AES-GCM seal / open (bytes) ─────────────────────────────────────────────
 //
-// Byte-level on purpose: the payload is the fib-scrambled token (see
-// fib-scramble.ts), not a string. Keeping it as bytes means `open` never
-// TextDecodes a plaintext URL into a JS string — the scrambled bytes go
-// straight to the wasm enclave, which un-scrambles + rasters in its own memory.
+// Byte-level on purpose: the active QR path seals server-rendered PNG bytes,
+// not a string. Keeping it as bytes means `open` never TextDecodes a plaintext
+// URL into a JS value.
 
 /** Seal bytes → base64url(iv[12] || ciphertext||tag). */
 export async function sealBytes(aesKey: CryptoKey, bytes: Uint8Array): Promise<string> {

@@ -7,19 +7,21 @@
  *   1. 'keygen' → generates an ephemeral ECDH keypair (private key
  *      NON-EXTRACTABLE, never leaves this realm) and returns its public key.
  *   2. 'render' {enc, sPub, base, debug} → derives the shared key, AES-opens the
- *      blob to the still-FIB-SCRAMBLED token bytes, and hands those to the wasm
- *      enclave, which un-scrambles + rasters the poisoned QR in its own linear
- *      memory and returns ONLY pixels. The plaintext URL never becomes a JS
- *      value — not even here in the worker. A page-realm attacker who hooks
- *      `subtle.decrypt` sees scrambled bytes; to get the URL they must dump wasm
- *      memory or optically decode the rendered pixels (the hard ceiling).
+ *      blob to server-rendered poisoned QR image bytes and returns ONLY image
+ *      frames. The plaintext URL never becomes a JS value in the client.
  */
-import init, { render_qr } from '../../wasm/qr-enclave/pkg/qr_enclave.js';
 import { deriveAesKey, exportPubRaw, genKeyPair, importPubRaw, openBytes } from './ecdh-seal';
+import { unpackQrFrameBundle } from './qr-frame-bundle';
 
 type InMsg =
   | { type: 'keygen' }
-  | { type: 'render'; enc: string; sPub: string; base: string; debug: string };
+  | {
+      type: 'render';
+      enc: string;
+      sPub: string;
+      kind?: 'png' | 'png-frames';
+      compression?: 'gzip' | 'none';
+    };
 
 // `self` types as Window under the DOM lib; type only the worker surface we use.
 const ctx = self as unknown as {
@@ -40,7 +42,6 @@ const ctx = self as unknown as {
 const BLOB_PROVENANCE = ctx.location?.protocol === 'blob:';
 
 let priv: CryptoKey | null = null;
-let wasmReady: Promise<unknown> | null = null;
 let workerSha256: string | null = null;
 
 function b64url(bytes: Uint8Array): string {
@@ -56,6 +57,17 @@ async function hashOwnScript(): Promise<string> {
   return `sha256-${b64url(new Uint8Array(digest))}`;
 }
 
+async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
+  if (!('DecompressionStream' in globalThis)) {
+    throw new Error('gzip_qr_bundle_unsupported');
+  }
+  const body = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(body).set(bytes);
+  const stream = new Response(body).body?.pipeThrough(new DecompressionStream('gzip'));
+  if (!stream) throw new Error('gzip_qr_bundle_stream_unavailable');
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
 ctx.onmessage = async (e) => {
   const msg = e.data;
   try {
@@ -64,7 +76,6 @@ ctx.onmessage = async (e) => {
       return;
     }
     if (msg.type === 'keygen') {
-      wasmReady ??= init(); // warm the wasm while the QR round-trips the server
       workerSha256 = await hashOwnScript();
       const pair = await genKeyPair();
       priv = pair.privateKey;
@@ -78,14 +89,20 @@ ctx.onmessage = async (e) => {
     }
     if (msg.type === 'render') {
       if (!priv) throw new Error('keygen not run');
-      await (wasmReady ??= init());
       const aesKey = await deriveAesKey(priv, await importPubRaw(msg.sPub));
-      const scrambled = await openBytes(aesKey, msg.enc); // still fib-scrambled
-      if (!workerSha256) throw new Error('worker hash unavailable');
-      const rgba = render_qr(scrambled, msg.base, msg.debug, workerSha256); // Uint8Array RGBA
-      const data = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length);
-      const width = Math.round(Math.sqrt(data.length / 4));
-      ctx.postMessage({ type: 'pixels', data, width }, [data.buffer]);
+      let opened = await openBytes(aesKey, msg.enc);
+      if (msg.compression === 'gzip') opened = await gunzip(opened);
+      if (msg.kind === 'png-frames') {
+        const bundle = unpackQrFrameBundle(opened);
+        ctx.postMessage(
+          { type: 'frames', frames: bundle.frames, frameMs: bundle.frameMs, mime: 'image/png' },
+          bundle.frames.map((frame) => frame.buffer)
+        );
+        return;
+      }
+      ctx.postMessage({ type: 'image', data: opened, width: 0, mime: 'image/png' }, [
+        opened.buffer,
+      ]);
     }
   } catch (err) {
     ctx.postMessage({ type: 'error', message: String((err as Error)?.message ?? err) });

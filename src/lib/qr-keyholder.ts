@@ -1,6 +1,6 @@
 /*
- * QR keyholder — owns the client ECDH private key and turns a sealed pair-token
- * into poisoned QR pixels inside a dedicated Web Worker. The isolation is the
+ * QR keyholder — owns the client ECDH private key and opens a sealed server-
+ * rendered QR PNG inside a dedicated Web Worker. The isolation is the
  * point: CDP `addInitScript` / page-context `Runtime.evaluate` cannot read
  * worker scope, so the descramble key and the plaintext pair-token live there,
  * out of reach of a page-driving bot that runs AFTER the app starts.
@@ -16,50 +16,112 @@
  * The mint fetch stays in pair.ts (page realm) — it only carries pubkeys and
  * ciphertext, nothing secret.
  */
-/** Poisoned QR as a raw RGBA pixel buffer (square; width px per side). */
+/** Poisoned QR image bytes. The page receives display bytes, not the token URL. */
+export type SecureQrImage =
+  | {
+      kind: 'png';
+      data: Uint8Array;
+      width: number;
+      mime: 'image/png';
+    }
+  | {
+      kind: 'png-frames';
+      frames: Uint8Array[];
+      frameMs: number;
+      mime: 'image/png';
+    };
+
 export interface SecureQrPixels {
-  data: Uint8ClampedArray;
+  data: Uint8Array;
   width: number;
+  mime: 'image/png';
+}
+
+type WorkerQrMessage =
+  | (SecureQrPixels & { type: 'image' })
+  | {
+      type: 'frames';
+      frames: Uint8Array[];
+      frameMs: number;
+      mime: 'image/png';
+    }
+  | { type: 'error'; message?: string }
+  | { type?: string; message?: string };
+
+export function preferredQrCompression(): 'gzip' | 'none' {
+  return 'DecompressionStream' in globalThis ? 'gzip' : 'none';
 }
 
 export interface QrKeyholder {
   /** Generate the ephemeral keypair and worker self-hash used for the mint. */
   keygen(): Promise<{ cPub: string; workerUrl: string; workerSha256: string }>;
-  /** Descramble the sealed token and paint the poisoned QR. */
-  render(enc: string, sPub: string): Promise<SecureQrPixels>;
+  /** Open the sealed server-rendered QR image. */
+  render(
+    enc: string,
+    sPub: string,
+    opts?: { kind?: 'png' | 'png-frames'; compression?: 'gzip' | 'none' }
+  ): Promise<SecureQrImage>;
   dispose(): void;
 }
 
 /** Create the SCIF worker keyholder. Throws (fails closed) if Worker is unavailable. */
-export function createQrKeyholder(base: string, debug: string): QrKeyholder {
+export function createQrKeyholder(): QrKeyholder {
   if (typeof Worker === 'undefined') {
     throw new Error('Web Worker unavailable — cannot render the pairing QR securely');
   }
   const worker = new Worker(new URL('./pair-qr-worker.ts', import.meta.url), { type: 'module' });
-  const await1 = <T>(type: string): Promise<T> =>
+  const awaitWorker = <T>(resolveMessage: (message: WorkerQrMessage) => T | null): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       const on = (e: MessageEvent) => {
-        const d = e.data as { type?: string; message?: string };
-        if (d?.type === type) {
+        const message = e.data as WorkerQrMessage;
+        const value = resolveMessage(message);
+        if (value) {
           worker.removeEventListener('message', on);
-          resolve(d as T);
-        } else if (d?.type === 'error') {
+          resolve(value);
+        } else if (message?.type === 'error') {
           worker.removeEventListener('message', on);
-          reject(new Error(d.message ?? 'qr worker error'));
+          reject(new Error(message.message ?? 'qr worker error'));
         }
       };
       worker.addEventListener('message', on);
     });
+  const awaitImage = (): Promise<SecureQrImage> =>
+    awaitWorker<SecureQrImage>((message) => {
+      if (message.type === 'image') {
+        const image = message as SecureQrPixels & { type: 'image' };
+        return { kind: 'png', data: image.data, width: image.width, mime: image.mime };
+      }
+      if (message.type === 'frames') {
+        const frameMessage = message as Extract<WorkerQrMessage, { type: 'frames' }>;
+        return {
+          kind: 'png-frames',
+          frames: frameMessage.frames,
+          frameMs: frameMessage.frameMs,
+          mime: frameMessage.mime,
+        };
+      }
+      return null;
+    });
   return {
     async keygen() {
       worker.postMessage({ type: 'keygen' });
-      const pub = await await1<{ cPub: string; workerUrl: string; workerSha256: string }>('pub');
+      const pub = await awaitWorker<{ cPub: string; workerUrl: string; workerSha256: string }>(
+        (message) =>
+          message.type === 'pub'
+            ? (message as { cPub: string; workerUrl: string; workerSha256: string })
+            : null
+      );
       return pub;
     },
-    async render(enc, sPub) {
-      worker.postMessage({ type: 'render', enc, sPub, base, debug });
-      const { data, width } = await await1<{ data: Uint8ClampedArray; width: number }>('pixels');
-      return { data, width };
+    async render(enc, sPub, opts) {
+      worker.postMessage({
+        type: 'render',
+        enc,
+        sPub,
+        kind: opts?.kind,
+        compression: opts?.compression,
+      });
+      return awaitImage();
     },
     dispose() {
       worker.terminate();

@@ -2,8 +2,8 @@
  * TDD spec for the isomorphic ECIES seal used to deliver the pair-token QR.
  * Locks the crypto contract the Lambda (seal side) and the worker (open side)
  * must agree on byte-for-byte. Runs under Node's WebCrypto — the same subtle
- * API the browser worker uses. Byte-level: the payload is the fib-scrambled
- * token, and `openBytes` never TextDecodes it into a JS string.
+ * API the browser worker uses. Byte-level: the active payload is server-
+ * rendered QR PNG bytes, and `openBytes` never TextDecodes it into a JS string.
  */
 import { describe, expect, it } from 'vitest';
 import {

@@ -18,8 +18,6 @@ export default [
       'node_modules',
       '**/*.d.ts',
       'loader',
-      'wasm/*/pkg', // generated wasm-bindgen glue
-      'wasm/*/target',
     ],
   },
   js.configs.recommended,

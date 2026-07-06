@@ -32,7 +32,7 @@ module.exports = {
   ],
   options: {
     doNotFollow: {
-      path: '^(node_modules|dist|cdk\\.out|loader|wasm/.*/pkg|wasm/.*/target)',
+      path: '^(node_modules|dist|cdk\\.out|loader)',
     },
     enhancedResolveOptions: {
       extensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.json'],

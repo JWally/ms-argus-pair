@@ -34,7 +34,7 @@
  */
 
 import { connectAndWhoami, openWs, type WsConnection } from './ws';
-import { createQrKeyholder, type SecureQrPixels } from './qr-keyholder';
+import { createQrKeyholder, preferredQrCompression, type SecureQrImage } from './qr-keyholder';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -162,11 +162,10 @@ export interface PairEvents {
 export interface DesktopSession {
   sessionId: string;
   /**
-   * The poisoned QR as a raw pixel buffer, descrambled + painted inside the QR
-   * SCIF worker. The plaintext pair URL never crosses into this (page) realm —
-   * only pixels do. The consumer blits it with putImageData.
+   * The poisoned QR as server-rendered PNG bytes, opened inside the QR SCIF
+   * worker. The plaintext pair URL never crosses into this page realm.
    */
-  qr: SecureQrPixels;
+  qr: SecureQrImage;
   expiresAt: number;
   stop: () => void;
   result: Promise<{
@@ -281,9 +280,9 @@ export async function startDesktopSession(
     existingWs: reuseEagerWs ? eagerWs : undefined,
   });
 
-  // QR points at the canonical argus host (env-pinned at build time via
-  // VITE_PAIR_URL_BASE). Phone-side WebAuthn rpId stays stable across
-  // alias domains.
+  // Keep the canonical-host build canary. The server now owns QR rendering via
+  // PAIR_PUBLIC_ORIGIN, but this still catches the broken deploy class where
+  // the pair bundle was built outside `npm run deploy`.
   //
   // In production we REFUSE to fall back to window.location.origin —
   // that fallback silently produces a QR pointing at whatever alias
@@ -304,12 +303,11 @@ export async function startDesktopSession(
         '`npm run deploy` so the env var is set from cdk/bin/print-pair-host.mjs.'
     );
   }
-  const pairOrigin = bakedOrigin ?? window.location.origin;
+  const pairOriginBuildCanary = bakedOrigin ?? window.location.origin;
   // Forward the desktop's `?debug=true` query param through the QR so
   // the phone-side flow can disable its silent-reauth auto-pass. Debug
   // mode is UI-only; does not relax server-side verification.
   const debugMode = new URLSearchParams(window.location.search).get('debug') === 'true';
-  const debugParam = debugMode ? '?debug=true' : '';
   // The hash fragment carries the WS routing material end-to-end. Hash
   // fragments are NOT sent to the server in HTTP requests — they stay
   // client-side. Phone parses them on page load.
@@ -319,20 +317,24 @@ export async function startDesktopSession(
   // desktopKeyId still arrive via desktop-ready and ship as top-level
   // POST body fields (no longer inside the phone's signed envelope).
   // Mint a short single-use token for the connection blob instead of packing
-  // {wsUrl,e,pt,n} into the URL fragment. Keeps the QR sparse (~33×33) so the
-  // spatial-frequency poison in qr-paint.ts survives a real camera read. Authed
-  // with the desktop's own wsToken (only a session participant can mint).
+  // {wsUrl,e,pt,n} into the URL fragment. The server renders a sparse poisoned
+  // QR PNG for /p/<token>. Authed with the desktop's own wsToken (only a
+  // session participant can mint).
   //
-  // The token is delivered SEALED: the QR keyholder (a Web Worker) mints an
-  // ephemeral ECDH pubkey, we send it up, the server seals the token to it, and
-  // the worker descrambles + paints the poisoned QR — the plaintext token never
-  // exists in this page realm, so a page-driving bot can't lift it from the mint
-  // response. Only the poisoned pixel buffer crosses back. See qr-keyholder.ts.
-  const keyholder = createQrKeyholder(pairOrigin, debugParam);
-  let qr: SecureQrPixels;
+  // The QR is delivered SEALED: the QR keyholder (a Web Worker) mints an
+  // ephemeral ECDH pubkey, we send it up, the server renders + seals the
+  // poisoned PNG to it, and only image bytes cross back. See qr-keyholder.ts.
+  const keyholder = createQrKeyholder();
+  let qr: SecureQrImage;
   try {
+    const qrCompression = preferredQrCompression();
     const { cPub, workerUrl, workerSha256 } = await keyholder.keygen();
-    const { enc, sPub } = await jsonFetch<{ enc: string; sPub: string }>(
+    const { enc, sPub, kind, compression } = await jsonFetch<{
+      enc: string;
+      sPub: string;
+      kind?: 'png' | 'png-frames';
+      compression?: 'gzip' | 'none';
+    }>(
       `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
         session.ws.desktopToken
       )}`,
@@ -346,10 +348,13 @@ export async function startDesktopSession(
           cPub,
           workerUrl,
           workerSha256,
+          qrCompression,
+          debug: debugMode,
+          pairOriginBuildCanary,
         }),
       }
     );
-    qr = await keyholder.render(enc, sPub);
+    qr = await keyholder.render(enc, sPub, { kind, compression });
   } finally {
     keyholder.dispose();
   }

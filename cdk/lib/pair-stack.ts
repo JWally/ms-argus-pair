@@ -205,6 +205,7 @@ export class PairStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: allOrigins.join(','),
+        PAIR_PUBLIC_ORIGIN: `https://${domainName}`,
         DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
         VERDICT_SIGNING_SECRET_ARN: verdictSigningSecret.secretArn,
         // Valkey rate-limit backend. USE_VALKEY_RATE_LIMITS=true switches

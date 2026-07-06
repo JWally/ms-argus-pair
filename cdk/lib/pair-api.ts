@@ -47,14 +47,6 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import middy from '@middy/core';
 import type { MiddlewareObj } from '@middy/core';
-import {
-  genKeyPair,
-  importPubRaw,
-  exportPubRaw,
-  deriveAesKey,
-  sealBytes,
-} from '../../src/lib/ecdh-seal';
-import { fibScramble } from '../../src/lib/fib-scramble';
 import { mintBootstrapToken, openEnvelope, verifyBootstrapToken } from './ws-handler';
 import {
   isValkeySessionsEnabled,
@@ -111,6 +103,7 @@ import {
   type RaffleRateLimitInputs,
 } from './pair-api/raffle-claims';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
+import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
@@ -140,6 +133,7 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
+const PAIR_PUBLIC_ORIGIN = process.env.PAIR_PUBLIC_ORIGIN || `https://${WEBAUTHN_RP_ID}`;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const passkeyStore = createDdbPasskeyStore(ddb, TABLE);
@@ -1449,6 +1443,8 @@ const lambdaHandler = async (event: {
         cPub?: unknown;
         workerUrl?: unknown;
         workerSha256?: unknown;
+        qrCompression?: unknown;
+        debug?: unknown;
       };
       if (
         typeof pb.wsUrl !== 'string' ||
@@ -1471,7 +1467,6 @@ const lambdaHandler = async (event: {
           reason: workerIntegrity.reason,
         });
       }
-      const workerSha256 = pb.workerSha256;
       const token = await mintPairToken(pairTokenStore, {
         sessionId: sessionId!,
         wsUrl: pb.wsUrl,
@@ -1480,18 +1475,17 @@ const lambdaHandler = async (event: {
         n: pb.n,
       });
       try {
-        const serverPair = await genKeyPair();
-        const aesKey = await deriveAesKey(serverPair.privateKey, await importPubRaw(pb.cPub));
-        // The worker hash is part of the XOR stream. A locally rewritten worker
-        // that reports its modified bytes gets ciphertext it cannot turn into
-        // the real token; one that lies with the original hash must also satisfy
-        // the server-side worker hash check above.
-        const enc = await sealBytes(
-          aesKey,
-          fibScramble(new TextEncoder().encode(token), workerSha256)
+        const compression: QrCompression = pb.qrCompression === 'gzip' ? 'gzip' : 'none';
+        return jsonResp(
+          200,
+          await sealPairTokenQr({
+            pairOrigin: PAIR_PUBLIC_ORIGIN,
+            token,
+            suffix: pb.debug === true ? '?debug=true' : '',
+            clientPublicKey: pb.cPub,
+            compression,
+          })
         );
-        const sPub = await exportPubRaw(serverPair.publicKey);
-        return jsonResp(200, { enc, sPub });
       } catch (e) {
         console.warn(`[pair] pair-token seal failed, refusing plaintext: ${(e as Error).message}`);
         return jsonResp(400, { error: 'bad_client_pubkey' });

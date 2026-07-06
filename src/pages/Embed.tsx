@@ -7,7 +7,7 @@ import './embed.css';
  *
  * Served cross-origin inside the customer's `captcha.js` iframe. It runs the
  * normal desktop pairing session (which already does ECDH + device attestation
- * via the integrity SDK), renders the QR with lib/qr, and posts lifecycle +
+ * via the integrity SDK), displays the server-rendered QR, and posts lifecycle +
  * result messages UP to the host page. The host verifies `sessionId`
  * server-to-server against GET /v1/session/{cpi}/{session_id} — the browser
  * message is a notification, never the trusted verdict.
@@ -97,11 +97,12 @@ function useEmbedConfig(): { hostOrigin: string; cpi: string | undefined } {
 export function Embed() {
   const { hostOrigin, cpi } = useEmbedConfig();
   const [qrReady, setQrReady] = useState(false);
+  const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [done, setDone] = useState<null | 'paired' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
   const moduleRef = useRef<HTMLDivElement | null>(null);
-  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const qrImageUrlsRef = useRef<string[]>([]);
   const [compact, setCompact] = useState(false);
 
   // The host (loader or embedding page) reports its viewport width down to us
@@ -146,6 +147,7 @@ export function Embed() {
       window.parent.postMessage({ source: 'argus-captcha', ...msg }, hostOrigin);
 
     let cancelled = false;
+    let qrTimer: number | null = null;
     (async () => {
       try {
         const session = await startDesktopSession(
@@ -164,18 +166,26 @@ export function Embed() {
           return;
         }
         sessionRef.current = session;
-        // Blit the poisoned pixel buffer the QR worker painted. The plaintext
-        // pair URL never reached this realm — only these pixels did.
-        const canvas = qrCanvasRef.current;
-        const ctx = canvas?.getContext('2d');
-        if (canvas && ctx) {
-          canvas.width = session.qr.width;
-          canvas.height = session.qr.width;
-          const img = ctx.createImageData(session.qr.width, session.qr.width);
-          img.data.set(session.qr.data);
-          ctx.putImageData(img, 0, 0);
-          setQrReady(true);
+        // Display the server-rendered poisoned PNG frames the QR worker opened.
+        // The plaintext pair URL never reached this realm — only image bytes did.
+        const qrFrames = session.qr.kind === 'png-frames' ? session.qr.frames : [session.qr.data];
+        const imageUrls = qrFrames.map((frame) =>
+          URL.createObjectURL(
+            new Blob([Uint8Array.from(frame).buffer as ArrayBuffer], { type: session.qr.mime })
+          )
+        );
+        qrImageUrlsRef.current = imageUrls;
+        setQrImageUrl(imageUrls[0] ?? null);
+        if (session.qr.kind === 'png-frames' && imageUrls.length > 1) {
+          let index = 0;
+          qrTimer = window.setInterval(() => {
+            if (cancelled) return;
+            index = (index + 1) % imageUrls.length;
+            // eslint-disable-next-line security/detect-object-injection -- index is modulo frame count.
+            setQrImageUrl(imageUrls[index]);
+          }, session.qr.frameMs);
         }
+        setQrReady(true);
         postUp({ event: 'ready', sessionId: session.sessionId });
 
         const verdict = await session.result;
@@ -200,6 +210,9 @@ export function Embed() {
 
     return () => {
       cancelled = true;
+      if (qrTimer !== null) window.clearInterval(qrTimer);
+      for (const imageUrl of qrImageUrlsRef.current) URL.revokeObjectURL(imageUrl);
+      qrImageUrlsRef.current = [];
       sessionRef.current?.stop();
     };
   }, [hostOrigin, cpi]);
@@ -212,6 +225,7 @@ export function Embed() {
         : connected
           ? 'pairing'
           : 'scanning';
+  // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
   const copy = COPY[phase];
 
   return (
@@ -231,10 +245,13 @@ export function Embed() {
           <div className="ax-tile">
             {/* Crisp pixels: the poison must reach the screen sharp; the phone's
                 lens supplies the blur that recovers the true code. */}
-            <canvas
-              ref={qrCanvasRef}
-              style={{ imageRendering: 'pixelated', display: qrReady ? 'block' : 'none' }}
-            />
+            {qrImageUrl && (
+              <img
+                alt=""
+                src={qrImageUrl}
+                style={{ imageRendering: 'pixelated', display: qrReady ? 'block' : 'none' }}
+              />
+            )}
             {!qrReady && <span className="ax-tile-load" />}
           </div>
           <div className="ax-seal">

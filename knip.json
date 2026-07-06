@@ -3,5 +3,5 @@
   "entry": ["src/phone-main.tsx", "cdk/bin/app.ts", "cdk/lib/pair-api.ts", "cdk/lib/ws-handler.ts"],
   "project": ["src/**/*.{ts,tsx}", "cdk/**/*.ts"],
   "ignoreExportsUsedInFile": true,
-  "ignoreBinaries": ["wasm-pack"]
+  "ignoreBinaries": []
 }

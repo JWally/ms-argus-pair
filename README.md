@@ -47,7 +47,9 @@ desktop /embed                      Lambda API + WS relay                    pho
 POST /api/session/start ──────────► session in Valkey (TTL'd)
 WS whoami (bootstrap token) ──────► sealed AES-GCM envelope back
 POST …/{id}/pair-token ───────────► 128-bit single-use token, TTL 300s
-render QR: /p/<token>  ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
+                                    render + seal poisoned PNG frame bundle
+display sealed QR animation ◄───── worker decrypts display bytes
+scan QR  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
                                     POST /api/pair-token/redeem (GETDEL) ◄── redeem
                                     → /pair/{id}#{wsUrl,e,pt,n}  (hash never hits the server)
 ◄──────────── WS relay: phone-here / desktop-ready (sealed envelopes) ─────► WS whoami
@@ -63,10 +65,14 @@ Key mechanics:
   sparse (~33×33). The token is single-use (atomic Valkey `GETDEL`) with a
   5-minute TTL; redeeming returns the real session bundle, which travels to
   `/pair/{id}` in the URL **hash** so it never reaches a server log.
-- **Poisoned QR.** `src/lib/qr-paint.ts` inverts a small square at each data
+- **Server-rendered poisoned QR animation.** `cdk/lib/pair-api/server-qr-png.ts`
+  renders PNG frames for `/p/<token>` and inverts a small square at each data
   module's center: a camera lens averages it away, a pixel-exact screenshot
-  decoder fails ECC. A speed-bump against screenshot bots — the single-use
-  token is the actual lock.
+  decoder fails ECC. The frames are packed into a binary bundle, gzip-compressed
+  when the browser advertises native `DecompressionStream` support, and ECDH/AES
+  sealed to the QR worker. The page receives display bytes instead of a
+  structured URL/token. This is still a speed-bump against image extraction —
+  the single-use token and server verdict are the lock.
 - **WS relay, not WebRTC.** Both sides authenticate to the WebSocket API with
   HMAC bootstrap tokens (5-min TTL) and receive sealed AES-GCM envelopes; the
   relay verifies envelope auth-tags, one live connection per {session, role},
@@ -101,14 +107,14 @@ ms-argus-pair/
 │   ├── phone-main.tsx          # phone entry (vanilla DOM, phone.html): /pair/*, /p/*
 │   ├── lib/pair.ts             # session orchestration (desktop + phone)
 │   ├── lib/ws.ts               # WS client (whoami / message)
-│   ├── lib/qr.tsx, qr-paint.ts # canvas QR + anti-screenshot poison
+│   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)
 │   └── pages/                  # Embed, Pair, MerchantSso, SsoChallenge, MerchantValidate
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
 │   ├── lib/pair-api.ts               # the API Lambda (all HTTP routes)
-│   ├── lib/pair-api/                 # pair-token, verdict-token, attestation
+│   ├── lib/pair-api/                 # pair-token, QR PNG, verdict-token, attestation
 │   ├── lib/ws-handler.ts             # WS Lambda (whoami / message relay)
 │   ├── lib/session-store.ts, valkey-client.ts, sso-continuity.ts, oauth-providers.ts
 │   ├── lib/captcha-cdn/              # loader CDN stack (S3+CloudFront)
