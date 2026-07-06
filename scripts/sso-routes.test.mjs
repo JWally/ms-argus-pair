@@ -16,6 +16,7 @@ const main = read('src/main.tsx');
 const pairLib = read('src/lib/pair.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
+const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
 
 for (const route of ['/merchant', '/sso/challenge/:sessionId', '/merchant/validate']) {
   assert(main.includes(`path="${route}"`), `missing SPA route ${route}`);
@@ -39,8 +40,8 @@ for (const routeKey of [
   assert(api.includes(`case '${routeKey}'`), `missing Lambda handler for ${routeKey}`);
 }
 
-assert(api.includes('sso_requires_phone'), 'SSO API must reject non-phone scans');
-assert(api.includes('scan?.isPhone === true'), 'SSO API must require phone-classified scans');
+assert(ssoScan.includes('sso_requires_phone'), 'SSO API must reject non-phone scans');
+assert(ssoScan.includes('scan?.isPhone === true'), 'SSO API must require phone-classified scans');
 
 for (const clientFn of [
   'startSsoSession',

@@ -331,7 +331,7 @@ export async function startDesktopSession(
   const keyholder = createQrKeyholder(pairOrigin, debugParam);
   let qr: SecureQrPixels;
   try {
-    const cPub = await keyholder.keygen();
+    const { cPub, workerUrl, workerSha256 } = await keyholder.keygen();
     const { enc, sPub } = await jsonFetch<{ enc: string; sPub: string }>(
       `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
         session.ws.desktopToken
@@ -344,6 +344,8 @@ export async function startDesktopSession(
           pt: session.ws.phoneToken,
           n: session.nonce,
           cPub,
+          workerUrl,
+          workerSha256,
         }),
       }
     );
@@ -582,7 +584,6 @@ export async function submitSsoChallenge(
   });
 }
 
-// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
 export async function validateSsoReturn({
   sessionId,
   nonce,
@@ -1021,7 +1022,6 @@ export interface SubmitPhoneAttestationOptions {
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
 }
 
-// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 44; decompose, don't grow
 export async function submitPhoneAttestation(
   sessionId: string,
   info: PhoneSessionInfo,

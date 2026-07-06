@@ -14,6 +14,7 @@
  *
  * Run: `npm run test:e2e` (PAIR_HOST overrides the target; default dev-jw).
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   genKeyPair,
@@ -25,6 +26,10 @@ import {
 import { fibScramble } from '../../src/lib/fib-scramble.ts';
 
 const HOST = process.env.PAIR_HOST ?? 'https://captcha-dev-jw.argus.pw';
+// eslint-disable-next-line security/detect-unsafe-regex -- bounded scan of Vite asset names in deployed HTML/JS.
+const WORKER_ASSET_PATTERN = /(?:\/?assets\/)?pair-qr-worker-[A-Za-z0-9_-]+\.js/g;
+// eslint-disable-next-line security/detect-unsafe-regex -- bounded scan of Vite asset names in deployed HTML/JS.
+const JS_ASSET_PATTERN = /(?:\/?assets\/)?[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.js/g;
 
 interface SessionStart {
   sessionId: string;
@@ -42,10 +47,50 @@ async function startSession(): Promise<SessionStart> {
   return res.json() as Promise<SessionStart>;
 }
 
+let workerMetadataPromise: Promise<{ workerUrl: string; workerSha256: string }> | null = null;
+
+async function findWorkerAsset(): Promise<string> {
+  const root = await (await fetch(`${HOST}/`)).text();
+  const scriptPaths = Array.from(root.matchAll(/<script[^>]+src="([^"]+\.js)"/g), (m) => m[1]);
+  const candidates = new Set(root.match(WORKER_ASSET_PATTERN) ?? []);
+  const pending = scriptPaths.map((scriptPath) => new URL(scriptPath, HOST).href);
+  const visited = new Set<string>();
+
+  for (const scriptUrl of pending) {
+    if (visited.has(scriptUrl)) continue;
+    visited.add(scriptUrl);
+    const script = await (await fetch(scriptUrl)).text();
+    for (const match of script.match(WORKER_ASSET_PATTERN) ?? []) {
+      candidates.add(match);
+    }
+    for (const match of script.match(JS_ASSET_PATTERN) ?? []) {
+      const nextUrl = new URL(match.startsWith('/') ? match : `/${match}`, HOST).href;
+      if (!visited.has(nextUrl)) pending.push(nextUrl);
+    }
+  }
+
+  const workerPath = [...candidates].find((candidate) => candidate.includes('pair-qr-worker-'));
+  if (!workerPath) {
+    throw new Error('pair QR worker asset was not discoverable from deployed scripts');
+  }
+  return new URL(workerPath.startsWith('/') ? workerPath : `/${workerPath}`, HOST).href;
+}
+
+async function workerMetadata(): Promise<{ workerUrl: string; workerSha256: string }> {
+  workerMetadataPromise ??= (async () => {
+    const workerUrl = await findWorkerAsset();
+    const bytes = Buffer.from(await (await fetch(workerUrl)).arrayBuffer());
+    const workerSha256 = `sha256-${createHash('sha256').update(bytes).digest('base64url')}`;
+    return { workerUrl, workerSha256 };
+  })();
+  return workerMetadataPromise;
+}
+
 /** Mint + decrypt the sealed pair-token — models a bot that lifted it. */
 async function stealToken(s: SessionStart): Promise<{ token: string; sealed: boolean }> {
   const client = await genKeyPair();
   const cPub = await exportPubRaw(client.publicKey);
+  const worker = await workerMetadata();
   const res = await fetch(
     `${HOST}/api/session/${s.sessionId}/pair-token?t=${encodeURIComponent(s.ws.desktopToken)}`,
     {
@@ -57,6 +102,8 @@ async function stealToken(s: SessionStart): Promise<{ token: string; sealed: boo
         pt: s.ws.phoneToken,
         n: s.nonce,
         cPub,
+        workerUrl: worker.workerUrl,
+        workerSha256: worker.workerSha256,
       }),
     }
   );
@@ -68,7 +115,9 @@ async function stealToken(s: SessionStart): Promise<{ token: string; sealed: boo
   // AES-open yields the fib-scrambled token bytes; un-scramble to the token
   // (what the wasm enclave does internally — replicated here to model a bot
   // that reversed it). fibScramble is self-inverse.
-  const token = new TextDecoder().decode(fibScramble(await openBytes(aes, mint.enc!)));
+  const token = new TextDecoder().decode(
+    fibScramble(await openBytes(aes, mint.enc!), worker.workerSha256)
+  );
   return { token, sealed };
 }
 

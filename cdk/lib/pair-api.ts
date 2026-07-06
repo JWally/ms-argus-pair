@@ -94,13 +94,14 @@ import {
   projectionAgeSeconds,
   PROJECTION_FRESHNESS_WINDOW_SECONDS,
   summarizeDesktopScan,
-  type ClassifiedScan,
-  type MerchantProjection,
 } from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
+import { fetchProjection } from './pair-api/projection-client';
+import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
+import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
 // crypto.subtle code both sides so the contract can't drift.
 import { getValkey } from './valkey-client';
@@ -120,10 +121,6 @@ const TABLE = process.env.TABLE_NAME!;
 
 /** Public merchant client id embedded in the widget; attributes a pairing. */
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
-
-const MERCHANT_API_URL = process.env.MERCHANT_API_URL || '';
-const MERCHANT_API_CREDENTIAL = process.env.MERCHANT_API_CREDENTIAL || '';
-const MERCHANT_CPI = process.env.MERCHANT_CPI || '';
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -523,43 +520,6 @@ interface SsoSessionItem {
   approvedAt?: number;
 }
 
-function splitCredential(credential: string): { keyId: string; token: string } {
-  const idx = credential.indexOf('.');
-  if (idx <= 0) throw new Error('credential malformed: missing keyId.token separator');
-  return { keyId: credential.slice(0, idx), token: credential.slice(idx + 1) };
-}
-
-/**
- * Fetch the merchant-safe projection for an argusSessionId. Returns null
- * if the lookup is impossible (missing config) so the verdict pipeline
- * can degrade to "skipped" rather than block on Argus availability.
- */
-async function fetchProjection(argusSessionId: string): Promise<MerchantProjection | null> {
-  if (!MERCHANT_API_URL || !MERCHANT_API_CREDENTIAL || !MERCHANT_CPI) {
-    console.warn('[pair] fetchProjection: merchant config missing');
-    return null;
-  }
-  try {
-    const { keyId, token } = splitCredential(MERCHANT_API_CREDENTIAL);
-    const url = `${MERCHANT_API_URL}/v1/session/${encodeURIComponent(MERCHANT_CPI)}/${encodeURIComponent(argusSessionId)}`;
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'x-api-key': keyId, 'x-argus-token': token },
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.warn(
-        `[pair] fetchProjection: ${res.status} for argusSessionId=${argusSessionId} body=${body.slice(0, 200)}`
-      );
-      return null;
-    }
-    return (await res.json().catch(() => null)) as MerchantProjection | null;
-  } catch (e) {
-    console.warn(`[pair] fetchProjection: threw ${(e as Error).message}`);
-    return null;
-  }
-}
-
 async function authenticateSessionParticipant(
   event: {
     queryStringParameters?: Record<string, string | undefined>;
@@ -572,45 +532,6 @@ async function authenticateSessionParticipant(
     (event.headers?.authorization || event.headers?.Authorization || '').replace(/^Bearer\s+/i, '');
   const claims = token ? await verifyBootstrapToken(token) : null;
   return claims?.sessionId === sessionId;
-}
-
-function ssoProfileFromScan(
-  argusSessionId: string,
-  attestation: AttestationInput,
-  scan: ClassifiedScan | null
-): SsoLegProfile {
-  return {
-    argusSessionId,
-    keyId: attestation.keyId,
-    ip: scan?.ip ?? null,
-    asnName: scan?.asnName ?? null,
-    country: scan?.country ?? null,
-    city: scan?.city ?? null,
-    score: scan?.individualScore ?? null,
-    isPhone: scan?.isPhone === true,
-    isProxy: scan?.isProxy ?? false,
-    isDatacenter: scan?.isDatacenter ?? false,
-    isVpn: scan?.isVpn ?? false,
-  };
-}
-
-function requirePhoneSsoScan(
-  scan: ClassifiedScan | null,
-  leg: 'start' | 'challenge' | 'validate'
-): { ok: true } | { ok: false; response: ReturnType<typeof jsonResp> } {
-  if (scan?.isPhone === true) return { ok: true };
-  return {
-    ok: false,
-    response: jsonResp(403, {
-      error: 'sso_requires_phone',
-      leg,
-      message: 'SSO is only available from phone-classified Argus scans.',
-    }),
-  };
-}
-
-function hashSsoReturnCode(code: string): string {
-  return createHash('sha256').update(`argus-pair-sso-return:${code}`).digest('hex');
 }
 
 /**
@@ -1615,15 +1536,31 @@ const lambdaHandler = async (event: {
         pt?: unknown;
         n?: unknown;
         cPub?: unknown;
+        workerUrl?: unknown;
+        workerSha256?: unknown;
       };
       if (
         typeof pb.wsUrl !== 'string' ||
         typeof pb.e !== 'string' ||
         typeof pb.pt !== 'string' ||
-        typeof pb.n !== 'string'
+        typeof pb.n !== 'string' ||
+        typeof pb.cPub !== 'string' ||
+        typeof pb.workerUrl !== 'string' ||
+        typeof pb.workerSha256 !== 'string'
       ) {
         return jsonResp(400, { error: 'invalid_pair_blob' });
       }
+      const workerIntegrity = await verifyWorkerIntegrity({
+        workerUrl: pb.workerUrl,
+        workerSha256: pb.workerSha256,
+      });
+      if (!workerIntegrity.ok) {
+        return jsonResp(workerIntegrity.status, {
+          error: workerIntegrity.error,
+          reason: workerIntegrity.reason,
+        });
+      }
+      const workerSha256 = pb.workerSha256;
       const token = await mintPairToken(pairTokenStore, {
         sessionId: sessionId!,
         wsUrl: pb.wsUrl,
@@ -1631,29 +1568,23 @@ const lambdaHandler = async (event: {
         pt: pb.pt,
         n: pb.n,
       });
-      // When the client sends its ephemeral ECDH public key (`cPub`), seal the
-      // token to it so the plaintext only ever exists inside the client's QR
-      // worker — never in the page realm a bot can read. Ephemeral-ephemeral:
-      // a fresh server keypair per mint, nothing stored. Legacy callers that
-      // omit cPub still get the plaintext token (they hold the wsToken anyway).
-      if (typeof pb.cPub === 'string') {
-        try {
-          const serverPair = await genKeyPair();
-          const aesKey = await deriveAesKey(serverPair.privateKey, await importPubRaw(pb.cPub));
-          // Fib-scramble the token before sealing so the AES plaintext (what a
-          // JS `subtle.decrypt` hook would see) is scrambled bytes, not the
-          // token. The wasm enclave un-scrambles + rasters in its own memory.
-          const enc = await sealBytes(aesKey, fibScramble(new TextEncoder().encode(token)));
-          const sPub = await exportPubRaw(serverPair.publicKey);
-          return jsonResp(200, { enc, sPub });
-        } catch (e) {
-          console.warn(
-            `[pair] pair-token seal failed, refusing plaintext: ${(e as Error).message}`
-          );
-          return jsonResp(400, { error: 'bad_client_pubkey' });
-        }
+      try {
+        const serverPair = await genKeyPair();
+        const aesKey = await deriveAesKey(serverPair.privateKey, await importPubRaw(pb.cPub));
+        // The worker hash is part of the XOR stream. A locally rewritten worker
+        // that reports its modified bytes gets ciphertext it cannot turn into
+        // the real token; one that lies with the original hash must also satisfy
+        // the server-side worker hash check above.
+        const enc = await sealBytes(
+          aesKey,
+          fibScramble(new TextEncoder().encode(token), workerSha256)
+        );
+        const sPub = await exportPubRaw(serverPair.publicKey);
+        return jsonResp(200, { enc, sPub });
+      } catch (e) {
+        console.warn(`[pair] pair-token seal failed, refusing plaintext: ${(e as Error).message}`);
+        return jsonResp(400, { error: 'bad_client_pubkey' });
       }
-      return jsonResp(200, { token });
     }
 
     // Phone redeems the short token (single-use) for the connection blob.
