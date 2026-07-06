@@ -37,7 +37,7 @@
  *   5. ECDSA-P256-SHA-256 verify(signature, raw envelope bytes, publicKey)
  *   6. then app-level: payload.sessionId === session id, payload.nonce === nonce
  */
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
@@ -110,6 +110,7 @@ import {
   RAFFLE_BUCKET_TTL_SECONDS,
   type RaffleRateLimitInputs,
 } from './pair-api/raffle-claims';
+import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
@@ -354,8 +355,6 @@ async function checkRaffleRateLimits(inputs: RaffleRateLimitInputs): Promise<Rat
 // per fixed window. Generous enough for a shared NAT / enthusiastic tester,
 // tight enough to deny a single-IP farm. Hardcoded (like RAFFLE_BUCKET_MAX)
 // to avoid CDK env plumbing.
-const SESSION_START_RL_MAX = 20; // allow this many starts …
-const SESSION_START_RL_WINDOW_SEC = 60; // … per IP per this window
 /**
  * Returns true if a new session-start from `ip` is allowed. Single fixed
  * window bucket. Note: we pass `max + 1` to the Valkey rlIncr cap and allow
@@ -364,28 +363,26 @@ const SESSION_START_RL_WINDOW_SEC = 60; // … per IP per this window
  * Valkey semantics match the DDB `ct < max` path (both allow exactly `max`).
  */
 async function checkSessionStartRateLimit(ip: string): Promise<boolean> {
-  const max = SESSION_START_RL_MAX;
-  const windowSec = SESSION_START_RL_WINDOW_SEC;
-  const win = Math.floor(Date.now() / (windowSec * 1000));
-  const bucket = createHash('sha256')
-    .update(`ss:${ip || 'unknown'}`)
-    .digest('hex')
-    .slice(0, 32);
+  const gate = buildSessionStartRateLimit(ip);
   if (isValkeyRateLimitsEnabled()) {
     const { getValkey } = await import('./valkey-client');
-    const count = await getValkey().rlIncr(`pair:rl:${bucket}:${win}`, max + 1, windowSec + 60);
-    return Number(count ?? 0) <= max;
+    const count = await getValkey().rlIncr(
+      `pair:rl:${gate.bucket}:${gate.window}`,
+      gate.valkeyCap,
+      gate.ttlSeconds
+    );
+    return Number(count ?? 0) <= gate.max;
   }
   // DDB fallback: ADD ct while ct < max (allows exactly `max`, then trips).
-  const ttl = Math.floor(Date.now() / 1000) + windowSec + 60;
+  const ttl = Math.floor(Date.now() / 1000) + gate.ttlSeconds;
   try {
     await ddb.send(
       new UpdateCommand({
         TableName: TABLE,
-        Key: { PK: `RL#${bucket}#${win}`, SK: 'CT' },
+        Key: gate.ddbKey,
         UpdateExpression: 'ADD ct :one SET expiresAt = if_not_exists(expiresAt, :ttl)',
         ConditionExpression: 'attribute_not_exists(ct) OR ct < :max',
-        ExpressionAttributeValues: { ':one': 1, ':max': max, ':ttl': ttl },
+        ExpressionAttributeValues: { ':one': 1, ':max': gate.max, ':ttl': ttl },
       })
     );
     return true;
