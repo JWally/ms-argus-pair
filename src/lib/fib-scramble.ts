@@ -9,12 +9,17 @@
  * [1,2,3,5,8,13,21,34] — asserted in both tests/fib-scramble.test.ts and the
  * Rust `fib_vector_is_stable` test.
  */
-export function fibScramble(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(data.length);
+export function fibScramble(data: Uint8Array, key = ''): Uint8Array {
+  const keyBytes = key ? new TextEncoder().encode(key) : null;
   let a = 1;
   let b = 1;
-  for (let i = 0; i < data.length; i += 1) {
-    out[i] = data[i] ^ (b & 0xff);
+  let keyIndex = 0;
+  return Uint8Array.from(data, (byte) => {
+    const keyByte = keyBytes ? (keyBytes.at(keyIndex) ?? 0) : 0;
+    const outByte = byte ^ (b & 0xff) ^ keyByte;
+    if (keyBytes) {
+      keyIndex = (keyIndex + 1) % keyBytes.length;
+    }
     const c = (a + b) >>> 0;
     a = b;
     b = c;
@@ -22,6 +27,6 @@ export function fibScramble(data: Uint8Array): Uint8Array {
       a = 1;
       b = 1;
     }
-  }
-  return out;
+    return outByte;
+  });
 }

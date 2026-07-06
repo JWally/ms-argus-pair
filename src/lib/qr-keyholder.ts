@@ -23,8 +23,8 @@ export interface SecureQrPixels {
 }
 
 export interface QrKeyholder {
-  /** Generate the ephemeral keypair; returns the public key (base64url) to mint with. */
-  keygen(): Promise<string>;
+  /** Generate the ephemeral keypair and worker self-hash used for the mint. */
+  keygen(): Promise<{ cPub: string; workerUrl: string; workerSha256: string }>;
   /** Descramble the sealed token and paint the poisoned QR. */
   render(enc: string, sPub: string): Promise<SecureQrPixels>;
   dispose(): void;
@@ -53,7 +53,8 @@ export function createQrKeyholder(base: string, debug: string): QrKeyholder {
   return {
     async keygen() {
       worker.postMessage({ type: 'keygen' });
-      return (await await1<{ cPub: string }>('pub')).cPub;
+      const pub = await await1<{ cPub: string; workerUrl: string; workerSha256: string }>('pub');
+      return pub;
     },
     async render(enc, sPub) {
       worker.postMessage({ type: 'render', enc, sPub, base, debug });

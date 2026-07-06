@@ -25,7 +25,7 @@ type InMsg =
 const ctx = self as unknown as {
   onmessage: ((e: MessageEvent<InMsg>) => void) | null;
   postMessage(message: unknown, transfer?: ArrayBufferLike[]): void;
-  location: { protocol: string };
+  location: { href: string; protocol: string };
 };
 
 // Provenance tripwire. This worker is ALWAYS a static same-origin module asset
@@ -41,6 +41,20 @@ const BLOB_PROVENANCE = ctx.location?.protocol === 'blob:';
 
 let priv: CryptoKey | null = null;
 let wasmReady: Promise<unknown> | null = null;
+let workerSha256: string | null = null;
+
+function b64url(bytes: Uint8Array): string {
+  let raw = '';
+  for (const byte of bytes) raw += String.fromCharCode(byte);
+  return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function hashOwnScript(): Promise<string> {
+  const res = await fetch(ctx.location.href, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`worker_hash_fetch_${res.status}`);
+  const digest = await crypto.subtle.digest('SHA-256', await res.arrayBuffer());
+  return `sha256-${b64url(new Uint8Array(digest))}`;
+}
 
 ctx.onmessage = async (e) => {
   const msg = e.data;
@@ -51,9 +65,15 @@ ctx.onmessage = async (e) => {
     }
     if (msg.type === 'keygen') {
       wasmReady ??= init(); // warm the wasm while the QR round-trips the server
+      workerSha256 = await hashOwnScript();
       const pair = await genKeyPair();
       priv = pair.privateKey;
-      ctx.postMessage({ type: 'pub', cPub: await exportPubRaw(pair.publicKey) });
+      ctx.postMessage({
+        type: 'pub',
+        cPub: await exportPubRaw(pair.publicKey),
+        workerUrl: ctx.location.href,
+        workerSha256,
+      });
       return;
     }
     if (msg.type === 'render') {
@@ -61,7 +81,8 @@ ctx.onmessage = async (e) => {
       await (wasmReady ??= init());
       const aesKey = await deriveAesKey(priv, await importPubRaw(msg.sPub));
       const scrambled = await openBytes(aesKey, msg.enc); // still fib-scrambled
-      const rgba = render_qr(scrambled, msg.base, msg.debug); // Uint8Array RGBA
+      if (!workerSha256) throw new Error('worker hash unavailable');
+      const rgba = render_qr(scrambled, msg.base, msg.debug, workerSha256); // Uint8Array RGBA
       const data = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length);
       const width = Math.round(Math.sqrt(data.length / 4));
       ctx.postMessage({ type: 'pixels', data, width }, [data.buffer]);

@@ -20,4 +20,13 @@ describe('fibScramble', () => {
     expect(Array.from(scrambled)).not.toEqual(Array.from(original));
     expect(Array.from(fibScramble(scrambled))).toEqual(Array.from(original));
   });
+
+  it('uses the worker hash key as part of the stream', () => {
+    const original = new TextEncoder().encode('hello-token-123');
+    const key = 'sha256-worker-hash';
+    const scrambled = fibScramble(original, key);
+
+    expect(Array.from(fibScramble(scrambled))).not.toEqual(Array.from(original));
+    expect(Array.from(fibScramble(scrambled, key))).toEqual(Array.from(original));
+  });
 });

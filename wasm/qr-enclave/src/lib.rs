@@ -1,6 +1,6 @@
 //! QR SCIF enclave.
 //!
-//! The pair token arrives fib-XOR-scrambled (the AES plaintext, so hooking
+//! The pair token arrives worker-hash + fib-XOR-scrambled (the AES plaintext, so hooking
 //! WebCrypto's `subtle.decrypt` in JS yields scrambled garbage, not the URL).
 //! This module un-scrambles it, builds the QR, applies the spatial-frequency
 //! poison, and rasters to an RGBA buffer — all in wasm linear memory. The
@@ -27,12 +27,14 @@ const SCALE: usize = 24; // backing px per module — matches qr-paint.ts
 const QUIET: usize = 2; // quiet-zone margin in modules
 const POISON: f64 = 0.18; // inverted-center width as a fraction of a module
 
-/// Fibonacci-modulated XOR — self-inverse. Mirror of fib-scramble.ts. No key:
-/// the security is the enclave (URL never in JS), not the scramble's secrecy.
-fn fib_unscramble(data: &mut [u8]) {
+/// Fibonacci-modulated XOR — self-inverse. Mirror of fib-scramble.ts. The
+/// optional worker-hash key binds the sealed bytes to the exact worker asset
+/// the server verified before minting.
+fn fib_unscramble(data: &mut [u8], key: &[u8]) {
     let (mut a, mut b) = (1u32, 1u32);
-    for byte in data.iter_mut() {
-        *byte ^= (b & 0xff) as u8;
+    for (i, byte) in data.iter_mut().enumerate() {
+        let key_byte = if key.is_empty() { 0 } else { key[i % key.len()] };
+        *byte ^= (b & 0xff) as u8 ^ key_byte;
         let c = a.wrapping_add(b);
         a = b;
         b = c;
@@ -82,9 +84,9 @@ fn fill(data: &mut [u8], width: usize, mx: usize, my: usize, w: usize, v: u8) {
 
 /// Core render (no wasm glue) so it's unit-testable natively with `cargo test`.
 /// Returns RGBA bytes; the image is square, so width = sqrt(len / 4).
-pub fn render_core(scrambled: &[u8], base: &str, suffix: &str) -> Vec<u8> {
+pub fn render_core(scrambled: &[u8], base: &str, suffix: &str, worker_hash: &str) -> Vec<u8> {
     let mut token_bytes = scrambled.to_vec();
-    fib_unscramble(&mut token_bytes);
+    fib_unscramble(&mut token_bytes, worker_hash.as_bytes());
     // Build the URL as raw bytes (no format!/String → no core::fmt bloat). The
     // URL exists only here, in wasm memory, for the lifetime of this call.
     let mut url = Vec::with_capacity(base.len() + 3 + token_bytes.len() + suffix.len());
@@ -139,7 +141,13 @@ mod tests {
     /// server does before sealing, so render_core can un-scramble it back.
     fn scramble(token: &str) -> Vec<u8> {
         let mut b = token.as_bytes().to_vec();
-        fib_unscramble(&mut b);
+        fib_unscramble(&mut b, b"");
+        b
+    }
+
+    fn scramble_with_key(token: &str, key: &str) -> Vec<u8> {
+        let mut b = token.as_bytes().to_vec();
+        fib_unscramble(&mut b, key.as_bytes());
         b
     }
 
@@ -181,7 +189,7 @@ mod tests {
     fn poisoned_qr_decodes_through_a_lens() {
         let base = "https://captcha-dev-jw.argus.pw";
         let token = "0DJ06tuZ5eEzdLcJJRWWwg";
-        let rgba = render_core(&scramble(token), base, "");
+        let rgba = render_core(&scramble(token), base, "", "");
         let w = (rgba.len() as f64 / 4.0).sqrt() as usize;
         assert!(w > 0, "render produced no pixels");
         let blurred = blur(&rgba, w, (SCALE as f64 * 0.35).round() as i32);
@@ -196,10 +204,29 @@ mod tests {
     fn fib_scramble_is_self_inverse() {
         let original = b"hello-token-123";
         let mut buf = original.to_vec();
-        fib_unscramble(&mut buf);
+        fib_unscramble(&mut buf, b"");
         assert_ne!(&buf, original, "scramble must change the bytes");
-        fib_unscramble(&mut buf);
+        fib_unscramble(&mut buf, b"");
         assert_eq!(&buf, original, "applying twice must restore");
+    }
+
+    #[test]
+    fn worker_hash_key_is_required_to_render_token() {
+        let base = "https://captcha-dev-jw.argus.pw";
+        let token = "0DJ06tuZ5eEzdLcJJRWWwg";
+        let key = "sha256-example";
+        let rgba = render_core(&scramble_with_key(token, key), base, "", key);
+        let wrong = render_core(&scramble_with_key(token, key), base, "", "sha256-other");
+        let w = (rgba.len() as f64 / 4.0).sqrt() as usize;
+        let wrong_w = (wrong.len() as f64 / 4.0).sqrt() as usize;
+        assert!(!rgba.is_empty(), "matching worker hash should render");
+        let expected = format!("{base}/p/{token}");
+        assert_eq!(decode(&blur(&rgba, w, (SCALE as f64 * 0.35).round() as i32), w).as_deref(), Some(expected.as_str()));
+        assert_ne!(
+            decode(&blur(&wrong, wrong_w, (SCALE as f64 * 0.35).round() as i32), wrong_w).as_deref(),
+            Some(expected.as_str()),
+            "wrong worker hash must not produce the real token URL"
+        );
     }
 
     /// Pins the exact fib byte-stream so the JS server side (fib-scramble.ts)
@@ -207,7 +234,7 @@ mod tests {
     #[test]
     fn fib_vector_is_stable() {
         let mut buf = vec![0u8; 8]; // XOR against zero → the raw fib keystream
-        fib_unscramble(&mut buf);
+        fib_unscramble(&mut buf, b"");
         assert_eq!(buf, vec![1, 2, 3, 5, 8, 13, 21, 34]);
     }
 }
@@ -219,7 +246,7 @@ mod wasm_exports {
     /// Un-scramble + raster. Input: the fib-scrambled token bytes (AES plaintext)
     /// and the public base origin. Output: RGBA pixels (square; width = sqrt/4).
     #[wasm_bindgen]
-    pub fn render_qr(scrambled: &[u8], base: &str, suffix: &str) -> Vec<u8> {
-        super::render_core(scrambled, base, suffix)
+    pub fn render_qr(scrambled: &[u8], base: &str, suffix: &str, worker_hash: &str) -> Vec<u8> {
+        super::render_core(scrambled, base, suffix, worker_hash)
     }
 }

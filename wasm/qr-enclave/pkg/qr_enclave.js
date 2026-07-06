@@ -6,19 +6,22 @@
  * @param {Uint8Array} scrambled
  * @param {string} base
  * @param {string} suffix
+ * @param {string} worker_hash
  * @returns {Uint8Array}
  */
-export function render_qr(scrambled, base, suffix) {
+export function render_qr(scrambled, base, suffix, worker_hash) {
     const ptr0 = passArray8ToWasm0(scrambled, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(base, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(suffix, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.render_qr(ptr0, len0, ptr1, len1, ptr2, len2);
-    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    const ptr3 = passStringToWasm0(worker_hash, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.render_qr(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v4;
+    return v5;
 }
 function __wbg_get_imports() {
     const import0 = {

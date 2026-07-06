@@ -5,13 +5,13 @@
  * Un-scramble + raster. Input: the fib-scrambled token bytes (AES plaintext)
  * and the public base origin. Output: RGBA pixels (square; width = sqrt/4).
  */
-export function render_qr(scrambled: Uint8Array, base: string, suffix: string): Uint8Array;
+export function render_qr(scrambled: Uint8Array, base: string, suffix: string, worker_hash: string): Uint8Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly render_qr: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+    readonly render_qr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
