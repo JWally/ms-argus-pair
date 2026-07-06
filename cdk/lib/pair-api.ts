@@ -1475,7 +1475,7 @@ const lambdaHandler = async (event: {
         n: pb.n,
       });
       try {
-        const compression: QrCompression = pb.qrCompression === 'gzip' ? 'gzip' : 'none';
+        const compression: QrCompression = 'none';
         return jsonResp(
           200,
           await sealPairTokenQr({

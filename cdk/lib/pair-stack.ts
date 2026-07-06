@@ -194,7 +194,7 @@ export class PairStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambdaRuntime.Runtime.NODEJS_22_X,
       architecture: lambdaRuntime.Architecture.ARM_64,
-      memorySize: 768,
+      memorySize: 2048,
       timeout: cdk.Duration.seconds(10),
       // VPC-attached so the rate-limit path can reach Valkey on 6379.
       // The shared lambda SG (from ms-argus-infra) is already authorized
@@ -240,7 +240,12 @@ export class PairStack extends cdk.Stack {
         ...(oauthFacebookAppId ? { OAUTH_FACEBOOK_APP_ID: oauthFacebookAppId } : {}),
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
-      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'node22',
+        nodeModules: ['sharp'],
+      },
     });
     table.grantReadWriteData(pairFn);
     deviceTrustSecret.grantRead(pairFn);

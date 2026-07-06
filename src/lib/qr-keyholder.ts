@@ -49,7 +49,7 @@ type WorkerQrMessage =
   | { type?: string; message?: string };
 
 export function preferredQrCompression(): 'gzip' | 'none' {
-  return 'DecompressionStream' in globalThis ? 'gzip' : 'none';
+  return 'none';
 }
 
 export interface QrKeyholder {

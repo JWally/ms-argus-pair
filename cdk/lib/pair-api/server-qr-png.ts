@@ -1,14 +1,12 @@
 import { createHash } from 'node:crypto';
-import { PNG } from 'pngjs';
 import QRCode from 'qrcode';
+import sharp from 'sharp';
 
-export const SERVER_QR_SCALE = 24;
+export const SERVER_QR_SCALE = 16;
 export const SERVER_QR_QUIET_MODULES = 2;
 export const SERVER_QR_POISON_RATIO = 0.18;
 export const SERVER_QR_FRAME_MS = 180;
-export const SERVER_QR_FRAME_WRONG_RATES = [
-  0.02, 0.2, 0.05, 0.005, 0.3, 0.25, 0.025, 0.15, 0.01, 0.1, 0.03,
-] as const;
+export const SERVER_QR_FRAME_WRONG_RATES = [0.005, 0.2, 0.01, 0.25] as const;
 
 interface QrModules {
   size: number;
@@ -18,28 +16,55 @@ interface QrModules {
 export interface ServerQrPng {
   png: Uint8Array;
   width: number;
+  profile: ServerQrFrameProfile;
 }
 
 export interface ServerQrPngFrames {
   frames: Uint8Array[];
   frameMs: number;
   width: number;
+  profile: ServerQrFramesProfile;
 }
 
-function setPixel(png: PNG, x: number, y: number, dark: boolean): void {
-  const index = (y * png.width + x) * 4;
+export interface ServerQrFrameProfile {
+  maskMs: number;
+  paintMs: number;
+  encodeMs: number;
+  totalMs: number;
+  bytes: number;
+}
+
+export interface ServerQrFramesProfile {
+  createMs: number;
+  totalMs: number;
+  frameProfiles: ServerQrFrameProfile[];
+}
+
+function nowMs(): number {
+  return Number(process.hrtime.bigint()) / 1_000_000;
+}
+
+function setPixel(data: Buffer, imageWidth: number, x: number, y: number, dark: boolean): void {
+  const index = (y * imageWidth + x) * 4;
   const value = dark ? 0 : 255;
   // eslint-disable-next-line security/detect-object-injection -- bounded PNG pixel buffer write.
-  png.data[index] = value;
-  png.data[index + 1] = value;
-  png.data[index + 2] = value;
-  png.data[index + 3] = 255;
+  data[index] = value;
+  data[index + 1] = value;
+  data[index + 2] = value;
+  data[index + 3] = 255;
 }
 
-function fillRect(png: PNG, x0: number, y0: number, width: number, dark: boolean): void {
+function fillRect(
+  data: Buffer,
+  imageWidth: number,
+  x0: number,
+  y0: number,
+  width: number,
+  dark: boolean
+): void {
   for (let y = y0; y < y0 + width; y += 1) {
     for (let x = x0; x < x0 + width; x += 1) {
-      setPixel(png, x, y, dark);
+      setPixel(data, imageWidth, x, y, dark);
     }
   }
 }
@@ -56,36 +81,56 @@ function isFunctionModule(row: number, col: number, moduleCount: number): boolea
   return false;
 }
 
-function shouldFlipModule(seed: string, row: number, col: number, wrongRate: number): boolean {
-  if (wrongRate <= 0) return false;
-  const digest = createHash('sha256').update(`${seed}:${row}:${col}`).digest();
-  const sample = digest.readUInt32BE(0) / 0x1_0000_0000;
-  return sample < wrongRate;
+function seededRandom(seed: string): () => number {
+  let state = createHash('sha256').update(seed).digest().readUInt32BE(0) || 0x9e3779b9;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function moduleIndex(modules: QrModules, row: number, col: number): number {
+  return row * modules.size + col;
+}
+
+function buildFlipMask(modules: QrModules, wrongRate: number, seed: string): Uint8Array {
+  const mask = new Uint8Array(modules.size * modules.size);
+  if (wrongRate <= 0) return mask;
+  const random = seededRandom(seed);
+  for (let row = 0; row < modules.size; row += 1) {
+    for (let col = 0; col < modules.size; col += 1) {
+      if (isFunctionModule(row, col, modules.size)) continue;
+      mask[moduleIndex(modules, row, col)] = random() < wrongRate ? 1 : 0;
+    }
+  }
+  return mask;
 }
 
 function displayedModuleIsDark(
   modules: QrModules,
   row: number,
   col: number,
-  wrongRate: number,
-  seed: string
+  flipMask: Uint8Array
 ): boolean {
   const originalDark = modules.get(col, row) === 1;
   if (isFunctionModule(row, col, modules.size)) return originalDark;
-  return shouldFlipModule(seed, row, col, wrongRate) ? !originalDark : originalDark;
+  return flipMask[moduleIndex(modules, row, col)] === 1 ? !originalDark : originalDark;
 }
 
 function paintDisplayedModules(
-  png: PNG,
+  data: Buffer,
+  imageWidth: number,
   modules: QrModules,
-  wrongRate: number,
-  seed: string
+  flipMask: Uint8Array
 ): void {
   for (let row = 0; row < modules.size; row += 1) {
     for (let col = 0; col < modules.size; col += 1) {
-      if (!displayedModuleIsDark(modules, row, col, wrongRate, seed)) continue;
+      if (!displayedModuleIsDark(modules, row, col, flipMask)) continue;
       fillRect(
-        png,
+        data,
+        imageWidth,
         (col + SERVER_QR_QUIET_MODULES) * SERVER_QR_SCALE,
         (row + SERVER_QR_QUIET_MODULES) * SERVER_QR_SCALE,
         SERVER_QR_SCALE,
@@ -95,53 +140,103 @@ function paintDisplayedModules(
   }
 }
 
-function paintPoisonCenters(png: PNG, modules: QrModules, wrongRate: number, seed: string): void {
+function paintPoisonCenters(
+  data: Buffer,
+  imageWidth: number,
+  modules: QrModules,
+  flipMask: Uint8Array
+): void {
   const poisonWidth = Math.round(SERVER_QR_SCALE * SERVER_QR_POISON_RATIO);
   const poisonOffset = Math.round((SERVER_QR_SCALE - poisonWidth) / 2);
   for (let row = 0; row < modules.size; row += 1) {
     for (let col = 0; col < modules.size; col += 1) {
       if (isFunctionModule(row, col, modules.size)) continue;
       fillRect(
-        png,
+        data,
+        imageWidth,
         (col + SERVER_QR_QUIET_MODULES) * SERVER_QR_SCALE + poisonOffset,
         (row + SERVER_QR_QUIET_MODULES) * SERVER_QR_SCALE + poisonOffset,
         poisonWidth,
-        !displayedModuleIsDark(modules, row, col, wrongRate, seed)
+        !displayedModuleIsDark(modules, row, col, flipMask)
       );
     }
   }
 }
 
-function renderModulesToPng(modules: QrModules, wrongRate = 0, seed = 'static'): ServerQrPng {
-  const imageWidth = (modules.size + SERVER_QR_QUIET_MODULES * 2) * SERVER_QR_SCALE;
-  const png = new PNG({ width: imageWidth, height: imageWidth });
-  png.data.fill(255);
-  for (let index = 3; index < png.data.length; index += 4) {
-    // eslint-disable-next-line security/detect-object-injection -- bounded PNG alpha-channel fill.
-    png.data[index] = 255;
-  }
+async function renderModulesToPng(
+  modules: QrModules,
+  wrongRate = 0,
+  seed = 'static'
+): Promise<ServerQrPng> {
+  const startMs = nowMs();
+  const imageWidth = qrImageWidth(modules);
+  const raw = Buffer.alloc(imageWidth * imageWidth * 4, 255);
 
-  paintDisplayedModules(png, modules, wrongRate, seed);
-  paintPoisonCenters(png, modules, wrongRate, seed);
+  const maskStartMs = nowMs();
+  const flipMask = buildFlipMask(modules, wrongRate, seed);
+  const maskMs = nowMs() - maskStartMs;
+  const paintStartMs = nowMs();
+  paintDisplayedModules(raw, imageWidth, modules, flipMask);
+  paintPoisonCenters(raw, imageWidth, modules, flipMask);
+  const paintMs = nowMs() - paintStartMs;
+  const encodeStartMs = nowMs();
+  const encoded = await sharp(raw, {
+    raw: { width: imageWidth, height: imageWidth, channels: 4 },
+  })
+    .png({ compressionLevel: 6, adaptiveFiltering: false })
+    .toBuffer();
+  const encodeMs = nowMs() - encodeStartMs;
 
-  return { png: PNG.sync.write(png), width: imageWidth };
+  return {
+    png: encoded,
+    width: imageWidth,
+    profile: {
+      maskMs,
+      paintMs,
+      encodeMs,
+      totalMs: nowMs() - startMs,
+      bytes: encoded.byteLength,
+    },
+  };
 }
 
-export function renderPairTokenPng(pairOrigin: string, token: string, suffix = ''): ServerQrPng {
+function qrImageWidth(modules: QrModules): number {
+  return (modules.size + SERVER_QR_QUIET_MODULES * 2) * SERVER_QR_SCALE;
+}
+
+export async function renderPairTokenPng(
+  pairOrigin: string,
+  token: string,
+  suffix = ''
+): Promise<ServerQrPng> {
   const url = `${pairOrigin}/p/${token}${suffix}`;
   const code = QRCode.create(url, { errorCorrectionLevel: 'M' });
   return renderModulesToPng(code.modules);
 }
 
-export function renderPairTokenPngFrames(
+export async function renderPairTokenPngFrames(
   pairOrigin: string,
   token: string,
   suffix = ''
-): ServerQrPngFrames {
+): Promise<ServerQrPngFrames> {
+  const startMs = nowMs();
   const url = `${pairOrigin}/p/${token}${suffix}`;
+  const createStartMs = nowMs();
   const code = QRCode.create(url, { errorCorrectionLevel: 'M' });
-  const frames = SERVER_QR_FRAME_WRONG_RATES.map(
-    (wrongRate, index) => renderModulesToPng(code.modules, wrongRate, `${token}:${index}`).png
+  const createMs = nowMs() - createStartMs;
+  const renderedFrames = await Promise.all(
+    SERVER_QR_FRAME_WRONG_RATES.map((wrongRate, index) =>
+      renderModulesToPng(code.modules, wrongRate, `${token}:${index}`)
+    )
   );
-  return { frames, frameMs: SERVER_QR_FRAME_MS, width: renderModulesToPng(code.modules).width };
+  return {
+    frames: renderedFrames.map((frame) => frame.png),
+    frameMs: SERVER_QR_FRAME_MS,
+    width: qrImageWidth(code.modules),
+    profile: {
+      createMs,
+      totalMs: nowMs() - startMs,
+      frameProfiles: renderedFrames.map((frame) => frame.profile),
+    },
+  };
 }
