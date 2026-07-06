@@ -100,6 +100,16 @@ import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/ve
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
+import {
+  buildRaffleBuckets,
+  desktopSiteHost,
+  handleHash,
+  hashToCode,
+  normalizeHandle,
+  RAFFLE_BUCKET_MAX,
+  RAFFLE_BUCKET_TTL_SECONDS,
+  type RaffleRateLimitInputs,
+} from './pair-api/raffle-claims';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
@@ -227,42 +237,6 @@ const REQUIRE_PROOF_OF_LIFE = process.env.PAIR_REQUIRE_PROOF_OF_LIFE === 'true';
 // CloudFront's ALL_VIEWER_EXCEPT_HOST_HEADER policy strips Host, so Origin is
 // the trustworthy signal here (and originAllowed has already validated it
 // against ALLOWED_ORIGINS by the time we read it).
-const RAFFLE_FALLBACK_SITE = 'unknown';
-const RAFFLE_BUCKET_MAX = 3;
-const RAFFLE_BUCKET_TTL_SECONDS = 2 * 3600;
-const HANDLE_RE = /^[a-z0-9._@-]{3,64}$/;
-
-const md5hex = (s: string) => createHash('md5').update(s).digest('hex');
-
-function normalizeHandle(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  const h = raw.trim().toLowerCase();
-  return HANDLE_RE.test(h) ? h : null;
-}
-
-/**
- * Hash the submitted handle for storage + display. The doubled
- * `${h}::${h}` input is a cheap domain-separator so the stored hash
- * isn't directly lookup-able against a rainbow table of plain
- * md5(email). md5 is fine here — this is privacy hygiene, not auth.
- *
- * Returns:
- *   - `hash`: full 32-char hex (used as the DDB partition key)
- *   - `code`: short public identifier (`xxxx-xxxx`, 8 hex chars +
- *             dash, ~4B-space — collision-safe up to ~65k entries by
- *             the birthday bound, which comfortably covers any contest
- *             this site will run)
- */
-function handleHash(h: string): { hash: string; code: string } {
-  const hash = md5hex(`${h}::${h}`);
-  const code = `${hash.slice(0, 4)}-${hash.slice(4, 8)}`;
-  return { hash, code };
-}
-
-function hashToCode(hash: string): string {
-  return `${hash.slice(0, 4)}-${hash.slice(4, 8)}`;
-}
-
 async function incrementLeaderboard(handle: string): Promise<{
   hash: string;
   code: string;
@@ -289,70 +263,10 @@ async function incrementLeaderboard(handle: string): Promise<{
   return { hash, code, count };
 }
 
-/**
- * Pull the desktop's site host from the Origin header. CloudFront forwards
- * Origin (it's not in the "except" list of ALL_VIEWER_EXCEPT_HOST_HEADER),
- * and originAllowed has already validated it against ALLOWED_ORIGINS.
- */
-function desktopSiteHost(event: { headers?: Record<string, string | undefined> }): string {
-  const raw = event.headers?.origin ?? event.headers?.Origin ?? '';
-  try {
-    return new URL(raw).host.toLowerCase();
-  } catch {
-    return RAFFLE_FALLBACK_SITE;
-  }
-}
-
 interface RateLimitResult {
   ok: boolean;
   tripped?: string;
   siteHash?: string;
-}
-
-/**
- * Inputs for the raffle rate-limit gate. Five orthogonal axes, any one
- * tripping → 429.
- *
- *   - phonePub:     Argus pubkey from the phone scan (defeated by phone
- *                   incognito, since IDB regenerates the persistent key)
- *   - desktopPub:   same on the desktop side
- *   - desktopUa+desktopIp: stable per desktop browser instance on a
- *                   network; switches when attacker rotates browsers
- *   - phoneUa+phoneIp: stable per physical phone regardless of incognito
- *                   (UA never changes mid-session, IP rarely does);
- *                   captured from the phone's Argus projection at
- *                   phone-attest time and persisted on the session row
- *   - authIdentity: passkey credentialId OR oauth subject. Stable across
- *                   incognito (iCloud Keychain / OAuth providers don't
- *                   reset per-browser-mode). Skipped when neither path
- *                   produced an identity (e.g. silent reauth on a fresh
- *                   browser).
- */
-interface RateLimitInputs {
-  phonePub: string;
-  desktopPub: string;
-  desktopUa: string;
-  desktopIp: string;
-  phoneUa: string;
-  phoneIp: string;
-  authIdentity: string | null;
-  siteHost: string;
-}
-
-/** Build the per-axis bucket keys. Identity bucket omitted when caller
- *  has no identity to bind to. */
-function buildRaffleBuckets(inputs: RateLimitInputs): { siteHash: string; buckets: string[] } {
-  const siteHash = md5hex(inputs.siteHost);
-  const buckets = [
-    md5hex(inputs.phonePub + siteHash),
-    md5hex(inputs.desktopPub + siteHash),
-    md5hex(inputs.desktopUa + inputs.desktopIp + siteHash),
-    md5hex(inputs.phoneUa + inputs.phoneIp + siteHash),
-  ];
-  if (inputs.authIdentity) {
-    buckets.push(md5hex(inputs.authIdentity + siteHash));
-  }
-  return { siteHash, buckets };
 }
 
 /**
@@ -368,7 +282,7 @@ function isValkeyRateLimitsEnabled(): boolean {
   return process.env.USE_VALKEY_RATE_LIMITS === 'true';
 }
 
-async function checkRaffleRateLimits(inputs: RateLimitInputs): Promise<RateLimitResult> {
+async function checkRaffleRateLimits(inputs: RaffleRateLimitInputs): Promise<RateLimitResult> {
   const { siteHash, buckets } = buildRaffleBuckets(inputs);
   const hour = Math.floor(Date.now() / 3_600_000);
   const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
