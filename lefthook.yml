@@ -31,7 +31,7 @@ pre-push:
       # are extracted and tested.
       run: npm run test:coverage
     duplication:
-      # jscpd ratchet (threshold in package.json "jscpd") — baseline 0.72%.
+      # jscpd ratchet (threshold in package.json "jscpd") — baseline 0.47%.
       run: npm run duplication
     dead-code:
       # knip — unused exports / files / dependencies. Ratchet baseline
