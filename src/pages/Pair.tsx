@@ -9,9 +9,15 @@ import {
 } from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
-import { Wordmark } from '../components/Brand';
 import { Dialpad } from '../components/Dialpad';
-import { IconCheck, IconX, IconShield } from '../components/Icons';
+import { IconCheck, IconShield, IconX } from '../components/Icons';
+import {
+  ActivityScreen,
+  isActivityPhase,
+  PhoneShell,
+  ReadyScreen,
+  TerminalScreen,
+} from './PairScreens';
 
 type ProofChoice = 'passkey' | 'google';
 
@@ -43,7 +49,6 @@ function nonceFromPairHash(): string | null {
   return params.get('n');
 }
 
-// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 20; decompose, don't grow
 export function Pair() {
   const { roomId: sessionId } = useParams<{ roomId: string }>();
   const initialNonce = nonceFromPairHash();
@@ -138,7 +143,6 @@ export function Pair() {
   // Returning devices still try silent device-trust redeem first inside
   // submitPhoneAttestation. Fresh devices pick a proof path from the
   // menu so Private Browsing does not blindly create passkeys forever.
-  // eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 17; decompose, don't grow
   async function pair(proofMode: ProofChoice = 'passkey') {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     const info = infoRef.current;
@@ -228,157 +232,65 @@ export function Pair() {
   }
 
   return (
-    <div className="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
-      <header className="flex items-center justify-between">
-        <Wordmark />
-        <span className="pill">{isDebugMode() ? 'debug' : 'phone'}</span>
-      </header>
-
-      {(phase === 'awaiting-desktop' || phase === 'pairing' || phase === 'returning') && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="relative">
-            <div className="absolute inset-0 animate-ping rounded-full bg-accent/30" />
-            <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-accent/20 text-accent">
-              <IconShield className="h-10 w-10" />
-            </div>
-          </div>
-          <div>
-            <div className="text-lg font-semibold">
-              {phase === 'awaiting-desktop'
-                ? 'Waiting for the desktop'
-                : phase === 'returning'
-                  ? 'Welcome back'
-                  : 'Verifying'}
-            </div>
-            <div className="mt-1 flex items-center justify-center gap-2 text-xs text-muted">
-              <span className="spinner" />
-              <span className="pulse-fade">
-                {status ||
-                  (phase === 'awaiting-desktop'
-                    ? 'about a second'
-                    : phase === 'returning'
-                      ? 'remembered this device'
-                      : 'working')}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
+    <PhoneShell debug={isDebugMode()}>
+      {isActivityPhase(phase) && <ActivityScreen phase={phase} status={status} />}
 
       {phase === 'ready' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-8 text-center">
-          <div className="flex h-24 w-24 items-center justify-center rounded-3xl bg-accent/15 text-accent">
-            <IconShield className="h-12 w-12" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {hasTrust ? 'Welcome back' : 'Choose a check'}
-            </h1>
-            <p className="text-sm leading-relaxed text-muted">
-              {hasTrust
-                ? 'We remember this device. One tap to confirm.'
-                : 'Use a passkey if you already have one, or pick another proof.'}
-            </p>
-          </div>
-          {errorMsg && (
-            <div className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-left text-xs text-red-100">
-              {errorMsg}
-            </div>
-          )}
-          {hasTrust ? (
-            <button onClick={() => pair()} className="btn btn-primary w-full py-4 text-base">
-              Confirm
-            </button>
-          ) : (
-            <div className="w-full space-y-3">
-              <button
-                onClick={() => pair('passkey')}
-                className="btn btn-primary w-full py-4 text-base"
-              >
-                Use passkey
-              </button>
-              {PROVIDERS_CONFIGURED.google && (
-                <button onClick={() => pair('google')} className="btn w-full py-4 text-base">
-                  Continue with Google
-                </button>
-              )}
-            </div>
-          )}
-          <div className="text-[11px] uppercase tracking-[0.18em] text-muted/70">
-            {hasTrust
-              ? 'Trusted device · same network'
-              : PROVIDERS_CONFIGURED.google
-                ? 'Passkey · Google · device check'
-                : 'Passkey · device check'}
-          </div>
-        </div>
+        <ReadyScreen
+          hasTrust={hasTrust}
+          errorMsg={errorMsg}
+          googleConfigured={PROVIDERS_CONFIGURED.google}
+          onConfirm={() => pair()}
+          onPasskey={() => pair('passkey')}
+          onGoogle={() => pair('google')}
+        />
       )}
 
       {phase === 'paired' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-green-500/15 text-green-300">
-            <IconCheck className="h-10 w-10" />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xl font-semibold">Verified</div>
-            <p className="text-sm text-muted">
-              You can close this tab. The desktop has the result.
-            </p>
-          </div>
-        </div>
+        <TerminalScreen
+          icon={<IconCheck className="h-10 w-10" />}
+          tone="success"
+          title="Verified"
+          message="You can close this tab. The desktop has the result."
+        />
       )}
 
       {phase === 'failed' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-red-500/15 text-red-300">
-            <IconX className="h-10 w-10" />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xl font-semibold">Not verified</div>
-            <p className="text-sm text-muted">{verdict}</p>
-          </div>
-        </div>
+        <TerminalScreen
+          icon={<IconX className="h-10 w-10" />}
+          tone="error"
+          title="Not verified"
+          message={verdict}
+        />
       )}
 
       {phase === 'taken' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-accent/15 text-accent">
-            <IconShield className="h-10 w-10" />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xl font-semibold">This code is already paired</div>
-            <p className="text-sm text-muted">
-              Another device beat you to it. Ask the desktop for a fresh QR code.
-            </p>
-          </div>
-        </div>
+        <TerminalScreen
+          icon={<IconShield className="h-10 w-10" />}
+          tone="accent"
+          title="This code is already paired"
+          message="Another device beat you to it. Ask the desktop for a fresh QR code."
+        />
       )}
 
       {phase === 'timeout' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-accent/15 text-accent">
-            <IconShield className="h-10 w-10" />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xl font-semibold">QR code timed out</div>
-            <p className="text-sm text-muted">
-              The desktop hasn’t finished or the code expired. Ask the desktop for a fresh QR code.
-            </p>
-          </div>
-        </div>
+        <TerminalScreen
+          icon={<IconShield className="h-10 w-10" />}
+          tone="accent"
+          title="QR code timed out"
+          message="The desktop hasn’t finished or the code expired. Ask the desktop for a fresh QR code."
+        />
       )}
 
       {phase === 'error' && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-red-500/15 text-red-300">
-            <IconX className="h-10 w-10" />
-          </div>
-          <div className="space-y-2">
-            <div className="text-xl font-semibold">Something went wrong</div>
-            <p className="break-all text-xs text-muted">{errorMsg}</p>
-          </div>
-        </div>
+        <TerminalScreen
+          icon={<IconX className="h-10 w-10" />}
+          tone="error"
+          title="Something went wrong"
+          message={errorMsg}
+          compactMessage
+        />
       )}
-    </div>
+    </PhoneShell>
   );
 }

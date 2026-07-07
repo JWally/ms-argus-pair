@@ -217,7 +217,6 @@ function advanceChallenge(): void {
   setState({ phase: 'ready' });
 }
 
-// eslint-disable-next-line sonarjs/cognitive-complexity -- ratchet: legacy, currently 18; decompose, don't grow
 async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
   state.inflight = true;

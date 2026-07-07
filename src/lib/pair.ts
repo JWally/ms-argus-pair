@@ -34,7 +34,13 @@
  */
 
 import { connectAndWhoami, openWs, type WsConnection } from './ws';
-import { createQrKeyholder, preferredQrCompression, type SecureQrImage } from './qr-keyholder';
+import { mintDesktopQr } from './desktop-qr';
+import {
+  buildProofAttestationBody,
+  buildTrustRedeemAttestationBody,
+  createdCredentialIdFromProof,
+} from './phone-attestation-body';
+import type { SecureQrImage } from './qr-keyholder';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -324,40 +330,13 @@ export async function startDesktopSession(
   // The QR is delivered SEALED: the QR keyholder (a Web Worker) mints an
   // ephemeral ECDH pubkey, we send it up, the server renders + seals the
   // poisoned PNG to it, and only image bytes cross back. See qr-keyholder.ts.
-  const keyholder = createQrKeyholder();
-  let qr: SecureQrImage;
-  try {
-    const qrCompression = preferredQrCompression();
-    const { cPub, workerUrl, workerSha256 } = await keyholder.keygen();
-    const { enc, sPub, kind, compression } = await jsonFetch<{
-      enc: string;
-      sPub: string;
-      kind?: 'png' | 'png-frames';
-      compression?: 'gzip' | 'none';
-    }>(
-      `${API}/session/${session.sessionId}/pair-token?t=${encodeURIComponent(
-        session.ws.desktopToken
-      )}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          wsUrl: session.ws.url,
-          e: desktopConn.envelope,
-          pt: session.ws.phoneToken,
-          n: session.nonce,
-          cPub,
-          workerUrl,
-          workerSha256,
-          qrCompression,
-          debug: debugMode,
-          pairOriginBuildCanary,
-        }),
-      }
-    );
-    qr = await keyholder.render(enc, sPub, { kind, compression });
-  } finally {
-    keyholder.dispose();
-  }
+  const qr = await mintDesktopQr({
+    session,
+    desktopEnvelope: desktopConn.envelope,
+    debugMode,
+    pairOriginBuildCanary,
+    postJson: jsonFetch,
+  });
   events.onStatus?.('waiting for phone');
 
   // Routing state. The peer envelope only arrives when the phone sends
@@ -1057,19 +1036,13 @@ export async function submitPhoneAttestation(
         try {
           const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
             method: 'POST',
-            body: JSON.stringify({
-              argusSessionId: run.argusSessionId,
-              attestation: run.attestation,
-              deviceTrustToken: trustToken,
-              desktopEnvelope: info.desktopEnvelope,
-              // Top-level (unsigned) cross-bindings — server validates
-              // these against the stored desktopAttestation. They no
-              // longer live inside the phone's signed envelope, which
-              // lets the scan run in parallel with the desktop scan
-              // without sacrificing the cross-binding security check.
-              desktopArgusSessionId: info.desktopArgusSessionId,
-              desktopKeyId: info.desktopKeyId,
-            }),
+            body: JSON.stringify(
+              buildTrustRedeemAttestationBody(
+                { argusSessionId: run.argusSessionId, attestation: run.attestation },
+                info,
+                trustToken
+              )
+            ),
           });
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
           return r;
@@ -1156,30 +1129,21 @@ export async function submitPhoneAttestation(
   // tap / lost first response), and skipping the hint there was making
   // every visit re-mint a brand-new passkey. We only track the create
   // path — passkey-auth reuses an existing hint, OAuth manages none.
-  const createdCredentialId =
-    passkeyMode === 'passkey-create' &&
-    webauthnSettled.status === 'fulfilled' &&
-    webauthnSettled.value !== null &&
-    typeof webauthnSettled.value === 'object' &&
-    typeof (webauthnSettled.value as { id?: unknown }).id === 'string'
-      ? (webauthnSettled.value as { id: string }).id
-      : null;
+  const createdCredentialId = createdCredentialIdFromProof(passkeyMode, webauthnSettled);
   const rememberPasskey = (verdict: string): void => {
     if (verdict === 'paired' && createdCredentialId) writePasskeyHint(createdCredentialId);
   };
   try {
     const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
       method: 'POST',
-      body: JSON.stringify({
-        argusSessionId: run.argusSessionId,
-        attestation: run.attestation,
-        webauthn,
-        desktopEnvelope: info.desktopEnvelope,
-        // Top-level (unsigned) cross-bindings — see silent-redeem path.
-        desktopArgusSessionId: info.desktopArgusSessionId,
-        desktopKeyId: info.desktopKeyId,
-        ...(useOAuth && options.oauthResult ? { oauth: options.oauthResult } : {}),
-      }),
+      body: JSON.stringify(
+        buildProofAttestationBody({
+          run: { argusSessionId: run.argusSessionId, attestation: run.attestation },
+          bindings: info,
+          webauthn,
+          oauth: useOAuth ? options.oauthResult : undefined,
+        })
+      ),
     });
     if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
     // Server confirmed registration AND the pair succeeded.

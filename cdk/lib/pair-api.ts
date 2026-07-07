@@ -90,6 +90,7 @@ import {
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
+import { validatePairTokenMintBody } from './pair-api/pair-token-request';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
 import {
@@ -1435,28 +1436,11 @@ const lambdaHandler = async (event: {
       if (!(await authenticateSessionParticipant(event, sessionId!))) {
         return jsonResp(401, { error: 'pair_token_unauthorized' });
       }
-      const pb = body as {
-        wsUrl?: unknown;
-        e?: unknown;
-        pt?: unknown;
-        n?: unknown;
-        cPub?: unknown;
-        workerUrl?: unknown;
-        workerSha256?: unknown;
-        qrCompression?: unknown;
-        debug?: unknown;
-      };
-      if (
-        typeof pb.wsUrl !== 'string' ||
-        typeof pb.e !== 'string' ||
-        typeof pb.pt !== 'string' ||
-        typeof pb.n !== 'string' ||
-        typeof pb.cPub !== 'string' ||
-        typeof pb.workerUrl !== 'string' ||
-        typeof pb.workerSha256 !== 'string'
-      ) {
-        return jsonResp(400, { error: 'invalid_pair_blob' });
+      const parsedPairTokenBody = validatePairTokenMintBody(body);
+      if (!parsedPairTokenBody.ok) {
+        return jsonResp(parsedPairTokenBody.status, parsedPairTokenBody.body);
       }
+      const pb = parsedPairTokenBody.body;
       const workerIntegrity = await verifyWorkerIntegrity({
         workerUrl: pb.workerUrl,
         workerSha256: pb.workerSha256,

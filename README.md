@@ -170,6 +170,24 @@ Stacks (stage `dev-jw`; no prod stage configured yet):
 - `ms-argus-pair-dev-jw` → `captcha-dev-jw.argus.pw` (alias `qr.arcades.click`)
 - `ms-argus-pair-captcha-dev-jw` → `static-captcha-dev-jw.argus.pw` (loader CDN)
 
+## LLM cleanup loop
+
+For repeated LLM-assisted cleanup/hardening passes, use `LLM_DEV_LOOP.md` and
+the helper:
+
+```sh
+npm run llm:loop -- start
+npm run llm:loop -- baseline
+npm run llm:loop -- branch cleanup/<target>
+npm run llm:loop -- verify
+npm run llm:loop -- deploy
+npm run llm:loop -- red-team
+```
+
+The loop keeps a durable `dev-loop` branch, does one scoped branch at a time,
+deploys runtime changes to `dev-jw`, red-teams the changed boundary, then merges
+clean passes back into `dev-loop`.
+
 ## Known gaps
 
 - OAuth: only Google is wired end-to-end on the client; GitHub/Facebook have

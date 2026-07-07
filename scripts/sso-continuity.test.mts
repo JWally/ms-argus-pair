@@ -77,6 +77,14 @@ assert(
   `expected network_changed, got ${networkJump.reason}`
 );
 
+const invalidIpv4 = evaluateSsoContinuity({
+  start: { ...baseLeg, asnName: 'Carrier A', ip: '999.0.113.24' },
+  challenge: { ...goodChallenge, asnName: 'Carrier B', ip: '999.0.113.88' },
+  validate: { ...goodReturn, asnName: 'Carrier C', ip: '999.0.113.122' },
+});
+assert(!invalidIpv4.ok, 'invalid IPv4 octets must not pass as a shared /24');
+assert(invalidIpv4.reason === 'network_changed', `expected network_changed, got ${invalidIpv4.reason}`);
+
 const code = mintReturnCode({ sessionId: 'sso_123', ttlSeconds: 60 });
 assert(code.value.startsWith('sso_'), 'return code should be namespaced for SSO');
 assert(consumeReturnCode(code, Date.now()).ok, 'fresh return code should be consumable');

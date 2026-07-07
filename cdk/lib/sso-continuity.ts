@@ -30,8 +30,19 @@ const MAX_SCORE = 40;
 const MAX_SCORE_DRIFT = 35;
 
 function ipv4Prefix24(ip: string | null): string | null {
-  if (!ip || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) return null;
-  return ip.split('.').slice(0, 3).join('.');
+  if (!ip) return null;
+  const octets = ip.split('.');
+  if (
+    octets.length !== 4 ||
+    octets.some((octet) => {
+      if (!octet || octet.length > 3) return true;
+      const parsed = Number(octet);
+      return !Number.isInteger(parsed) || parsed < 0 || parsed > 255 || String(parsed) !== octet;
+    })
+  ) {
+    return null;
+  }
+  return octets.slice(0, 3).join('.');
 }
 
 function sameDevice(legs: SsoLegProfile[]): boolean {
