@@ -811,6 +811,7 @@ const lambdaHandler = async (event: {
       proofAnnotations = {
         ...(proof as unknown as Record<string, unknown>),
         ...(trustResult?.ok ? { phone_device_trust_redeemed: true } : {}),
+        ...(trustResult?.ipChanged ? { phone_device_trust_ip_changed: true } : {}),
       };
 
       if (!proofOfLife) {
@@ -1287,6 +1288,27 @@ const lambdaHandler = async (event: {
       }
       if (trustResult?.ok) {
         annotations.phone_device_trust_redeemed = true;
+        if (trustResult.ipChanged) annotations.phone_device_trust_ip_changed = true;
+      }
+
+      {
+        const wa = webauthnResult as WebAuthnAnnotations & {
+          phone_webauthn_error?: string;
+        };
+        const oa = webauthnResult as OAuthAnnotations & {
+          phone_oauth_error?: string;
+        };
+        console.info(
+          `[pair] proof verdict=${verdict} reason=${reason} ` +
+            `proofOfLife=${proofOfLife} ` +
+            `proof_format=${wa.phone_webauthn_format ?? 'none'} ` +
+            `phone_webauthn_attested=${wa.phone_webauthn_attested} ` +
+            `phone_webauthn_error=${wa.phone_webauthn_error ?? 'none'} ` +
+            `phone_oauth_error=${oa.phone_oauth_error ?? 'none'} ` +
+            `trust_redeemed=${!!trustResult?.ok} ` +
+            `trust_ip_changed=${!!trustResult?.ipChanged} ` +
+            `device_trust_minted=${!!nextDeviceTrust}`
+        );
       }
 
       if (isValkeySessionsEnabled()) {

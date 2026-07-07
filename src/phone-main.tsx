@@ -40,6 +40,7 @@ interface Runtime {
   challengeIndex: number;
   desktopReady: boolean;
   inflight: boolean;
+  fastPassAttempted: boolean;
   startedInChallenge: boolean;
   ctl: AbortController;
 }
@@ -78,6 +79,7 @@ const state: Runtime = {
   challengeIndex: 0,
   desktopReady: false,
   inflight: false,
+  fastPassAttempted: false,
   startedInChallenge: Boolean(initialNonce),
   ctl: new AbortController(),
 };
@@ -180,6 +182,7 @@ async function bootstrap(): Promise<void> {
         passkeyHint: pairMod.hasPasskeyHint(),
         trustChecked: true,
       });
+      maybeStartFastPass();
     });
 
     const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal);
@@ -187,8 +190,14 @@ async function bootstrap(): Promise<void> {
     state.info = info;
     state.nonce = info.nonce;
     state.desktopReady = true;
+    if (state.hasTrust) {
+      // Hide the scan latency behind the dialpad as soon as the trusted-device
+      // path is possible. The eventual POST is still device-trust only.
+      void info.getScanPromise();
+    }
     if (!state.startedInChallenge) state.phase = 'ready';
     render();
+    maybeStartFastPass();
   } catch (e) {
     if (state.ctl.signal.aborted) return;
     const msg = e instanceof Error ? e.message : String(e);
@@ -200,7 +209,37 @@ async function bootstrap(): Promise<void> {
   }
 }
 
+function maybeStartFastPass(): void {
+  if (
+    isDebugMode() ||
+    state.fastPassAttempted ||
+    state.inflight ||
+    !state.hasTrust ||
+    !state.trustChecked ||
+    !state.desktopReady ||
+    !state.info ||
+    !state.pairMod ||
+    state.verdict
+  ) {
+    return;
+  }
+  state.fastPassAttempted = true;
+  void pair('passkey', { keepDialpad: true, trustOnly: true });
+}
+
 function advanceChallenge(): void {
+  if (state.verdict === 'paired') {
+    try {
+      window.close();
+    } catch {
+      /* noop */
+    }
+    return;
+  }
+  if (state.inflight && state.hasTrust) {
+    setState({ challengeIndex: state.challengeIndex + 1 });
+    return;
+  }
   if (!state.desktopReady || !state.trustChecked || !state.info) {
     setState({ challengeIndex: state.challengeIndex + 1 });
     return;
@@ -217,10 +256,17 @@ function advanceChallenge(): void {
   setState({ phase: 'ready' });
 }
 
-async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
+async function pair(
+  proofMode: ProofChoice = 'passkey',
+  opts: { keepDialpad?: boolean; trustOnly?: boolean } = {}
+): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
   state.inflight = true;
-  setState({ phase: state.hasTrust ? 'returning' : 'pairing', status: 'starting', errorMsg: null });
+  setState({
+    ...(opts.keepDialpad ? {} : { phase: state.hasTrust ? 'returning' : 'pairing' }),
+    status: 'starting',
+    errorMsg: null,
+  });
   try {
     const passkeyMode = state.passkeyHint ? 'passkey-auth' : 'passkey-create';
     const options: SubmitPhoneAttestationOptions = {
@@ -237,12 +283,10 @@ async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
     }
 
     const events: PairEvents = { onStatus: (status) => setState({ status }) };
-    const result = await state.pairMod.submitPhoneAttestation(
-      sessionId,
-      state.info,
-      events,
-      options
-    );
+    const result = await state.pairMod.submitPhoneAttestation(sessionId, state.info, events, {
+      ...options,
+      trustOnly: opts.trustOnly,
+    });
     if (
       passkeyMode === 'passkey-auth' &&
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
@@ -250,8 +294,12 @@ async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
       state.pairMod.clearPasskeyHint();
       state.passkeyHint = false;
     }
-    setState({ verdict: result.verdict, phase: result.verdict === 'paired' ? 'paired' : 'failed' });
-    if (result.verdict === 'paired' || result.verdict === 'failed') {
+    setState({
+      verdict: result.verdict,
+      status: result.verdict === 'paired' ? 'done' : state.status,
+      phase: result.verdict === 'paired' ? (opts.keepDialpad ? 'challenge' : 'paired') : 'failed',
+    });
+    if (!opts.keepDialpad && (result.verdict === 'paired' || result.verdict === 'failed')) {
       window.setTimeout(
         () => {
           try {
@@ -265,6 +313,15 @@ async function pair(proofMode: ProofChoice = 'passkey'): Promise<void> {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (opts.keepDialpad) {
+      state.hasTrust = false;
+      setState({
+        phase: 'ready',
+        status: '',
+        errorMsg: 'Trusted device expired. Choose a check.',
+      });
+      return;
+    }
     setState({
       phase: msg.includes('session_paired_with_other_device') ? 'taken' : 'error',
       errorMsg: msg,
@@ -314,6 +371,14 @@ function renderDialpad(): void {
   let entered = '';
   let complete = false;
   const readyToContinue = state.desktopReady && state.trustChecked;
+  const actionLabel =
+    state.verdict === 'paired'
+      ? 'DONE'
+      : state.hasTrust && state.inflight
+        ? 'NEXT'
+        : readyToContinue
+          ? 'SEND'
+          : 'NEXT';
   root.innerHTML = `
     <div class="dialer">
       <div class="dialer-screen">
@@ -339,7 +404,7 @@ function renderDialpad(): void {
           </button>`
         ).join('')}
       </div>
-      <button type="button" disabled class="dialer-send">${readyToContinue ? 'SEND' : 'NEXT'}</button>
+      <button type="button" disabled class="dialer-send">${actionLabel}</button>
     </div>`;
 
   const display = root.querySelector('.dialer-display');

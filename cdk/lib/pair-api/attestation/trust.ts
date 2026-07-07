@@ -2,13 +2,13 @@
  * Device-trust token: silent re-auth after first WebAuthn.
  *
  * Once a phone passes the WebAuthn ceremony we mint an HMAC-signed
- * blob containing (pubkey, ip, exp). On the NEXT visit within the
- * TTL, from the same IP, the phone presents the token instead of
- * running the biometric ceremony again.
+ * blob containing (pubkey, keyId, first-seen ip, exp). On the NEXT visit
+ * within the TTL, the phone presents the token instead of running the
+ * biometric ceremony again.
  *
- * Strict IP-pin: any drift forces fresh WebAuthn. The HMAC secret
- * lives in Secrets Manager so it survives Lambda redeploys —
- * otherwise every deploy would invalidate every token.
+ * IP is telemetry, not a UX gate. Mobile network drift should be scored by
+ * the server's normal scan/verdict path, not force a fresh passkey ceremony
+ * before that scoring can run.
  *
  * Token format: `<body>.<mac>` where:
  *   - body = base64url(JSON.stringify({ v, pubkey, keyId, ip, iat, exp }))
@@ -48,7 +48,7 @@ interface DeviceTrustPayload {
   v: 1;
   pubkey: string; // SPKI base64, matches the SDK device key
   keyId: string;
-  ip: string; // strict — any drift forces re-WebAuthn
+  ip: string; // first-seen IP; telemetry only on redeem
   iat: number;
   exp: number;
 }
@@ -57,6 +57,7 @@ export interface DeviceTrustVerifyResult {
   ok: boolean;
   reason?: string;
   payload?: DeviceTrustPayload;
+  ipChanged?: boolean;
 }
 
 function b64urlEncodeBytes(buf: Buffer): string {
@@ -92,7 +93,6 @@ export async function mintDeviceTrust(
  *   - HMAC matches
  *   - JSON-parseable payload, v === 1
  *   - exp not in the past
- *   - payload.ip === requesterIp (strict)
  *   - payload.pubkey === expectedPubKey
  */
 export async function verifyDeviceTrust(
@@ -122,8 +122,6 @@ export async function verifyDeviceTrust(
   if (payload.v !== 1) return { ok: false, reason: 'version' };
   const now = Math.floor(Date.now() / 1000);
   if (now > payload.exp) return { ok: false, reason: 'expired' };
-  if (!requesterIp) return { ok: false, reason: 'no_requester_ip' };
-  if (payload.ip !== requesterIp) return { ok: false, reason: 'ip_changed' };
   if (payload.pubkey !== expectedPubKey) return { ok: false, reason: 'pubkey_mismatch' };
-  return { ok: true, payload };
+  return { ok: true, payload, ipChanged: !!requesterIp && payload.ip !== requesterIp };
 }

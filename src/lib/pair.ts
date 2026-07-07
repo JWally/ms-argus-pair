@@ -1017,6 +1017,12 @@ export interface SubmitPhoneAttestationOptions {
   /** When `mode === "oauth"`, the result from one of the
    *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
+  /**
+   * Try only the IndexedDB device-trust token path. Used by the phone's
+   * background fast-pass flow so an expired token never opens WebAuthn
+   * without an explicit user tap.
+   */
+  trustOnly?: boolean;
 }
 
 export async function submitPhoneAttestation(
@@ -1028,6 +1034,9 @@ export async function submitPhoneAttestation(
   // ── Silent redeem path ─────────────────────────────────────────
   const { loadTrustToken, saveTrustToken, clearTrustToken } = await import('./device-trust');
   const trustToken = await loadTrustToken();
+  if (!trustToken && options.trustOnly) {
+    throw new Error('device_trust_unavailable');
+  }
   if (trustToken) {
     events.onStatus?.('welcome back — verifying');
     try {
@@ -1064,9 +1073,11 @@ export async function submitPhoneAttestation(
             if (postErr.status === 401) {
               await clearTrustToken();
               events.onStatus?.('trust expired — re-verifying');
+              if (options.trustOnly) throw postErr;
             } else {
               await clearTrustToken();
               events.onStatus?.('falling back to webauthn');
+              if (options.trustOnly) throw postErr;
             }
           } else {
             throw postErr;
@@ -1077,6 +1088,7 @@ export async function submitPhoneAttestation(
       events.onError?.(e);
       await clearTrustToken();
       events.onStatus?.('falling back to webauthn');
+      if (options.trustOnly) throw e;
     }
   }
 
