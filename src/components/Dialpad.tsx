@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent } from 'react';
+import type { PointerEvent, RefObject } from 'react';
+import { startBioDotPlate } from '../lib/bio-dot-plate';
 
 export interface DialpadProps {
   nonce: string;
@@ -9,7 +10,6 @@ export interface DialpadProps {
 }
 
 const DRAW_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.split('');
-
 function hashChallenge(nonce: string, challengeIndex: number): number {
   let h = 2166136261;
   for (const ch of `${nonce}:${challengeIndex}`) {
@@ -34,17 +34,21 @@ function BioDrawHeader() {
   );
 }
 
-function BioDrawChallenge({ targetLetter }: { targetLetter: string }) {
+function BioDrawChallenge({ targetLetter, seed }: { targetLetter: string; seed: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    return startBioDotPlate(canvas, targetLetter, seed);
+  }, [targetLetter, seed]);
+
   return (
-    <>
-      <div className="timer">00:30.000</div>
-      <div className="challenge-digits">
-        <div className="bio-draw-challenge" aria-label="Draw target">
-          <span>DRAW</span>
-          <strong>{targetLetter}</strong>
-        </div>
+    <div className="challenge-digits">
+      <div className="bio-draw-challenge" aria-label={`Draw ${targetLetter}`}>
+        <span>DRAW</span>
+        <canvas ref={canvasRef} className="bio-draw-dot-canvas" aria-label={targetLetter} />
       </div>
-    </>
+    </div>
   );
 }
 
@@ -81,10 +85,60 @@ function BioDrawActions({
   );
 }
 
+function useBioDrawStart() {
+  const [hasStarted, setHasStarted] = useState(false);
+
+  function start() {
+    if (hasStarted) return;
+    setHasStarted(true);
+  }
+
+  return { hasStarted, start };
+}
+
+function BioDrawCanvas({
+  canvasRef,
+  hasDrawn,
+  hasStarted,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+}: {
+  canvasRef: RefObject<HTMLCanvasElement | null>;
+  hasDrawn: boolean;
+  hasStarted: boolean;
+  onPointerDown(event: PointerEvent<HTMLCanvasElement>): void;
+  onPointerMove(event: PointerEvent<HTMLCanvasElement>): void;
+  onPointerUp(event: PointerEvent<HTMLCanvasElement>): void;
+}) {
+  return (
+    <div className={`canvas-area ${hasDrawn ? 'canvas-active' : 'canvas-idle'}`}>
+      <canvas
+        ref={canvasRef}
+        className="drawing-canvas bio-draw-canvas"
+        aria-label="Draw the requested letter"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      />
+      {!hasStarted && (
+        <div className="canvas-overlay bio-draw-overlay">
+          <p className="canvas-overlay-text">Draw the Character You See Above</p>
+          <p className="canvas-overlay-start">-- CLICK HERE TO START --</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSend }: DialpadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawingRef = useRef(false);
+  const hasDrawnRef = useRef(false);
   const [hasDrawn, setHasDrawn] = useState(false);
+  const { hasStarted, start } = useBioDrawStart();
+  const challengeSeed = hashChallenge(nonce, challengeIndex);
   const targetLetter = useMemo(
     () => drawLetterFromNonce(nonce, challengeIndex),
     [nonce, challengeIndex]
@@ -108,7 +162,10 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
 
   useEffect(() => {
     syncCanvas();
-    const frame = window.requestAnimationFrame(() => setHasDrawn(false));
+    const frame = window.requestAnimationFrame(() => {
+      hasDrawnRef.current = false;
+      setHasDrawn(false);
+    });
     const canvas = canvasRef.current;
     if (!canvas) return () => window.cancelAnimationFrame(frame);
     const ro = new ResizeObserver(syncCanvas);
@@ -118,6 +175,12 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
       ro.disconnect();
     };
   }, [targetLetter]);
+
+  function markDrawn() {
+    if (hasDrawnRef.current) return;
+    hasDrawnRef.current = true;
+    setHasDrawn(true);
+  }
 
   function pointFromEvent(event: PointerEvent<HTMLCanvasElement>) {
     const canvas = event.currentTarget;
@@ -134,10 +197,11 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
     const point = pointFromEvent(event);
     const ctx = event.currentTarget.getContext('2d');
     if (!ctx) return;
+    start();
     drawingRef.current = true;
     ctx.beginPath();
     ctx.moveTo(point.x, point.y);
-    setHasDrawn(true);
+    markDrawn();
   }
 
   function handlePointerMove(event: PointerEvent<HTMLCanvasElement>) {
@@ -152,7 +216,7 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
     ctx.lineJoin = 'round';
     ctx.lineTo(point.x, point.y);
     ctx.stroke();
-    setHasDrawn(true);
+    markDrawn();
   }
 
   function stopDrawing(event: PointerEvent<HTMLCanvasElement>) {
@@ -163,6 +227,7 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
   }
 
   function clear() {
+    hasDrawnRef.current = false;
     setHasDrawn(false);
     syncCanvas();
   }
@@ -171,24 +236,15 @@ export function Dialpad({ nonce, challengeIndex = 0, actionLabel = 'Next', onSen
     <div className="bio-draw app">
       <BioDrawHeader />
       <main>
-        <BioDrawChallenge targetLetter={targetLetter} />
-        <div className={`canvas-area ${hasDrawn ? 'canvas-active' : 'canvas-idle'}`}>
-          <canvas
-            ref={canvasRef}
-            className="drawing-canvas bio-draw-canvas"
-            aria-label="Draw the requested letter"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={stopDrawing}
-            onPointerCancel={stopDrawing}
-          />
-          {!hasDrawn && (
-            <div className="canvas-overlay bio-draw-overlay">
-              <p className="canvas-overlay-text">Draw the Character You See Above</p>
-              <p className="canvas-overlay-start">-- CLICK HERE TO START --</p>
-            </div>
-          )}
-        </div>
+        <BioDrawChallenge targetLetter={targetLetter} seed={challengeSeed} />
+        <BioDrawCanvas
+          canvasRef={canvasRef}
+          hasDrawn={hasDrawn}
+          hasStarted={hasStarted}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={stopDrawing}
+        />
         <BioDrawActions
           hasDrawn={hasDrawn}
           actionLabel={actionLabel}

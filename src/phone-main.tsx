@@ -1,5 +1,6 @@
 import './index.css';
 import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
+import { startBioDotPlate } from './lib/bio-dot-plate';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
@@ -46,6 +47,8 @@ if (!rootElement) throw new Error('root element missing');
 const root = rootElement;
 const phonePerfStartedAt = window.performance.now();
 let firstRenderReported = false;
+let bioDrawStarted = false;
+let stopBioDotPlate: (() => void) | undefined;
 
 const sessionId = sessionIdFromPath();
 const initialNonce = nonceFromPairHash();
@@ -372,6 +375,8 @@ function render(): void {
     renderBioDraw();
     return;
   }
+  stopBioDotPlate?.();
+  stopBioDotPlate = undefined;
   if (state.phase === 'ready') {
     void renderReady();
     return;
@@ -454,7 +459,10 @@ function renderBioDraw(): void {
   const nonce = state.nonce;
   if (!nonce) return;
   const targetLetter = drawLetterFromNonce(nonce, state.challengeIndex);
+  const challengeSeed = hashChallenge(nonce, state.challengeIndex);
   let hasDrawn = false;
+  stopBioDotPlate?.();
+  stopBioDotPlate = undefined;
   root.innerHTML = `
     <div class="bio-draw app">
       <header>
@@ -462,16 +470,17 @@ function renderBioDraw(): void {
         <p class="subtitle">Handwriting Biometric Captcha</p>
       </header>
       <main>
-        <div class="timer">00:30.000</div>
         <div class="challenge-digits">
-          <div class="bio-draw-challenge" aria-label="Draw target">
+          <div class="bio-draw-challenge" aria-label="Draw ${targetLetter}">
             <span>DRAW</span>
-            <strong>${targetLetter}</strong>
+            <canvas class="bio-draw-dot-canvas" aria-label="${targetLetter}"></canvas>
           </div>
         </div>
         <div class="canvas-area canvas-idle">
           <canvas class="drawing-canvas bio-draw-canvas" aria-label="Draw the requested letter"></canvas>
-          <div class="canvas-overlay bio-draw-overlay">
+          <div class="canvas-overlay bio-draw-overlay${
+            bioDrawStarted ? ' bio-draw-overlay-hidden' : ''
+          }">
             <p class="canvas-overlay-text">Draw the Character You See Above</p>
             <p class="canvas-overlay-start">-- CLICK HERE TO START --</p>
           </div>
@@ -483,6 +492,7 @@ function renderBioDraw(): void {
       </main>
     </div>`;
 
+  const plate = root.querySelector<HTMLCanvasElement>('.bio-draw-dot-canvas');
   const canvas = root.querySelector<HTMLCanvasElement>('.bio-draw-canvas');
   const overlay = root.querySelector<HTMLElement>('.bio-draw-overlay');
   const canvasArea = root.querySelector<HTMLElement>('.canvas-area');
@@ -490,6 +500,9 @@ function renderBioDraw(): void {
   const send = root.querySelector<HTMLElement>('.bio-draw-send');
   const ctx = canvas?.getContext('2d', { willReadFrequently: true }) ?? null;
   let drawing = false;
+  if (plate) {
+    stopBioDotPlate = startBioDotPlate(plate, targetLetter, challengeSeed);
+  }
 
   const vibrate = (pattern: number | number[]) => {
     try {
@@ -522,7 +535,7 @@ function renderBioDraw(): void {
   };
 
   const update = () => {
-    overlay?.classList.toggle('bio-draw-overlay-hidden', hasDrawn);
+    overlay?.classList.toggle('bio-draw-overlay-hidden', bioDrawStarted);
     canvasArea?.classList.toggle('canvas-idle', !hasDrawn);
     canvasArea?.classList.toggle('canvas-active', hasDrawn);
     setDisabled(erase, !hasDrawn);
@@ -546,6 +559,7 @@ function renderBioDraw(): void {
     canvas.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
     if (!point) return;
+    bioDrawStarted = true;
     drawing = true;
     ctx.beginPath();
     ctx.moveTo(point.x, point.y);
@@ -564,9 +578,6 @@ function renderBioDraw(): void {
     ctx.lineJoin = 'round';
     ctx.lineTo(point.x, point.y);
     ctx.stroke();
-    if (!hasDrawn) vibrate(5);
-    hasDrawn = true;
-    update();
   });
   const stopTracing = (event: PointerEvent) => {
     drawing = false;
