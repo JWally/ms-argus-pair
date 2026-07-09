@@ -359,6 +359,11 @@ export class PairStack extends cdk.Stack {
       integration,
     });
     api.addRoutes({
+      path: '/api/phone-perf',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
       path: '/api/session/{id}/desktop-attest',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
@@ -640,13 +645,24 @@ export class PairStack extends cdk.Stack {
     }
 
     const distPath = path.join(__dirname, '../../dist');
-    new BucketDeployment(this, 'DeploySite', {
-      sources: [Source.asset(distPath)],
+    new BucketDeployment(this, 'DeploySiteShell', {
+      sources: [Source.asset(distPath, { exclude: ['assets/*'] })],
       destinationBucket: bucket,
       distribution,
       distributionPaths: ['/*'],
+      prune: false,
       memoryLimit: 2096,
       cacheControl: [CacheControl.fromString('public, max-age=0, must-revalidate')],
+    });
+    new BucketDeployment(this, 'DeploySiteAssets', {
+      sources: [Source.asset(path.join(distPath, 'assets'))],
+      destinationBucket: bucket,
+      destinationKeyPrefix: 'assets',
+      distribution,
+      distributionPaths: ['/assets/*'],
+      prune: false,
+      memoryLimit: 1024,
+      cacheControl: [CacheControl.fromString('public, max-age=31536000, immutable')],
     });
 
     new cdk.CfnOutput(this, 'SiteURL', { value: `https://${domainName}` });

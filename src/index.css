@@ -529,6 +529,585 @@
 }
 
 /* ────────────────────────────────────────────────────────────────────
+   Bio draw — cheap ms-argus-bio facsimile for the phone challenge.
+   It is intentionally visual cover for the real background proof work.
+   ──────────────────────────────────────────────────────────────────── */
+
+.bio-draw {
+  --bg: #0a0a12;
+  --surface: #12121f;
+  --surface-2: #1a1a2e;
+  --accent: #6366f1;
+  --accent-glow: rgba(99, 102, 241, 0.3);
+  --success: #22c55e;
+  --success-glow: rgba(34, 197, 94, 0.3);
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --border: #2a2a3e;
+  --canvas-size: min(calc(100vw - 1rem), 600px);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  padding: 1rem 0.5rem;
+  gap: 2rem;
+  touch-action: none;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+.bio-draw header {
+  text-align: center;
+}
+
+.bio-draw header h1 {
+  color: var(--text);
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.bio-draw .accent {
+  color: var(--accent);
+}
+
+.bio-draw .subtitle {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
+}
+
+.bio-draw main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.bio-draw .timer {
+  color: var(--border);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 2.25rem;
+  font-weight: 300;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+  text-align: center;
+}
+
+.bio-draw .challenge-digits {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--canvas-size);
+  margin-bottom: 0.5rem;
+}
+
+.bio-draw-challenge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 10.7rem;
+  overflow: hidden;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgb(99 102 241 / 0.1) 0,
+      rgb(99 102 241 / 0.1) 3px,
+      transparent 3px,
+      transparent 8px
+    ),
+    radial-gradient(circle at 50% 50%, rgb(99 102 241 / 0.22), transparent 24%), var(--surface-2);
+}
+
+.bio-draw-challenge::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, rgb(226 232 240 / 0.34) 0 1px, transparent 1px);
+  background-size: 9px 9px;
+  opacity: 0.24;
+}
+
+.bio-draw-challenge span {
+  position: absolute;
+  top: 0.65rem;
+  left: 0.85rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.bio-draw-challenge strong {
+  position: relative;
+  color: #e9d5ff;
+  font-size: 6rem;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow:
+    0 0 12px rgb(99 102 241 / 0.72),
+    0 0 24px rgb(168 85 247 / 0.42);
+}
+
+.bio-draw .canvas-area {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bio-draw .drawing-canvas {
+  width: var(--canvas-size);
+  height: calc(var(--canvas-size) / 2);
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  background: #000;
+  touch-action: none;
+  transition:
+    opacity 0.3s,
+    border-color 0.3s;
+}
+
+.bio-draw .canvas-idle .drawing-canvas {
+  cursor: pointer;
+}
+
+.bio-draw .canvas-active .drawing-canvas {
+  cursor: crosshair;
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.bio-draw .canvas-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  cursor: pointer;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.bio-draw .canvas-overlay-text {
+  color: var(--text);
+  font-size: clamp(1.4rem, 4vw, 2.5rem);
+  font-weight: 300;
+  padding: 0 1.5rem;
+  text-align: center;
+}
+
+.bio-draw .canvas-overlay-start {
+  color: #22c55e;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: clamp(0.85rem, 2.5vw, 1.25rem);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  animation: bio-draw-throb 1.5s ease-in-out infinite;
+}
+
+.bio-draw-overlay-hidden {
+  opacity: 0;
+}
+
+.bio-draw .action-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  width: var(--canvas-size, 280px);
+  margin-top: 1rem;
+}
+
+.bio-draw .btn {
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.75rem 2rem;
+  transition: all 0.2s;
+}
+
+.bio-draw .btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.bio-draw .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.bio-draw .btn-stack {
+  width: 100%;
+  padding: 0.875rem;
+  font-size: 1.1rem;
+}
+
+.bio-draw .btn-next {
+  border: 2px solid #22c55e;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
+}
+
+.bio-draw .btn-erase {
+  border: 2px solid var(--accent);
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+@keyframes bio-draw-throb {
+  0%,
+  100% {
+    opacity: 0.5;
+    text-shadow: 0 0 8px rgba(34, 197, 94, 0.3);
+  }
+  50% {
+    opacity: 1;
+    text-shadow: 0 0 20px rgba(34, 197, 94, 0.6);
+  }
+}
+
+.trace-lock {
+  --pink: #ff4fd8;
+  --pink-soft: rgb(255 79 216 / 0.38);
+  --pink-hot: #ff7ae6;
+  --green: #6ee7b7;
+  --panel: rgb(0 0 0 / 0.94);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #000;
+  color: white;
+  padding: max(env(safe-area-inset-top), 1rem) 1rem max(env(safe-area-inset-bottom), 1rem);
+  gap: 0.9rem;
+  touch-action: none;
+}
+
+.trace-lock::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgb(255 255 255 / 0.035) 0,
+      rgb(255 255 255 / 0.035) 1px,
+      transparent 1px,
+      transparent 5px
+    ),
+    linear-gradient(90deg, transparent, rgb(255 255 255 / 0.04), transparent);
+  mix-blend-mode: screen;
+  opacity: 0.34;
+}
+
+.trace-lock-glow {
+  display: none;
+}
+
+.trace-lock-header,
+.trace-lock-target,
+.trace-lock-board,
+.trace-lock-status,
+.trace-lock-send {
+  position: relative;
+  z-index: 1;
+}
+
+.trace-lock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+}
+
+.trace-lock-brand {
+  font-size: 1rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  color: rgb(255 255 255 / 0.9);
+  text-shadow: 0 0 12px rgb(255 79 216 / 0.45);
+}
+
+.trace-lock-brand span {
+  color: var(--pink-hot);
+}
+
+.trace-lock-mode {
+  border: 1px solid rgb(255 79 216 / 0.36);
+  border-radius: 999px;
+  padding: 0.36rem 0.55rem;
+  background: rgb(255 79 216 / 0.08);
+  color: rgb(255 214 247 / 0.86);
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.15em;
+  text-shadow: 0 0 12px rgb(255 79 216 / 0.55);
+}
+
+.trace-lock-target {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3.5rem;
+  padding: 0.45rem 0.4rem 0.2rem;
+}
+
+.trace-lock-target-label {
+  color: rgb(255 214 247 / 0.9);
+  font-size: clamp(1.18rem, 5.6vw, 1.58rem);
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-shadow: 0 0 8px rgb(255 79 216 / 0.46);
+}
+
+.trace-lock-board {
+  flex: 1 1 auto;
+  min-height: 23rem;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.trace-lock-board::before {
+  content: none;
+}
+
+.trace-lock-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.trace-lock-stroke,
+.trace-lock-live {
+  fill: none;
+  stroke: var(--green);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.7;
+  filter: drop-shadow(0 0 5px rgb(110 231 183 / 0.9)) drop-shadow(0 0 16px rgb(16 185 129 / 0.4));
+}
+
+.trace-lock-live {
+  display: none;
+  stroke: rgb(255 79 216 / 0.78);
+  stroke-width: 2;
+}
+
+.trace-lock-live-on {
+  display: block;
+}
+
+.trace-lock-dot {
+  appearance: none;
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.1rem;
+  height: 3.1rem;
+  border: 1.5px solid rgb(255 79 216 / 0.48);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 50% 42%, rgb(255 255 255 / 0.16), transparent 32%), rgb(10 0 9 / 0.95);
+  color: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.72);
+  box-shadow:
+    inset 0 0 12px rgb(255 79 216 / 0.13),
+    0 0 10px rgb(255 79 216 / 0.12);
+  transition:
+    background 160ms ease-out,
+    border-color 160ms ease-out,
+    opacity 160ms ease-out,
+    box-shadow 160ms ease-out,
+    transform 100ms ease-out;
+}
+
+.trace-lock-dot-visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.trace-lock-dot-next {
+  border-color: rgb(255 79 216 / 0.86);
+  box-shadow:
+    inset 0 0 14px rgb(255 79 216 / 0.18),
+    0 0 18px rgb(255 79 216 / 0.28);
+  animation: trace-lock-target-throb 1s ease-in-out infinite;
+}
+
+.trace-lock-dot-done {
+  border-color: rgb(110 231 183 / 0.95);
+  background:
+    radial-gradient(circle at 50% 42%, rgb(255 255 255 / 0.24), transparent 32%),
+    rgb(6 78 59 / 0.92);
+  transform: translate(-50%, -50%) scale(0.94);
+  box-shadow:
+    inset 0 0 18px rgb(16 185 129 / 0.3),
+    0 0 26px rgb(16 185 129 / 0.46);
+}
+
+.trace-lock-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  min-height: 1.4rem;
+  color: rgb(255 214 247 / 0.76);
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+}
+
+.trace-lock-status-light {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--pink);
+  box-shadow: 0 0 14px var(--pink-soft);
+}
+
+.trace-lock-status-light-ready {
+  background: var(--green);
+  box-shadow: 0 0 18px rgb(110 231 183 / 0.75);
+}
+
+.trace-lock-send {
+  appearance: none;
+  display: none;
+  width: 100%;
+  border: 1.5px solid rgb(255 79 216 / 0.28);
+  border-radius: 8px;
+  background: rgb(255 79 216 / 0.055);
+  color: rgb(255 214 247 / 0.38);
+  cursor: not-allowed;
+  font-family:
+    'SF Pro Display',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+  font-size: 0.95rem;
+  font-weight: 850;
+  letter-spacing: 0.38em;
+  padding: 1.05rem 0;
+  text-indent: 0.38em;
+  transition:
+    background 160ms ease-out,
+    border-color 160ms ease-out,
+    color 160ms ease-out,
+    box-shadow 160ms ease-out,
+    transform 80ms ease-out;
+}
+
+.trace-lock-send-visible {
+  display: block;
+}
+
+.trace-lock-send-armed {
+  border-color: rgb(110 231 183 / 0.85);
+  background:
+    linear-gradient(180deg, rgb(110 231 183 / 0.17), rgb(16 185 129 / 0.08)), rgb(6 78 59 / 0.18);
+  color: #d1fae5;
+  cursor: pointer;
+  text-shadow: 0 0 12px rgb(110 231 183 / 0.78);
+  box-shadow:
+    0 0 0 1px rgb(110 231 183 / 0.2),
+    0 0 30px rgb(16 185 129 / 0.32);
+  animation: trace-lock-done-pulse 1.05s ease-in-out infinite;
+}
+
+.trace-lock-send-armed:active {
+  transform: translateY(1px) scale(0.995);
+}
+
+@keyframes trace-lock-target-throb {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    box-shadow:
+      inset 0 0 14px rgb(255 79 216 / 0.18),
+      0 0 14px rgb(255 79 216 / 0.22);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.08);
+    box-shadow:
+      inset 0 0 18px rgb(255 79 216 / 0.24),
+      0 0 24px rgb(255 79 216 / 0.36);
+  }
+}
+
+@keyframes trace-lock-done-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+    box-shadow:
+      0 0 0 1px rgb(110 231 183 / 0.2),
+      0 0 24px rgb(16 185 129 / 0.28);
+  }
+  50% {
+    filter: brightness(1.24);
+    box-shadow:
+      0 0 0 1px rgb(110 231 183 / 0.44),
+      0 0 42px rgb(16 185 129 / 0.58);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-lock::before {
+    opacity: 0.18;
+  }
+
+  .trace-lock-send-armed {
+    animation: none;
+  }
+
+  .trace-lock-dot-next {
+    animation: none;
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────
    Dialer — iPhone Phone-app silhouette in site-purple neon. Shown on
    the silent-reauth path as the held-confirmation step. Pure black
    bg, purple rounded-square keypad with phone-letters under each
