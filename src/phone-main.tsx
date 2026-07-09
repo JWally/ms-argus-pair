@@ -1,7 +1,7 @@
 import './index.css';
 import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
 
-// Tiny DOM phone entry. It paints the cheap dialpad from the QR hash first,
+// Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
 type ProofChoice = 'passkey' | 'google';
 type Phase =
@@ -18,12 +18,6 @@ type Phase =
 
 type PairModule = typeof import('./lib/pair');
 type OAuthModule = typeof import('./lib/oauth');
-
-interface Challenge {
-  left: number;
-  right: number;
-  answer: string;
-}
 
 interface Runtime {
   pairMod?: PairModule;
@@ -45,24 +39,13 @@ interface Runtime {
   ctl: AbortController;
 }
 
-const KEYS = [
-  ['1', ' '],
-  ['2', 'ABC'],
-  ['3', 'DEF'],
-  ['4', 'GHI'],
-  ['5', 'JKL'],
-  ['6', 'MNO'],
-  ['7', 'PQRS'],
-  ['8', 'TUV'],
-  ['9', 'WXYZ'],
-  ['*', ' '],
-  ['0', '+'],
-  ['#', ' '],
-] as const;
+const DRAW_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.split('');
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
 const root = rootElement;
+const phonePerfStartedAt = window.performance.now();
+let firstRenderReported = false;
 
 const sessionId = sessionIdFromPath();
 const initialNonce = nonceFromPairHash();
@@ -87,6 +70,7 @@ const state: Runtime = {
 // blob, then hand off to the normal /pair flow (below) untouched.
 const pairToken = window.location.pathname.match(/^\/p\/([A-Za-z0-9_-]+)/)?.[1];
 if (pairToken) {
+  sendPhonePerf('token_redeem_start', { entry: 'pair_token' });
   void redeemPairTokenAndGo(pairToken);
 } else {
   if (!sessionId) state.phase = 'error';
@@ -134,11 +118,13 @@ async function redeemPairTokenAndGo(token: string): Promise<void> {
       pt: string;
       n: string;
     };
+    sendPhonePerf('token_redeem_done', { entry: 'pair_token', sessionId: b.sessionId });
     const hash = new URLSearchParams({ wsUrl: b.wsUrl, e: b.e, pt: b.pt, n: b.n }).toString();
     window.location.replace(
       `/pair/${encodeURIComponent(b.sessionId)}${window.location.search}#${hash}`
     );
   } catch {
+    sendPhonePerf('token_redeem_error', { entry: 'pair_token' });
     state.phase = 'error';
     render();
   }
@@ -160,6 +146,7 @@ function setState(patch: Partial<Runtime>): void {
 
 async function bootstrap(): Promise<void> {
   if (!sessionId) return;
+  sendPhonePerf('bootstrap_start');
   try {
     const [pairMod, trustMod] = await Promise.all([
       import('./lib/pair'),
@@ -167,10 +154,12 @@ async function bootstrap(): Promise<void> {
     ]);
     if (state.ctl.signal.aborted) return;
     state.pairMod = pairMod;
+    sendPhonePerf('pair_import_done');
 
     let trustSettled = false;
     const trustFallback = window.setTimeout(() => {
       if (trustSettled || state.ctl.signal.aborted) return;
+      sendPhonePerf('trust_check_timeout');
       setState({ trustChecked: true });
     }, 1500);
     void trustMod.loadTrustToken().then((trustToken) => {
@@ -182,18 +171,23 @@ async function bootstrap(): Promise<void> {
         passkeyHint: pairMod.hasPasskeyHint(),
         trustChecked: true,
       });
+      sendPhonePerf('trust_check_done', { hasTrust: Boolean(trustToken) });
       maybeStartFastPass();
     });
 
     const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal);
     if (state.ctl.signal.aborted) return;
-    state.info = info;
+    state.info = instrumentScan(info);
     state.nonce = info.nonce;
     state.desktopReady = true;
+    sendPhonePerf('desktop_ready', {
+      hasTrust: state.hasTrust,
+      startedInChallenge: state.startedInChallenge,
+    });
     if (state.hasTrust) {
       // Hide the scan latency behind the dialpad as soon as the trusted-device
       // path is possible. The eventual POST is still device-trust only.
-      void info.getScanPromise();
+      void state.info.getScanPromise();
     }
     if (!state.startedInChallenge) state.phase = 'ready';
     render();
@@ -201,6 +195,7 @@ async function bootstrap(): Promise<void> {
   } catch (e) {
     if (state.ctl.signal.aborted) return;
     const msg = e instanceof Error ? e.message : String(e);
+    sendPhonePerf('bootstrap_error', { error: msg.slice(0, 80) });
     if (msg.includes("didn't finish scanning") || msg.includes('session expired')) {
       setState({ phase: 'timeout' });
     } else {
@@ -224,6 +219,7 @@ function maybeStartFastPass(): void {
     return;
   }
   state.fastPassAttempted = true;
+  sendPhonePerf('fast_pass_attempt');
   void pair('passkey', { keepDialpad: true, trustOnly: true });
 }
 
@@ -261,12 +257,19 @@ async function pair(
   opts: { keepDialpad?: boolean; trustOnly?: boolean } = {}
 ): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
+  sendPhonePerf('pair_start', { proofMode, trustOnly: opts.trustOnly === true });
   state.inflight = true;
-  setState({
-    ...(opts.keepDialpad ? {} : { phase: state.hasTrust ? 'returning' : 'pairing' }),
-    status: 'starting',
-    errorMsg: null,
-  });
+  if (opts.keepDialpad) {
+    state.status = 'starting';
+    state.errorMsg = null;
+    updateBioDrawActionLabel();
+  } else {
+    setState({
+      phase: state.hasTrust ? 'returning' : 'pairing',
+      status: 'starting',
+      errorMsg: null,
+    });
+  }
   try {
     const passkeyMode = state.passkeyHint ? 'passkey-auth' : 'passkey-create';
     const options: SubmitPhoneAttestationOptions = {
@@ -282,11 +285,21 @@ async function pair(
       options.oauthResult = oauthResult;
     }
 
-    const events: PairEvents = { onStatus: (status) => setState({ status }) };
+    const events: PairEvents = {
+      onStatus: (status) => {
+        if (opts.keepDialpad) {
+          state.status = status;
+          updateBioDrawActionLabel();
+          return;
+        }
+        setState({ status });
+      },
+    };
     const result = await state.pairMod.submitPhoneAttestation(sessionId, state.info, events, {
       ...options,
       trustOnly: opts.trustOnly,
     });
+    sendPhonePerf('attest_done', { verdict: result.verdict, trustOnly: opts.trustOnly === true });
     if (
       passkeyMode === 'passkey-auth' &&
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
@@ -294,11 +307,18 @@ async function pair(
       state.pairMod.clearPasskeyHint();
       state.passkeyHint = false;
     }
-    setState({
-      verdict: result.verdict,
-      status: result.verdict === 'paired' ? 'done' : state.status,
-      phase: result.verdict === 'paired' ? (opts.keepDialpad ? 'challenge' : 'paired') : 'failed',
-    });
+    if (opts.keepDialpad && result.verdict === 'paired') {
+      state.verdict = result.verdict;
+      state.status = 'done';
+      state.phase = 'challenge';
+      updateBioDrawActionLabel();
+    } else {
+      setState({
+        verdict: result.verdict,
+        status: result.verdict === 'paired' ? 'done' : state.status,
+        phase: result.verdict === 'paired' ? 'paired' : 'failed',
+      });
+    }
     if (!opts.keepDialpad && (result.verdict === 'paired' || result.verdict === 'failed')) {
       window.setTimeout(
         () => {
@@ -313,6 +333,7 @@ async function pair(
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    sendPhonePerf('pair_error', { trustOnly: opts.trustOnly === true, error: msg.slice(0, 80) });
     if (opts.keepDialpad) {
       state.hasTrust = false;
       setState({
@@ -345,16 +366,10 @@ function hashChallenge(nonce: string, challengeIndex: number): number {
   return h >>> 0;
 }
 
-function challengeFromNonce(nonce: string, challengeIndex: number): Challenge {
-  const h = hashChallenge(nonce, challengeIndex);
-  const left = 2 + (h % 8);
-  const right = 2 + (Math.floor(h / 11) % 8);
-  return { left, right, answer: String(left * right) };
-}
-
 function render(): void {
+  reportFirstRender();
   if ((state.phase === 'challenge' || state.phase === 'awaiting-desktop') && state.nonce) {
-    renderDialpad();
+    renderBioDraw();
     return;
   }
   if (state.phase === 'ready') {
@@ -364,79 +379,118 @@ function render(): void {
   renderPanel();
 }
 
-function renderDialpad(): void {
+function reportFirstRender(): void {
+  if (firstRenderReported) return;
+  firstRenderReported = true;
+  queueMicrotask(() => sendPhonePerf('first_render', { initialPhase: state.phase }));
+}
+
+function instrumentScan(info: PhoneSessionInfo): PhoneSessionInfo {
+  let scanStarted = false;
+  let scanSettled = false;
+  return {
+    ...info,
+    getScanPromise: () => {
+      if (!scanStarted) {
+        scanStarted = true;
+        sendPhonePerf('scan_start', { hasTrust: state.hasTrust });
+      }
+      return info.getScanPromise().then(
+        (result) => {
+          if (!scanSettled) {
+            scanSettled = true;
+            sendPhonePerf('scan_done', {
+              hasTrust: state.hasTrust,
+              attested: Boolean(result.attestation),
+              durationMs: Math.round(result.durationMs),
+            });
+          }
+          return result;
+        },
+        (error: unknown) => {
+          if (!scanSettled) {
+            scanSettled = true;
+            sendPhonePerf('scan_error', {
+              hasTrust: state.hasTrust,
+              error:
+                error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
+            });
+          }
+          throw error;
+        }
+      );
+    },
+  };
+}
+
+function sendPhonePerf(event: string, extra: Record<string, unknown> = {}): void {
+  try {
+    const payload = JSON.stringify({
+      event,
+      sessionId,
+      elapsedMs: Math.round(window.performance.now() - phonePerfStartedAt),
+      pathKind: pairToken ? 'pair_token' : sessionId ? 'pair' : 'unknown',
+      phase: state.phase,
+      hasTrust: state.hasTrust,
+      trustChecked: state.trustChecked,
+      desktopReady: state.desktopReady,
+      ...extra,
+    });
+    if (navigator.sendBeacon?.('/api/phone-perf', payload)) return;
+    void fetch('/api/phone-perf', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload,
+      keepalive: true,
+    }).catch(() => {
+      /* best-effort telemetry */
+    });
+  } catch {
+    /* best-effort telemetry */
+  }
+}
+
+function renderBioDraw(): void {
   const nonce = state.nonce;
   if (!nonce) return;
-  const challenge = challengeFromNonce(nonce, state.challengeIndex);
-  let entered = '';
-  let complete = false;
-  const readyToContinue = state.desktopReady && state.trustChecked;
-  const actionLabel =
-    state.verdict === 'paired'
-      ? 'DONE'
-      : state.hasTrust && state.inflight
-        ? 'NEXT'
-        : readyToContinue
-          ? 'SEND'
-          : 'NEXT';
+  const targetLetter = drawLetterFromNonce(nonce, state.challengeIndex);
+  let hasDrawn = false;
   root.innerHTML = `
-    <div class="dialer">
-      <div class="dialer-screen">
-        <div class="dialer-prompt">Solve this</div>
-        <div class="dialer-display-row">
-          <span class="dialer-display-spacer" aria-hidden></span>
-          <div class="dialer-display"><span class="dialer-equation"></span></div>
-          <button type="button" class="dialer-backspace" aria-label="Backspace" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="dialer-backspace-icon" aria-hidden="true">
-              <path d="M21 5H9.5a2 2 0 0 0-1.5.7L2 12l6 6.3a2 2 0 0 0 1.5.7H21a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"></path>
-              <line x1="18" y1="9" x2="12" y2="15"></line>
-              <line x1="12" y1="9" x2="18" y2="15"></line>
-            </svg>
-          </button>
+    <div class="bio-draw app">
+      <header>
+        <h1>ARGUS <span class="accent">PAIR</span></h1>
+        <p class="subtitle">Handwriting Biometric Captcha</p>
+      </header>
+      <main>
+        <div class="timer">00:30.000</div>
+        <div class="challenge-digits">
+          <div class="bio-draw-challenge" aria-label="Draw target">
+            <span>DRAW</span>
+            <strong>${targetLetter}</strong>
+          </div>
         </div>
-      </div>
-      <div class="dialer-keypad">
-        ${KEYS.map(
-          ([digit, letters]) => `
-          <button type="button" class="dialer-key" data-digit="${digit}" aria-label="Dial ${digit}">
-            <span class="dialer-key-digit">${digit}</span>
-            <span class="dialer-key-letters">${letters}</span>
-          </button>`
-        ).join('')}
-      </div>
-      <button type="button" disabled class="dialer-send">${actionLabel}</button>
+        <div class="canvas-area canvas-idle">
+          <canvas class="drawing-canvas bio-draw-canvas" aria-label="Draw the requested letter"></canvas>
+          <div class="canvas-overlay bio-draw-overlay">
+            <p class="canvas-overlay-text">Draw the Character You See Above</p>
+            <p class="canvas-overlay-start">-- CLICK HERE TO START --</p>
+          </div>
+        </div>
+        <div class="action-stack">
+          <button type="button" disabled class="btn btn-next btn-stack bio-draw-send">Next</button>
+          <button type="button" disabled class="btn btn-erase btn-stack bio-draw-erase">Erase</button>
+        </div>
+      </main>
     </div>`;
 
-  const display = root.querySelector('.dialer-display');
-  const equation = root.querySelector('.dialer-equation');
-  const backspace = root.querySelector('.dialer-backspace');
-  const keypad = root.querySelector('.dialer-keypad');
-  const send = root.querySelector('.dialer-send');
-  const keyButtons = [...root.querySelectorAll('.dialer-key')];
+  const canvas = root.querySelector<HTMLCanvasElement>('.bio-draw-canvas');
+  const overlay = root.querySelector<HTMLElement>('.bio-draw-overlay');
+  const canvasArea = root.querySelector<HTMLElement>('.canvas-area');
+  const erase = root.querySelector<HTMLElement>('.bio-draw-erase');
+  const send = root.querySelector<HTMLElement>('.bio-draw-send');
+  const ctx = canvas?.getContext('2d', { willReadFrequently: true }) ?? null;
+  let drawing = false;
 
-  const update = () => {
-    complete = entered === challenge.answer;
-    if (equation) {
-      equation.innerHTML = `${challenge.left} x ${challenge.right} = ${entered}${
-        complete ? '' : '<span class="dialer-caret" aria-hidden="true"></span>'
-      }`;
-    }
-    backspace?.classList.toggle('dialer-backspace-on', entered.length > 0 && !complete);
-    setDisabled(backspace, entered.length === 0 || complete);
-    keypad?.classList.toggle('dialer-keypad-muted', complete);
-    if (send) {
-      setDisabled(send, !complete);
-      send.classList.toggle('dialer-send-armed', complete);
-    }
-    for (const button of keyButtons) {
-      const digit = button.getAttribute('data-digit') ?? '';
-      setDisabled(button, complete);
-      button.classList.toggle(
-        'dialer-key-target',
-        !complete && digit === challenge.answer[entered.length]
-      );
-    }
-  };
   const vibrate = (pattern: number | number[]) => {
     try {
       navigator.vibrate?.(pattern);
@@ -444,36 +498,96 @@ function renderDialpad(): void {
       /* noop */
     }
   };
-  const shake = () => {
-    display?.classList.add('dialer-shake');
-    window.setTimeout(() => display?.classList.remove('dialer-shake'), 180);
+
+  const syncCanvas = () => {
+    if (!canvas || !ctx) return;
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   };
-  const press = (digit: string) => {
-    if (complete) return;
-    if (digit === 'backspace') {
-      entered = entered.slice(0, -1);
-      vibrate(4);
-      update();
-      return;
+
+  const pointFromEvent = (event: PointerEvent) => {
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+
+  const update = () => {
+    overlay?.classList.toggle('bio-draw-overlay-hidden', hasDrawn);
+    canvasArea?.classList.toggle('canvas-idle', !hasDrawn);
+    canvasArea?.classList.toggle('canvas-active', hasDrawn);
+    setDisabled(erase, !hasDrawn);
+    if (send) {
+      setDisabled(send, !hasDrawn);
     }
-    if (!/^[0-9]$/.test(digit)) return;
-    const expected = challenge.answer[entered.length];
-    if (digit !== expected) {
-      shake();
-      vibrate(8);
-      return;
-    }
-    entered += digit;
-    vibrate(entered === challenge.answer ? [18, 40, 18] : 4);
+  };
+
+  const clear = () => {
+    hasDrawn = false;
+    syncCanvas();
     update();
   };
 
-  backspace?.addEventListener('click', () => press('backspace'));
-  for (const button of keyButtons) {
-    button.addEventListener('click', () => press(button.getAttribute('data-digit') ?? ''));
-  }
+  syncCanvas();
+  new ResizeObserver(syncCanvas).observe(canvas!);
+
+  canvas?.addEventListener('pointerdown', (event) => {
+    if (!ctx || !canvas) return;
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    const point = pointFromEvent(event);
+    if (!point) return;
+    drawing = true;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y);
+    if (!hasDrawn) vibrate(5);
+    hasDrawn = true;
+    update();
+  });
+  canvas?.addEventListener('pointermove', (event) => {
+    if (!drawing || !ctx) return;
+    event.preventDefault();
+    const point = pointFromEvent(event);
+    if (!point) return;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 18;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+    if (!hasDrawn) vibrate(5);
+    hasDrawn = true;
+    update();
+  });
+  const stopTracing = (event: PointerEvent) => {
+    drawing = false;
+    if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  };
+  canvas?.addEventListener('pointerup', stopTracing);
+  canvas?.addEventListener('pointercancel', stopTracing);
+  erase?.addEventListener('click', clear);
   send?.addEventListener('click', advanceChallenge);
   update();
+  updateBioDrawActionLabel();
+}
+
+function drawLetterFromNonce(nonce: string, challengeIndex: number): string {
+  return DRAW_LETTERS[hashChallenge(nonce, challengeIndex) % DRAW_LETTERS.length];
+}
+
+function updateBioDrawActionLabel(): void {
+  const send = root.querySelector<HTMLButtonElement>('.bio-draw-send');
+  if (!send) return;
+  send.textContent = state.verdict === 'paired' ? 'DONE' : 'Next';
 }
 
 function setDisabled(
