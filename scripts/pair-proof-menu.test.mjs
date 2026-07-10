@@ -22,17 +22,19 @@ assert(
 );
 
 assert(
-  pairPage.includes('hasPasskeyHint') && pairPage.includes('clearPasskeyHint'),
-  'Pair page should restore passkey hint handling for the proof menu'
+  pairPage.includes('clearPasskeyHint'),
+  'Pair page should clear stale passkey hints when the server rejects a credential'
 );
 
 assert(
-  pairPage.includes("type ProofChoice = 'passkey' | 'google'"),
-  'Pair page should model one passkey choice plus Google'
+  pairPage.includes("type ProofChoice = 'passkey' | 'passkey-create' | 'google'"),
+  'Pair page should model passkey use, passkey create, and Google'
 );
 
 assert(
-  pairPage.includes("mode: proofMode === 'google' ? 'oauth' : passkeyMode") &&
+  pairPage.includes("const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'") &&
+    phoneEntry.includes("const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'") &&
+    pairPage.includes("mode: proofMode === 'google' ? 'oauth' : passkeyMode") &&
     phoneEntry.includes("mode: proofMode === 'google' ? 'oauth' : passkeyMode"),
   'submitPhoneAttestation should receive oauth or internally selected passkey mode'
 );
@@ -55,12 +57,12 @@ assert(
 
 assert(
   pairPage.includes("pair('passkey')") &&
+    pairPage.includes("pair('passkey-create')") &&
     !pairPage.includes("pair('passkey-auth')") &&
-    !pairPage.includes("pair('passkey-create')") &&
     phoneEntry.includes("pair('passkey')") &&
-    !phoneEntry.includes("pair('passkey-auth')") &&
-    !phoneEntry.includes("pair('passkey-create')"),
-  'Phone UIs should render exactly one passkey action'
+    phoneEntry.includes("pair('passkey-create')") &&
+    !phoneEntry.includes("pair('passkey-auth')"),
+  'Phone UIs should render passkey use and explicit passkey creation actions'
 );
 
 if (process.exitCode) process.exit(process.exitCode);

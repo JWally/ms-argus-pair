@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom';
 import {
   awaitDesktopReady,
   clearPasskeyHint,
-  hasPasskeyHint,
   submitPhoneAttestation,
   type PhoneSessionInfo,
 } from '../lib/pair';
@@ -19,7 +18,7 @@ import {
   TerminalScreen,
 } from './PairScreens';
 
-type ProofChoice = 'passkey' | 'google';
+type ProofChoice = 'passkey' | 'passkey-create' | 'google';
 
 type Phase =
   | 'awaiting-desktop'
@@ -57,7 +56,6 @@ export function Pair() {
   const [verdict, setVerdict] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hasTrust, setHasTrust] = useState(false);
-  const [passkeyHint, setPasskeyHint] = useState(false);
   const [trustChecked, setTrustChecked] = useState(false);
   const [nonce, setNonce] = useState<string | null>(initialNonce);
   const [challengeIndex, setChallengeIndex] = useState(0);
@@ -87,7 +85,6 @@ export function Pair() {
           window.clearTimeout(trustFallback);
           if (ctl.signal.aborted) return;
           setHasTrust(!!trustToken);
-          setPasskeyHint(hasPasskeyHint());
           setTrustChecked(true);
         });
 
@@ -151,7 +148,7 @@ export function Pair() {
     setStatus('starting');
     setErrorMsg(null);
     try {
-      const passkeyMode = passkeyHint ? 'passkey-auth' : 'passkey-create';
+      const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
       const oauthResult =
         proofMode === 'google' ? await runOAuthProofOfLife('google', info.nonce) : null;
       if (oauthResult && isOAuthError(oauthResult)) {
@@ -175,7 +172,6 @@ export function Pair() {
         r.annotations?.phone_webauthn_error === 'credential_not_registered'
       ) {
         clearPasskeyHint();
-        setPasskeyHint(false);
       }
       setVerdict(r.verdict);
       setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
@@ -186,7 +182,11 @@ export function Pair() {
       if (msg.includes('session_paired_with_other_device')) {
         setPhase('taken');
       } else {
-        setPhase('error');
+        if (phase === 'ready' || proofMode === 'passkey' || proofMode === 'passkey-create') {
+          setPhase('ready');
+        } else {
+          setPhase('error');
+        }
         setErrorMsg(msg);
       }
     } finally {
@@ -242,6 +242,7 @@ export function Pair() {
           googleConfigured={PROVIDERS_CONFIGURED.google}
           onConfirm={() => pair()}
           onPasskey={() => pair('passkey')}
+          onCreatePasskey={() => pair('passkey-create')}
           onGoogle={() => pair('google')}
         />
       )}
