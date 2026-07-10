@@ -872,6 +872,9 @@ export async function awaitDesktopReady(
 }
 
 /**
+ * @public — called by phone-main via the dynamically imported pair module
+ * (`state.pairMod.signalChallengeDone`), which knip cannot trace.
+ *
  * Tell the desktop the user finished the drawing challenge. Releases the
  * desktop-side reveal gate armed by `phone-here {challenge:true}` — the
  * verdict itself always travels server→desktop; this only un-holds it.
