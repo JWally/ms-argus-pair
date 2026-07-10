@@ -369,11 +369,42 @@ export async function startDesktopSession(
   // Settle exactly once. The WS verdict push (fast path, from /phone-attest)
   // and the /result poll (fallback) race — whichever lands first wins; later
   // calls and the expiry timer become no-ops.
+  //
+  // Reveal gate: when the phone announced it is showing the drawing
+  // challenge (phone-here carries challenge:true), a `paired` verdict is
+  // HELD — verification already finished in the background — until the
+  // phone relays `phone-done` (user tapped DONE / left the challenge).
+  // Otherwise the desktop flips to Verified while the user is mid-letter.
+  // Failures reveal immediately, and a cap + the session-expiry timer
+  // release the hold so a vanished phone can't wedge the desktop.
   let settled = false;
+  let phoneInChallenge = false;
+  let phoneDone = false;
+  let heldVerdict: VerdictShape | null = null;
+  let holdCapTimer: number | null = null;
   const settle = (v: VerdictShape) => {
     if (settled) return;
+    if (v.verdict === 'paired' && phoneInChallenge && !phoneDone) {
+      if (!heldVerdict) {
+        heldVerdict = v;
+        holdCapTimer = window.setTimeout(releaseHeldVerdict, 90_000);
+      }
+      return;
+    }
     settled = true;
     resolveResult(v);
+  };
+  const releaseHeldVerdict = () => {
+    phoneDone = true;
+    if (holdCapTimer !== null) {
+      window.clearTimeout(holdCapTimer);
+      holdCapTimer = null;
+    }
+    if (heldVerdict) {
+      const v = heldVerdict;
+      heldVerdict = null;
+      settle(v);
+    }
   };
   const fail = (e: unknown) => {
     if (settled) return;
@@ -385,10 +416,12 @@ export async function startDesktopSession(
     hasStartedResultPoll = true;
     (async () => {
       let stepMs = initialDelayMs;
-      while (!cancelled && !settled) {
+      // heldVerdict also stops the poll — the verdict is already known,
+      // it's just waiting on the phone's DONE tap to be revealed.
+      while (!cancelled && !settled && !heldVerdict) {
         await new Promise((r) => window.setTimeout(r, stepMs));
         stepMs = Math.min(10_000, Math.max(2_000, Math.round(stepMs * 1.5)));
-        if (cancelled || settled) return;
+        if (cancelled || settled || heldVerdict) return;
         try {
           const res = await fetch(
             `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
@@ -421,12 +454,20 @@ export async function startDesktopSession(
     if (!data || typeof data.kind !== 'string') return;
     if (data.kind === 'phone-here') {
       phoneEnvelope = msg.fromEnvelope;
+      if ((data as { challenge?: boolean }).challenge === true) phoneInChallenge = true;
       if (!notifiedPhoneConnected) {
         notifiedPhoneConnected = true;
         events.onPhoneConnected?.();
         startResultPoll(isDesktopWsConnected ? 20_000 : 0);
       }
       sendReadyIfBothUp();
+    } else if (data.kind === 'phone-done') {
+      // The phone user finished the drawing challenge (tapped DONE or the
+      // challenge screen was dismissed). Only the real phone role can send
+      // this — the relay stamps `from` server-side. It can't fabricate a
+      // verdict; it only releases one the server already pushed.
+      if ((msg as unknown as { from?: string }).from !== 'phone') return;
+      releaseHeldVerdict();
     } else if (data.kind === 'verdict') {
       // The WS handler stamps `from` server-side (relayed peer messages
       // get the sender's REAL role from their envelope; the verdict push
@@ -453,6 +494,12 @@ export async function startDesktopSession(
   const expiryMs = Math.max(0, session.expiresAt * 1000 - Date.now());
   window.setTimeout(() => {
     if (cancelled) return;
+    // A verdict held for the phone's DONE tap is still a verdict — reveal
+    // it rather than expiring a session that actually succeeded.
+    if (heldVerdict) {
+      releaseHeldVerdict();
+      return;
+    }
     fail(new Error('session expired'));
   }, expiryMs);
 
@@ -762,7 +809,15 @@ function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<Argu
  */
 export async function awaitDesktopReady(
   sessionId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts: {
+    /**
+     * Phone is showing an interactive challenge (bio-draw). Rides on the
+     * `phone-here` announcement so the desktop holds the reveal of a
+     * `paired` verdict until `phone-done` (see signalChallengeDone).
+     */
+    challenge?: boolean;
+  } = {}
 ): Promise<PhoneSessionInfo> {
   if (signal?.aborted) throw new Error('aborted');
   const { wsUrl, desktopEnvelope, phoneToken, nonce } = parsePairHash();
@@ -788,7 +843,7 @@ export async function awaitDesktopReady(
   try {
     // Tell the desktop we're here. Server auto-includes our envelope on
     // the relayed message so the desktop can address us back.
-    conn.sendPeer(desktopEnvelope, { kind: 'phone-here' });
+    conn.sendPeer(desktopEnvelope, { kind: 'phone-here', challenge: opts.challenge === true });
 
     const msg = await conn.waitForMessage((m) => {
       const d = m.data as { kind?: string } | null;
@@ -813,6 +868,24 @@ export async function awaitDesktopReady(
     };
   } finally {
     signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * @public — called by phone-main via the dynamically imported pair module
+ * (`state.pairMod.signalChallengeDone`), which knip cannot trace.
+ *
+ * Tell the desktop the user finished the drawing challenge. Releases the
+ * desktop-side reveal gate armed by `phone-here {challenge:true}` — the
+ * verdict itself always travels server→desktop; this only un-holds it.
+ * Best-effort by design: the desktop's hold cap and session-expiry timer
+ * reveal the verdict anyway if this message never lands.
+ */
+export function signalChallengeDone(info: PhoneSessionInfo): void {
+  try {
+    info.conn.sendPeer(info.desktopEnvelope, { kind: 'phone-done' });
+  } catch {
+    /* best effort — desktop hold cap covers the loss */
   }
 }
 

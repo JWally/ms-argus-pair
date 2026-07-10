@@ -47,6 +47,7 @@ const root = rootElement;
 const phonePerfStartedAt = window.performance.now();
 let firstRenderReported = false;
 let bioDrawStarted = false;
+let challengeCompleteSignaled = false;
 let stopBioDotPlate: (() => void) | undefined;
 
 const sessionId = sessionIdFromPath();
@@ -82,9 +83,22 @@ if (pairToken) {
 }
 
 window.addEventListener('pagehide', () => {
+  // Best-effort: a phone closed mid-challenge shouldn't leave the desktop
+  // holding a finished verdict until the hold cap expires.
+  signalChallengeComplete();
   state.ctl.abort();
   state.info?.conn.close();
 });
+
+// One-shot: releases the desktop's verdict-reveal gate. Fired when the user
+// taps DONE, whenever the challenge screen is dismissed for any other phase
+// (proof menu, returning, error), or on pagehide as a last resort.
+function signalChallengeComplete(): void {
+  if (challengeCompleteSignaled || !state.startedInChallenge) return;
+  if (!state.info || !state.pairMod) return;
+  challengeCompleteSignaled = true;
+  state.pairMod.signalChallengeDone(state.info);
+}
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -175,7 +189,9 @@ async function bootstrap(): Promise<void> {
       maybeStartFastPass();
     });
 
-    const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal);
+    const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal, {
+      challenge: state.startedInChallenge,
+    });
     if (state.ctl.signal.aborted) return;
     state.info = instrumentScan(info);
     state.nonce = info.nonce;
@@ -225,6 +241,8 @@ function maybeStartFastPass(): void {
 
 function advanceChallenge(): void {
   if (state.verdict === 'paired') {
+    // The DONE tap — the desktop has been holding the verdict for this.
+    signalChallengeComplete();
     try {
       window.close();
     } catch {
@@ -375,6 +393,9 @@ function render(): void {
     renderBioDraw();
     return;
   }
+  // Leaving the challenge for any other screen (proof menu, returning,
+  // paired, error) also counts as "user is done drawing".
+  signalChallengeComplete();
   stopBioDotPlate?.();
   stopBioDotPlate = undefined;
   if (state.phase === 'ready') {
