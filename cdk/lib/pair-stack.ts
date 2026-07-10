@@ -35,8 +35,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
+import { RecurringAliasHeater } from './recurring-alias-heater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -276,17 +275,10 @@ export class PairStack extends cdk.Stack {
       pairFn.addEnvironment('OAUTH_FACEBOOK_APP_SECRET_ARN', fbSecret.secretArn);
     }
 
-    // ── Provisioned concurrency for the pair Lambda ───────────────────
-    // Pinning 1 warm execution kills the ~640ms cold start that was
-    // showing up at the front of every fresh-container pair session.
-    // Cost: ~$8/mo for 768MB × 1 PC at us-east-1. Cheap insurance.
-    //
-    // Routing requests through the alias instead of the function lets
-    // CFN cut over to a new version atomically and keep PC pinned to
-    // the latest deploy. addAlias auto-bumps when the code hash changes.
-    const pairFnAlias = pairFn.addAlias('live', {
-      provisionedConcurrentExecutions: 3,
-    });
+    // Route through an alias so CFN can cut over to a new version atomically.
+    // Keep this alias warm with cheap synthetic invokes instead of always-on
+    // provisioned concurrency.
+    const pairFnAlias = pairFn.addAlias('live');
 
     // ── HTTP API ───────────────────────────────────────────────────────
     const api = new apigatewayv2.HttpApi(this, 'PairApi', {
@@ -435,12 +427,7 @@ export class PairStack extends cdk.Stack {
     wsEnvelopeSecret.grantRead(pairFn);
     pairFn.addEnvironment('WS_ENVELOPE_SECRET_ARN', wsEnvelopeSecret.secretArn);
 
-    // Provisioned concurrency for the WS handler too — the 450ms WS
-    // cold start was the second-biggest delay on the first-pair flow.
-    // Cost: ~$5/mo for 512MB × 1 PC.
-    const wsHandlerAlias = wsHandlerFn.addAlias('live', {
-      provisionedConcurrentExecutions: 3,
-    });
+    const wsHandlerAlias = wsHandlerFn.addAlias('live');
 
     // ── WebSocket API ──────────────────────────────────────────────────
     const wsApi = new apigatewayv2.WebSocketApi(this, 'PairWsApi', {
@@ -481,20 +468,22 @@ export class PairStack extends cdk.Stack {
       `https://${wsApi.apiId}.execute-api.${cdk.Stack.of(this).region}.amazonaws.com/prod`
     );
 
-    // ── Lambda warmer ──────────────────────────────────────────────────
-    // Fires a synthetic event every 5 minutes so the Lambda's container
-    // stays warm during idle periods. The `source` matches what
-    // @middy/warmup looks for via `isWarmingUp` in pair-api.ts — the
-    // middleware short-circuits before the route switch runs.
-    const warmupRule = new events.Rule(this, 'PairApiWarmupRule', {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
-      description: `Keepalive ping for ${pairFn.functionName}`,
+    // ── Lambda heaters ─────────────────────────────────────────────────
+    // Keep the same aliases that API Gateway uses warm with six async invokes
+    // per minute. This costs pennies at current memory sizes and avoids the
+    // fixed monthly provisioned-concurrency floor.
+    new RecurringAliasHeater(this, 'PairApiHeater', {
+      ruleName: `${cdk.Stack.of(this).stackName}-pair-api-heater`,
+      target: pairFnAlias,
+      invokesPerMinute: 6,
+      spacingSeconds: 10,
     });
-    warmupRule.addTarget(
-      new targets.LambdaFunction(pairFn, {
-        event: events.RuleTargetInput.fromObject({ source: 'serverless-plugin-warmup' }),
-      })
-    );
+    new RecurringAliasHeater(this, 'PairWsHeater', {
+      ruleName: `${cdk.Stack.of(this).stackName}-pair-ws-heater`,
+      target: wsHandlerAlias,
+      invokesPerMinute: 6,
+      spacingSeconds: 10,
+    });
 
     // ── S3 + CloudFront ────────────────────────────────────────────────
     const bucket = new Bucket(this, 'SiteBucket', {
