@@ -4,7 +4,7 @@ import { startBioDotPlate } from './lib/bio-dot-plate';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = 'passkey' | 'google';
+type ProofChoice = 'passkey' | 'passkey-create' | 'google';
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
@@ -29,7 +29,6 @@ interface Runtime {
   verdict: string | null;
   errorMsg: string | null;
   hasTrust: boolean;
-  passkeyHint: boolean;
   trustChecked: boolean;
   nonce: string | null;
   challengeIndex: number;
@@ -59,7 +58,6 @@ const state: Runtime = {
   verdict: null,
   errorMsg: sessionId ? null : 'Missing session id',
   hasTrust: false,
-  passkeyHint: false,
   trustChecked: false,
   nonce: initialNonce,
   challengeIndex: 0,
@@ -171,7 +169,6 @@ async function bootstrap(): Promise<void> {
       if (state.ctl.signal.aborted) return;
       setState({
         hasTrust: Boolean(trustToken),
-        passkeyHint: pairMod.hasPasskeyHint(),
         trustChecked: true,
       });
       sendPhonePerf('trust_check_done', { hasTrust: Boolean(trustToken) });
@@ -274,7 +271,7 @@ async function pair(
     });
   }
   try {
-    const passkeyMode = state.passkeyHint ? 'passkey-auth' : 'passkey-create';
+    const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
     const options: SubmitPhoneAttestationOptions = {
       mode: proofMode === 'google' ? 'oauth' : passkeyMode,
     };
@@ -308,7 +305,6 @@ async function pair(
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
     ) {
       state.pairMod.clearPasskeyHint();
-      state.passkeyHint = false;
     }
     if (opts.keepDialpad && result.verdict === 'paired') {
       state.verdict = result.verdict;
@@ -344,6 +340,10 @@ async function pair(
         status: '',
         errorMsg: 'Trusted device expired. Choose a check.',
       });
+      return;
+    }
+    if (proofMode === 'passkey' || proofMode === 'passkey-create') {
+      setState({ phase: 'ready', errorMsg: msg });
       return;
     }
     setState({
@@ -641,6 +641,7 @@ async function renderReady(): Promise<void> {
               ? '<button data-action="confirm" class="btn btn-primary w-full py-4 text-base">Confirm</button>'
               : `
               <button data-action="passkey" class="btn btn-primary w-full py-4 text-base">Use passkey</button>
+              <button data-action="passkey-create" class="btn w-full py-4 text-base">Create passkey</button>
               ${googleConfigured ? '<button data-action="google" class="btn w-full py-4 text-base">Continue with Google</button>' : ''}`
           }
         </div>
@@ -657,6 +658,9 @@ async function renderReady(): Promise<void> {
   root
     .querySelector('[data-action="passkey"]')
     ?.addEventListener('click', () => void pair('passkey'));
+  root
+    .querySelector('[data-action="passkey-create"]')
+    ?.addEventListener('click', () => void pair('passkey-create'));
   root
     .querySelector('[data-action="google"]')
     ?.addEventListener('click', () => void pair('google'));

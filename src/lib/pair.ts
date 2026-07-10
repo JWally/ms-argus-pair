@@ -893,6 +893,12 @@ function writePasskeyHint(credentialId: string | null): void {
   }
 }
 
+function webauthnError(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const error = (value as { error?: unknown }).error;
+  return typeof error === 'string' && error.length > 0 ? error : null;
+}
+
 /**
  * Authenticate using the previously-saved passkey. Looks up the
  * credentialId in localStorage and passes it via `allowCredentials`
@@ -1131,6 +1137,10 @@ export async function submitPhoneAttestation(
     webauthnSettled.status === 'fulfilled'
       ? webauthnSettled.value
       : { error: (webauthnSettled.reason as Error).message };
+  const proofError = useOAuth ? null : webauthnError(webauthn);
+  if (proofError) {
+    throw new Error(proofError);
+  }
 
   events.onStatus?.('submitting');
   // Credential id from this fresh registration, if any. We persist it as

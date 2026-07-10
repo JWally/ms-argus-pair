@@ -59,6 +59,7 @@ export function ReadyScreen({
   googleConfigured,
   onConfirm,
   onPasskey,
+  onCreatePasskey,
   onGoogle,
 }: {
   hasTrust: boolean;
@@ -66,6 +67,7 @@ export function ReadyScreen({
   googleConfigured: boolean;
   onConfirm: () => void;
   onPasskey: () => void;
+  onCreatePasskey: () => void;
   onGoogle: () => void;
 }) {
   return (
@@ -96,6 +98,9 @@ export function ReadyScreen({
         <div className="w-full space-y-3">
           <button onClick={onPasskey} className="btn btn-primary w-full py-4 text-base">
             Use passkey
+          </button>
+          <button onClick={onCreatePasskey} className="btn w-full py-4 text-base">
+            Create passkey
           </button>
           {googleConfigured && (
             <button onClick={onGoogle} className="btn w-full py-4 text-base">
