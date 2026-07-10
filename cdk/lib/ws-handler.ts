@@ -330,6 +330,11 @@ interface WsResp {
   body?: string;
 }
 
+function isWarmingUp(event: unknown): boolean {
+  const maybeWarmup = event as { source?: unknown; warmup?: unknown };
+  return maybeWarmup.source === 'serverless-plugin-warmup' || maybeWarmup.warmup === true;
+}
+
 function ok(): WsResp {
   return { statusCode: 200 };
 }
@@ -450,9 +455,11 @@ async function handleMessage(
   return ok();
 }
 
-export const handler = async (event: WsEvent): Promise<WsResp> => {
-  const route = event.requestContext.routeKey;
-  const cid = event.requestContext.connectionId;
+export const handler = async (event: WsEvent | unknown): Promise<WsResp> => {
+  if (isWarmingUp(event)) return { statusCode: 200, body: JSON.stringify({ warmed: true }) };
+  const wsEvent = event as WsEvent;
+  const route = wsEvent.requestContext.routeKey;
+  const cid = wsEvent.requestContext.connectionId;
   if (route === '$connect') {
     console.log(`[ws] connect cid=${cid}`);
     return ok();
@@ -464,16 +471,16 @@ export const handler = async (event: WsEvent): Promise<WsResp> => {
   }
   let body: { action?: string } & Record<string, unknown> = {};
   try {
-    if (event.body) body = JSON.parse(event.body) as typeof body;
+    if (wsEvent.body) body = JSON.parse(wsEvent.body) as typeof body;
   } catch {
     return bad('invalid_json');
   }
   console.log(`[ws] action=${body.action} cid=${cid}`);
   switch (body.action) {
     case 'whoami':
-      return handleWhoami(event, body as Record<string, unknown>);
+      return handleWhoami(wsEvent, body as Record<string, unknown>);
     case 'message':
-      return handleMessage(event, body as Record<string, unknown>);
+      return handleMessage(wsEvent, body as Record<string, unknown>);
     default:
       return bad('unknown_action');
   }
