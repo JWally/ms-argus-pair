@@ -79,16 +79,16 @@ function buildPlateDot(
   const y = row + (next() - 0.5) * GRID_SPACING * 0.55;
   const hit = isLetterPixel(mask, x, y);
   const radius = (hit ? 5.2 : 4.3) + next() * (hit ? 2.3 : 2);
-  const pink = hit ? 220 + Math.floor(next() * 35) : 92 + Math.floor(next() * 58);
-  const green = hit ? 36 + Math.floor(next() * 44) : 24 + Math.floor(next() * 54);
-  const blue = hit ? 164 + Math.floor(next() * 58) : 86 + Math.floor(next() * 62);
+  const red = hit ? 150 + Math.floor(next() * 45) : 70 + Math.floor(next() * 40);
+  const green = hit ? 100 + Math.floor(next() * 50) : 40 + Math.floor(next() * 35);
+  const blue = hit ? 235 + Math.floor(next() * 20) : 120 + Math.floor(next() * 60);
   const alpha = hit ? 0.98 : 0.7 + next() * 0.18;
   return {
     x,
     y,
     radius,
-    color: `rgba(${pink}, ${green}, ${blue}, ${alpha})`,
-    highlight: `rgba(255, 225, 248, ${hit ? 0.18 : 0.1})`,
+    color: `rgba(${red}, ${green}, ${blue}, ${alpha})`,
+    highlight: `rgba(236, 229, 255, ${hit ? 0.18 : 0.1})`,
   };
 }
 
@@ -127,7 +127,7 @@ function drawPlateSpeckles(
       x,
       y,
       2.4 + next() * 2.4,
-      hit ? 'rgba(255, 236, 249, 0.28)' : 'rgba(255, 236, 249, 0.18)'
+      hit ? 'rgba(240, 234, 255, 0.28)' : 'rgba(240, 234, 255, 0.18)'
     );
   }
 }
