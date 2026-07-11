@@ -234,6 +234,11 @@ export interface StartDesktopOptions {
   cpi?: string;
 }
 
+/** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
+function integrityCpi(cpi: string): string {
+  return cpi.endsWith('.stepup') ? cpi.slice(0, -'.stepup'.length) : cpi;
+}
+
 export async function startDesktopSession(
   events: PairEvents = {},
   opts: StartDesktopOptions = {}
@@ -514,7 +519,7 @@ export async function startDesktopSession(
     try {
       const argus = getArgus();
       const run = await argus.run({
-        cpi: opts.cpi || ARGUS_CPI,
+        cpi: integrityCpi(opts.cpi || ARGUS_CPI),
         timeoutMs: 30_000,
         attest: {
           purpose: ATTEST_PURPOSE,
@@ -721,6 +726,8 @@ export async function submitSsoClaim(
 
 export interface PhoneSessionInfo {
   nonce: string;
+  /** Server-resolved CPI policy delivered through the single-use QR token. */
+  proofRequired: boolean;
   expiresAt: number;
   desktopArgusSessionId: string;
   desktopKeyId: string;
@@ -755,6 +762,7 @@ interface PairHashParams {
   desktopEnvelope: string;
   phoneToken: string;
   nonce: string;
+  proofRequired: boolean;
 }
 
 function parsePairHash(): PairHashParams {
@@ -764,10 +772,12 @@ function parsePairHash(): PairHashParams {
   const e = params.get('e');
   const pt = params.get('pt');
   const n = params.get('n');
+  // Missing means strict for compatibility with QR tokens minted before this field existed.
+  const proofRequired = params.get('pr') !== '0';
   if (!wsUrl || !e || !pt || !n) {
     throw new Error('pair URL is missing WebSocket routing material in the fragment — open via QR');
   }
-  return { wsUrl, desktopEnvelope: e, phoneToken: pt, nonce: n };
+  return { wsUrl, desktopEnvelope: e, phoneToken: pt, nonce: n, proofRequired };
 }
 
 function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
@@ -820,7 +830,7 @@ export async function awaitDesktopReady(
   } = {}
 ): Promise<PhoneSessionInfo> {
   if (signal?.aborted) throw new Error('aborted');
-  const { wsUrl, desktopEnvelope, phoneToken, nonce } = parsePairHash();
+  const { wsUrl, desktopEnvelope, phoneToken, nonce, proofRequired } = parsePairHash();
 
   const conn = await connectAndWhoami({
     url: wsUrl,
@@ -858,6 +868,7 @@ export async function awaitDesktopReady(
     };
     return {
       nonce: data.nonce,
+      proofRequired,
       expiresAt: data.expiresAt,
       desktopArgusSessionId: data.desktopArgusSessionId,
       desktopKeyId: data.desktopKeyId,
@@ -1092,7 +1103,7 @@ export interface SubmitPhoneAttestationOptions {
    * Server-side verification handles all three identically as
    * proof-of-life signals.
    */
-  mode?: 'passkey-create' | 'passkey-auth' | 'oauth';
+  mode?: 'integrity' | 'passkey-create' | 'passkey-auth' | 'oauth';
   /** When `mode === "oauth"`, the result from one of the
    *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
@@ -1179,17 +1190,20 @@ export async function submitPhoneAttestation(
   // (caller's responsibility), THEN we do the Argus scan.
   events.onStatus?.('proof of life + integrity scan');
   const useOAuth = options.mode === 'oauth';
+  const integrityOnly = options.mode === 'integrity';
   // Default to register if the caller didn't pick — first-time visitors
   // hitting older code paths get the cleaner CREATE flow rather than
   // the iOS "no passkeys for this site" dialog.
   const passkeyMode: 'passkey-create' | 'passkey-auth' =
     options.mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
 
-  const webauthnPromise: Promise<unknown | { error: string }> = useOAuth
-    ? Promise.resolve({ error: 'mode_oauth_skipped' })
-    : passkeyMode === 'passkey-auth'
-      ? authenticateExistingPasskey(info.nonce)
-      : createNewPasskey(info.nonce);
+  const webauthnPromise: Promise<unknown | { error: string }> = integrityOnly
+    ? Promise.resolve({ error: 'mode_integrity_only' })
+    : useOAuth
+      ? Promise.resolve({ error: 'mode_oauth_skipped' })
+      : passkeyMode === 'passkey-auth'
+        ? authenticateExistingPasskey(info.nonce)
+        : createNewPasskey(info.nonce);
 
   // Start the expensive Argus scan only after the cheap dialpad has
   // loaded and the user advances. For WebAuthn, it still runs in
@@ -1210,7 +1224,7 @@ export async function submitPhoneAttestation(
     webauthnSettled.status === 'fulfilled'
       ? webauthnSettled.value
       : { error: (webauthnSettled.reason as Error).message };
-  const proofError = useOAuth ? null : webauthnError(webauthn);
+  const proofError = useOAuth || integrityOnly ? null : webauthnError(webauthn);
   if (proofError) {
     throw new Error(proofError);
   }

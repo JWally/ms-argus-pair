@@ -4,7 +4,7 @@ import { startBioDotPlate } from './lib/bio-dot-plate';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = 'passkey' | 'passkey-create' | 'google';
+type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google';
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
@@ -132,9 +132,16 @@ async function redeemPairTokenAndGo(token: string): Promise<void> {
       e: string;
       pt: string;
       n: string;
+      proofRequired: boolean;
     };
     sendPhonePerf('token_redeem_done', { entry: 'pair_token', sessionId: b.sessionId });
-    const hash = new URLSearchParams({ wsUrl: b.wsUrl, e: b.e, pt: b.pt, n: b.n }).toString();
+    const hash = new URLSearchParams({
+      wsUrl: b.wsUrl,
+      e: b.e,
+      pt: b.pt,
+      n: b.n,
+      pr: b.proofRequired ? '1' : '0',
+    }).toString();
     window.location.replace(
       `/pair/${encodeURIComponent(b.sessionId)}${window.location.search}#${hash}`
     );
@@ -229,6 +236,7 @@ function maybeStartFastPass(): void {
     !state.trustChecked ||
     !state.desktopReady ||
     !state.info ||
+    !state.info.proofRequired ||
     !state.pairMod ||
     state.verdict
   ) {
@@ -262,6 +270,11 @@ function advanceChallenge(): void {
     setState({ phase: 'ready' });
     return;
   }
+  if (!state.info.proofRequired) {
+    setState({ phase: 'pairing' });
+    void pair('integrity');
+    return;
+  }
   if (state.hasTrust) {
     setState({ phase: 'returning' });
     void pair();
@@ -291,7 +304,8 @@ async function pair(
   try {
     const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
     const options: SubmitPhoneAttestationOptions = {
-      mode: proofMode === 'google' ? 'oauth' : passkeyMode,
+      mode:
+        proofMode === 'integrity' ? 'integrity' : proofMode === 'google' ? 'oauth' : passkeyMode,
     };
     if (proofMode === 'google') {
       const oauthMod = await loadOAuthModule();
@@ -319,6 +333,7 @@ async function pair(
     });
     sendPhonePerf('attest_done', { verdict: result.verdict, trustOnly: opts.trustOnly === true });
     if (
+      proofMode !== 'integrity' &&
       passkeyMode === 'passkey-auth' &&
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
     ) {

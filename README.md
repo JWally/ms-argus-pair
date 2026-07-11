@@ -2,9 +2,9 @@
 
 The **Argus Captcha** — QR device-pairing as proof of humanity. A desktop page
 shows a QR; a real phone scans it; both sides run an Argus integrity scan; the
-phone adds proof-of-life (silent device-trust token, WebAuthn passkey, or
-Google sign-in); the server scores it all and hands back a **signed verdict
-token** the embedding site verifies server-to-server.
+phone optionally adds proof-of-life (silent device-trust token, WebAuthn
+passkey, or Google sign-in); the server scores it all and hands back a
+**signed verdict token** the embedding site verifies server-to-server.
 
 One self-contained microservice: the pairing app + backend (deployed at
 `captcha-dev-jw.argus.pw`) plus the embeddable loader and its CDN
@@ -34,6 +34,24 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 
 Or programmatically: `window.argusCaptcha.render(el, { cpi, onResult, onEvent })`.
 
+Append `.stepup` to require proof-of-life for that integration point:
+
+```html
+<script
+  src="https://static-captcha-dev-jw.argus.pw/captcha.js"
+  data-cpi="argus_cpi_live_EXAMPLE123.stepup"
+  data-onresult="onPair"
+></script>
+```
+
+The suffix is public, not an authorization secret. Pair snapshots its
+server-owned meaning onto the session, sends the resolved requirement to the
+phone through the single-use QR token, and binds the exact scoped CPI into the
+signed verdict. A sensitive merchant endpoint must verify against the exact
+expected scoped CPI; a result for the base CPI is not interchangeable. Unknown
+suffixes fail session creation instead of silently downgrading. SSO remains
+strict and does not use this configurable policy.
+
 The loader (`loader/loader.ts`) injects a cross-origin iframe at
 `{EMBED_ORIGIN}/embed` and relays origin-checked postMessages up. The browser
 message is a **notification**; the HMAC-signed `token` verified via
@@ -51,7 +69,7 @@ POST …/{id}/pair-token ───────────► 128-bit single-use
 display sealed QR animation ◄───── worker decrypts display bytes
 scan QR  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
                                     POST /api/pair-token/redeem (GETDEL) ◄── redeem
-                                    → /pair/{id}#{wsUrl,e,pt,n}  (hash never hits the server)
+                                    → /pair/{id}#{wsUrl,e,pt,n,pr} (hash never hits the server)
 ◄──────────── WS relay: phone-here / desktop-ready (sealed envelopes) ─────► WS whoami
 argus.run(desktop) ───────────────► desktop-attest                           argus.run(phone)
                                                                              + proof-of-life

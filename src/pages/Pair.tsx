@@ -18,7 +18,7 @@ import {
   TerminalScreen,
 } from './PairScreens';
 
-type ProofChoice = 'passkey' | 'passkey-create' | 'google';
+type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google';
 
 type Phase =
   | 'awaiting-desktop'
@@ -163,11 +163,17 @@ export function Pair() {
           onStatus: setStatus,
         },
         {
-          mode: proofMode === 'google' ? 'oauth' : passkeyMode,
+          mode:
+            proofMode === 'integrity'
+              ? 'integrity'
+              : proofMode === 'google'
+                ? 'oauth'
+                : passkeyMode,
           ...(oauthResult ? { oauthResult } : {}),
         }
       );
       if (
+        proofMode !== 'integrity' &&
         passkeyMode === 'passkey-auth' &&
         r.annotations?.phone_webauthn_error === 'credential_not_registered'
       ) {
@@ -202,6 +208,11 @@ export function Pair() {
     // Debug mode intentionally lands on the button screen for inspection.
     if (isDebugMode()) {
       setPhase('ready');
+      return;
+    }
+    if (!infoRef.current.proofRequired) {
+      setPhase('pairing');
+      void pair('integrity');
       return;
     }
     // Calculator solved + desktop ready. Returning trusted devices can

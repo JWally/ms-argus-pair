@@ -27,16 +27,22 @@ assert(
 );
 
 assert(
-  pairPage.includes("type ProofChoice = 'passkey' | 'passkey-create' | 'google'"),
-  'Pair page should model passkey use, passkey create, and Google'
+  pairPage.includes("type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google'"),
+  'Pair page should model integrity-only, passkey use, passkey create, and Google'
 );
 
 assert(
-  pairPage.includes("const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'") &&
-    phoneEntry.includes("const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'") &&
-    pairPage.includes("mode: proofMode === 'google' ? 'oauth' : passkeyMode") &&
-    phoneEntry.includes("mode: proofMode === 'google' ? 'oauth' : passkeyMode"),
-  'submitPhoneAttestation should receive oauth or internally selected passkey mode'
+  pairPage.includes(
+    "const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'"
+  ) &&
+    phoneEntry.includes(
+      "const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'"
+    ) &&
+    pairPage.includes("proofMode === 'integrity'") &&
+    phoneEntry.includes("proofMode === 'integrity'") &&
+    pairPage.includes("void pair('integrity')") &&
+    phoneEntry.includes("void pair('integrity')"),
+  'integrity-only sessions should submit without opening a passkey or OAuth ceremony'
 );
 
 assert(
@@ -51,7 +57,7 @@ assert(
 );
 
 assert(
-  pairLib.includes("mode?: 'passkey-create' | 'passkey-auth' | 'oauth'"),
+  pairLib.includes("mode?: 'integrity' | 'passkey-create' | 'passkey-auth' | 'oauth'"),
   'phone attestation API should keep explicit proof modes'
 );
 

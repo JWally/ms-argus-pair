@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   signVerdict,
+  verifyVerdictForCpi,
   verifyVerdictToken,
   VERDICT_TOKEN_TTL_SEC,
 } from '../cdk/lib/pair-api/verdict-token.ts';
@@ -26,6 +27,22 @@ describe('verdict token', () => {
     const r = verifyVerdictToken(SECRET, token);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.claims.verdict).toBe('paired');
+  });
+
+  it('binds the exact scoped CPI so a step-up result cannot be substituted', () => {
+    const scopedCpi = 'argus_cpi_live_AbC123xYz789.stepup';
+    const token = signVerdict(SECRET, { ...base, cpi: scopedCpi, verdict: 'paired' });
+    const r = verifyVerdictToken(SECRET, token);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.claims.cpi).toBe(scopedCpi);
+      expect(r.claims.cpi).not.toBe('argus_cpi_live_AbC123xYz789');
+    }
+    expect(verifyVerdictForCpi(SECRET, token, scopedCpi).ok).toBe(true);
+    expect(verifyVerdictForCpi(SECRET, token, 'argus_cpi_live_AbC123xYz789')).toEqual({
+      ok: false,
+      reason: 'cpi_mismatch',
+    });
   });
 
   it('rejects a wrong-secret signature', () => {
