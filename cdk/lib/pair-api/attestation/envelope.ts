@@ -237,7 +237,7 @@ export function verifyPairAttestationPayload(
 
 export function validateSsoAttestation(
   body: Record<string, unknown>,
-  expected: { role: string; sessionId?: string; nonce?: string; returnCode?: string }
+  expected: { role: string; sessionId?: string; nonce?: string; returnCode?: string; cpi: string }
 ): SsoAttestationResult {
   const pairBody = validatePairAttestationBody(body);
   if (!pairBody.ok) return pairBody;
@@ -250,6 +250,7 @@ export function validateSsoAttestation(
     ssoSessionId?: string;
     nonce?: string;
     returnCode?: string;
+    cpi?: string;
   };
   if (payload.role !== expected.role) {
     return { ok: false, status: 400, body: { error: 'payload_role_mismatch' } };
@@ -262,6 +263,9 @@ export function validateSsoAttestation(
   }
   if (expected.returnCode && payload.returnCode !== expected.returnCode) {
     return { ok: false, status: 400, body: { error: 'payload_return_code_mismatch' } };
+  }
+  if (payload.cpi !== expected.cpi) {
+    return { ok: false, status: 400, body: { error: 'payload_cpi_mismatch' } };
   }
   return { ok: true, attestation: pairBody.attestation };
 }

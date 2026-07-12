@@ -34,9 +34,21 @@ assert(
 );
 assert(
   validate.includes('useNavigate') &&
-    validate.includes('navigate(`/merchant?complete=1&session=') &&
+    validate.includes("complete: '1'") &&
+    validate.includes('cpi') &&
     validate.includes('replace: true'),
   'approved validation should automatically continue to approval-cookie redemption'
+);
+assert(
+  validate.includes("endsWith('.fastpass')") &&
+    validate.includes("mode: 'integrity-only'") &&
+    validate.includes("endsWith('.forceauth')"),
+  'merchant validation UI should honor fastpass and forceauth policy UX'
+);
+assert(
+  merchant.includes('redeemSsoApproval(approvalSessionId, requestedCpi)') &&
+    challenge.includes('submitSsoChallenge(sessionId, nonce, cpi)'),
+  'every SSO browser leg should preserve the exact scoped CPI'
 );
 assert(
   !validate.includes('DONE') && merchant.includes('DONE'),

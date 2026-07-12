@@ -90,6 +90,7 @@ describe('verifyPairAttestationPayload', () => {
       nonce: 'nonce-1',
       role: 'merchant-validate',
       returnCode: 'return-1',
+      cpi: 'argus_cpi_live_Example12345.forceauth',
     });
     const body = { argusSessionId: 'argus-1', attestation };
 
@@ -99,6 +100,7 @@ describe('verifyPairAttestationPayload', () => {
         sessionId: 'sso-1',
         nonce: 'nonce-1',
         returnCode: 'return-1',
+        cpi: 'argus_cpi_live_Example12345.forceauth',
       })
     ).toMatchObject({ ok: true });
     expect(
@@ -109,5 +111,14 @@ describe('verifyPairAttestationPayload', () => {
         returnCode: 'wrong-return',
       })
     ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_return_code_mismatch' } });
+    expect(
+      validateSsoAttestation(body, {
+        role: 'merchant-validate',
+        sessionId: 'sso-1',
+        nonce: 'nonce-1',
+        returnCode: 'return-1',
+        cpi: 'argus_cpi_live_Example12345.stepup',
+      })
+    ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_cpi_mismatch' } });
   });
 });

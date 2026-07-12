@@ -41,17 +41,26 @@ export function readApprovalCookie(cookies: string[] | undefined): string | null
 export function checkApprovalRedemption(
   state: {
     verdict: 'pending' | 'approved' | 'failed';
+    cpi?: string;
     approvalTokenHash?: string;
     approvalRedeemedAt?: number;
   },
-  token: string
-): 'approved' | 'not_approved' | 'missing' | 'invalid' | 'consumed' {
+  token: string,
+  expectedCpi: string
+):
+  | 'approved'
+  | 'not_approved'
+  | 'missing'
+  | 'invalid'
+  | 'consumed'
+  | 'cpi_missing'
+  | 'cpi_mismatch' {
   if (state.verdict !== 'approved') return 'not_approved';
   if (state.approvalRedeemedAt) return 'consumed';
   if (!state.approvalTokenHash) return 'missing';
   const expected = Buffer.from(state.approvalTokenHash, 'hex');
   const actual = Buffer.from(hashApprovalToken(token), 'hex');
-  return expected.length === actual.length && timingSafeEqual(expected, actual)
-    ? 'approved'
-    : 'invalid';
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return 'invalid';
+  if (!state.cpi) return 'cpi_missing';
+  return state.cpi === expectedCpi ? 'approved' : 'cpi_mismatch';
 }

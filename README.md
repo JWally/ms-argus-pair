@@ -24,6 +24,7 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
   function onPair(r) {
     // r = { sessionId, verdict, reason, token }
     // POST r.token to YOUR server → it calls POST {pairOrigin}/api/verify
+    // with { token: r.token, cpi: "argus_cpi_live_....forceauth" }
     // → trusted { valid, passed, verdict, sessionId, cpi }.
     // Gate on `passed` (true only when verdict === "paired"), NOT `valid`
     // — `valid` just means the signature is authentic; a real token can
@@ -51,8 +52,9 @@ server-owned meaning onto the session, sends the resolved requirement to the
 phone through the single-use QR token, and binds the exact scoped CPI into the
 signed verdict. A sensitive merchant endpoint must verify against the exact
 expected scoped CPI; a result for the base CPI is not interchangeable. Unknown
-suffixes fail session creation instead of silently downgrading. SSO remains
-strict and does not use this configurable policy.
+suffixes fail session creation instead of silently downgrading. The CPI field is
+required on `POST /api/verify`; token validity is never returned without the
+merchant making that exact assertion.
 
 The loader (`loader/loader.ts`) injects a cross-origin iframe at
 `{EMBED_ORIGIN}/embed` and relays origin-checked postMessages up. The browser
@@ -116,7 +118,12 @@ three Argus scans + 90s single-use return codes, evaluated by
 `cdk/lib/sso-continuity.ts` (same device keyId, same/nearby network, bounded
 risk drift). Approval mints an opaque HttpOnly cookie and can mint a
 device-trust token. The merchant return consumes the cookie once at
-`POST /api/sso/approval/redeem`; only its hash is stored server-side.
+`POST /api/sso/approval/redeem`; only its hash is stored server-side. SSO carries
+the exact scoped CPI through every signed leg. `.fastpass` uses continuity and
+integrity only, `.stepup` accepts cached device trust or fresh proof, and
+`.forceauth` requires a fresh passkey/OAuth ceremony. Redemption requires the
+merchant to submit the same full CPI; a mismatch fails without consuming the
+approval.
 
 ## Repo layout
 

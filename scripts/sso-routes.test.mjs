@@ -17,6 +17,8 @@ const pairLib = read('src/lib/pair.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
+const ssoApproval = read('cdk/lib/pair-api/sso-approval.ts');
+const verifyRoute = api.slice(api.indexOf("case 'POST /api/verify':"), api.indexOf('default:'));
 
 for (const route of ['/merchant', '/sso/challenge/:sessionId', '/merchant/validate']) {
   assert(main.includes(`path="${route}"`), `missing SPA route ${route}`);
@@ -42,6 +44,26 @@ for (const routeKey of [
 
 assert(ssoScan.includes('sso_requires_phone'), 'SSO API must reject non-phone scans');
 assert(ssoScan.includes('scan?.isPhone === true'), 'SSO API must require phone-classified scans');
+assert(
+  api.includes('parseScopedCpi(rawCpi)') &&
+    api.includes('proofRequired') &&
+    api.includes('freshProofRequired'),
+  'SSO start must snapshot the server-resolved scoped CPI policy'
+);
+assert(
+  verifyRoute.includes("error: 'missing_cpi'") &&
+    verifyRoute.includes('verifyVerdictForCpi') &&
+    !verifyRoute.includes('verifyVerdictToken'),
+  'verdict verification must require an exact merchant CPI assertion'
+);
+assert(
+  ssoApproval.includes('cpi_mismatch') && pairLib.includes('expectedCpi'),
+  'one-time SSO approval redemption must require the merchant expected CPI'
+);
+assert(
+  pairLib.includes("mode?: 'integrity-only'") && pairLib.includes('freshProofRequired'),
+  'SSO clients must support integrity-only and forceauth policy behavior'
+);
 
 for (const clientFn of [
   'startSsoSession',
