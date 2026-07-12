@@ -20,6 +20,14 @@ describe('scoped CPI policy', () => {
     });
   });
 
+  it('accepts an explicit fastpass scope without requiring proof-of-life', () => {
+    expect(parseScopedCpi(`${BASE_CPI}.fastpass`)).toEqual({
+      cpi: `${BASE_CPI}.fastpass`,
+      scope: 'fastpass',
+      proofRequired: false,
+    });
+  });
+
   it('rejects unknown or malformed scopes instead of silently downgrading', () => {
     expect(parseScopedCpi(`${BASE_CPI}.stepup_70`)).toBeNull();
     expect(parseScopedCpi(`${BASE_CPI}.anything`)).toBeNull();

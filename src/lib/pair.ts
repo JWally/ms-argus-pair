@@ -236,7 +236,7 @@ export interface StartDesktopOptions {
 
 /** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
 function integrityCpi(cpi: string): string {
-  return cpi.endsWith('.stepup') ? cpi.slice(0, -'.stepup'.length) : cpi;
+  return cpi.replace(/\.(?:fastpass|stepup)$/, '');
 }
 
 export async function startDesktopSession(

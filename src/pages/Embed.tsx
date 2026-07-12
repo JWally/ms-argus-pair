@@ -33,7 +33,7 @@ type UpMsg =
     }
   | { event: 'error'; message: string };
 
-const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.stepup)?$/;
+const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.(?:fastpass|stepup))?$/;
 
 type Phase = 'scanning' | 'pairing' | 'verified' | 'failed';
 
