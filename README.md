@@ -17,6 +17,8 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 <script
   src="https://static-captcha-dev-jw.argus.pw/captcha.js"
   data-cpi="argus_cpi_live_..."
+  data-challenge-id="checkout_1234567890abcdef"
+  data-sso-return-url="https://merchant.example/captcha/sso-return"
   data-onresult="onPair"
 ></script>
 <div class="argus-captcha"></div>
@@ -24,8 +26,9 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
   function onPair(r) {
     // r = { sessionId, verdict, reason, token }
     // POST r.token to YOUR server → it calls POST {pairOrigin}/api/verify
-    // with { token: r.token, cpi: "argus_cpi_live_....forceauth" }
-    // → trusted { valid, passed, verdict, sessionId, cpi }.
+    // with { token: r.token, cpi: "argus_cpi_live_....forceauth",
+    //        challengeId: "checkout_1234567890abcdef" }
+    // → trusted { valid, passed, verdict, sessionId, cpi, challengeId }.
     // Gate on `passed` (true only when verdict === "paired"), NOT `valid`
     // — `valid` just means the signature is authentic; a real token can
     // carry a "failed" verdict. Never trust the browser's r.verdict alone.
@@ -33,7 +36,15 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 </script>
 ```
 
-Or programmatically: `window.argusCaptcha.render(el, { cpi, onResult, onEvent })`.
+Or programmatically:
+`window.argusCaptcha.render(el, { cpi, challengeId, onResult, onEvent })`.
+
+The merchant backend must generate a fresh, unpredictable URL-safe
+`challengeId` (16-128 characters) for each protected checkout or action and
+store it with that transaction. Render that same value into the widget and send
+it again from the backend to `/api/verify`. The challenge is public, not a
+secret; exact binding prevents a valid result from being moved to a different
+transaction without adding a redemption database call.
 
 Append `.fastpass` for an explicit integrity-only flow, `.stepup` to accept
 proof-of-life including cached device trust, or `.forceauth` to require a fresh
@@ -43,6 +54,7 @@ passkey/Google ceremony on every run:
 <script
   src="https://static-captcha-dev-jw.argus.pw/captcha.js"
   data-cpi="argus_cpi_live_EXAMPLE123.stepup"
+  data-challenge-id="checkout_1234567890abcdef"
   data-onresult="onPair"
 ></script>
 ```
@@ -53,8 +65,8 @@ phone through the single-use QR token, and binds the exact scoped CPI into the
 signed verdict. A sensitive merchant endpoint must verify against the exact
 expected scoped CPI; a result for the base CPI is not interchangeable. Unknown
 suffixes fail session creation instead of silently downgrading. The CPI field is
-required on `POST /api/verify`; token validity is never returned without the
-merchant making that exact assertion.
+and challenge fields are required on `POST /api/verify`; token validity is
+never returned without the merchant making both exact assertions.
 
 The loader (`loader/loader.ts`) injects a cross-origin iframe at
 `{EMBED_ORIGIN}/embed` and relays origin-checked postMessages up. The browser
@@ -110,20 +122,24 @@ Key mechanics:
   (WS push or authenticated `/result` poll) — a phone-side forgery via the
   relay is ignored.
 
-## SSO continuity (demo)
+## Mobile SSO continuity
 
-A second flow (`/merchant` → `/sso/challenge/:id` → `/merchant/validate`)
-proving the _same phone, device, and network_ across a merchant round-trip:
+A merchant-bound flow (`/sso/mobile` → `/sso/challenge/:id` →
+`/merchant/validate`) proves the _same phone, device, and network_ across a
+round-trip:
 three Argus scans + 90s single-use return codes, evaluated by
 `cdk/lib/sso-continuity.ts` (same device keyId, same/nearby network, bounded
-risk drift). Approval mints an opaque HttpOnly cookie and can mint a
-device-trust token. The merchant return consumes the cookie once at
-`POST /api/sso/approval/redeem`; only its hash is stored server-side. SSO carries
-the exact scoped CPI through every signed leg. `.fastpass` uses continuity and
-integrity only, `.stepup` accepts cached device trust or fresh proof, and
-`.forceauth` requires a fresh passkey/OAuth ceremony. Redemption requires the
-merchant to submit the same full CPI; a mismatch fails without consuming the
-approval.
+risk drift). The loader passes a merchant-issued challenge and configured HTTPS
+callback into the hosted flow. Approval returns a short-lived opaque code; the
+merchant backend exchanges it once at `POST /api/sso/approval/exchange` using
+the exact scoped CPI and challenge before creating its own session. Only the
+code hash is stored. Callback origins come from `SSO_CALLBACK_ORIGINS` and are
+validated before the SSO session is created.
+
+`.fastpass` uses continuity and integrity only, `.stepup` accepts cached device
+trust or fresh proof, and `.forceauth` requires a fresh passkey/OAuth ceremony.
+The separate `/merchant` route remains the presentation demo and uses the
+HttpOnly approval-cookie redemption endpoint.
 
 ## Repo layout
 

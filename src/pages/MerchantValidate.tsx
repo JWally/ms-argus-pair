@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { MerchantWordmark } from '../components/Brand';
+import { MerchantWordmark, Wordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
 import {
   clearPasskeyHint,
@@ -22,6 +22,7 @@ export function MerchantValidate() {
   const [passkeySeen, setPasskeySeen] = useState(false);
   const sessionId = params.get('session');
   const cpi = params.get('cpi');
+  const isMerchantCallback = params.get('flow') === 'merchant';
   const approved = result?.verdict === 'approved';
   const failed = !!error || result?.verdict === 'failed';
 
@@ -94,11 +95,20 @@ export function MerchantValidate() {
 
   useEffect(() => {
     if (!approved || !sessionId || !cpi) return;
+    if (result?.approvalCode && result.merchantCallbackUrl && result.merchantChallengeId) {
+      const callback = new URL(result.merchantCallbackUrl);
+      callback.searchParams.set('session', sessionId);
+      callback.searchParams.set('code', result.approvalCode);
+      callback.searchParams.set('cpi', cpi);
+      callback.searchParams.set('challengeId', result.merchantChallengeId);
+      window.location.replace(callback.toString());
+      return;
+    }
     const merchantParams = new URLSearchParams({ complete: '1', session: sessionId, cpi });
     navigate(`/merchant?${merchantParams.toString()}`, {
       replace: true,
     });
-  }, [approved, cpi, navigate, sessionId]);
+  }, [approved, cpi, navigate, result, sessionId]);
 
   async function runProof(mode: 'passkey-create' | 'passkey-auth' | 'google') {
     const sessionId = params.get('session');
@@ -160,17 +170,25 @@ export function MerchantValidate() {
   }
 
   return (
-    <div className="merchant-page">
-      <div className="merchant-layout merchant-layout-narrow">
-        <header className="merchant-header">
-          <MerchantWordmark />
+    <div className={isMerchantCallback ? 'argus-page' : 'merchant-page'}>
+      <div
+        className={isMerchantCallback ? 'argus-layout' : 'merchant-layout merchant-layout-narrow'}
+      >
+        <header className={isMerchantCallback ? 'argus-header' : 'merchant-header'}>
+          {isMerchantCallback ? <Wordmark /> : <MerchantWordmark />}
           <span className="merchant-secured">
-            <IconShield className="h-4 w-4" /> Returned from Argus
+            <IconShield className="h-4 w-4" />{' '}
+            {isMerchantCallback ? 'Secure check' : 'Returned from Argus'}
           </span>
         </header>
 
-        <main className="merchant-main">
-          <section className="merchant-card merchant-result" aria-live="polite">
+        <main className={isMerchantCallback ? 'argus-main' : 'merchant-main'}>
+          <section
+            className={
+              isMerchantCallback ? 'sso-shell merchant-result' : 'merchant-card merchant-result'
+            }
+            aria-live="polite"
+          >
             <span
               className={`merchant-result-icon ${approved ? 'is-approved' : failed ? 'is-failed' : ''}`}
             >
@@ -182,7 +200,9 @@ export function MerchantValidate() {
                 <IconShield className="h-7 w-7" />
               )}
             </span>
-            <p className="merchant-eyebrow">Merchant response</p>
+            <p className={isMerchantCallback ? 'label' : 'merchant-eyebrow'}>
+              {isMerchantCallback ? 'Argus' : 'Merchant response'}
+            </p>
             <h1>
               {approved
                 ? 'Returning to merchant'
@@ -192,7 +212,15 @@ export function MerchantValidate() {
                     ? 'Confirm your identity'
                     : 'Validating session'}
             </h1>
-            <p className={approved ? 'merchant-approved' : 'merchant-copy'}>
+            <p
+              className={
+                isMerchantCallback
+                  ? 'mt-2 text-sm text-muted'
+                  : approved
+                    ? 'merchant-approved'
+                    : 'merchant-copy'
+              }
+            >
               {approved
                 ? 'redeeming approval'
                 : needsProof

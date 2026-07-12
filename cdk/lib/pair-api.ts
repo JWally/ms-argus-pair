@@ -90,7 +90,9 @@ import {
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
-import { getVerdictSecret, signVerdict, verifyVerdictForCpi } from './pair-api/verdict-token';
+import { getVerdictSecret, signVerdict } from './pair-api/verdict-token';
+import { parseMerchantChallenge } from './pair-api/merchant-challenge';
+import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
 import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
@@ -98,12 +100,14 @@ import { evaluateSsoProofPolicy } from './pair-api/sso-assurance';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
 import {
-  approvalCookie,
   hashApprovalToken,
   mintApprovalToken,
   SSO_APPROVAL_TTL_SECONDS,
 } from './pair-api/sso-approval';
 import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
+import { parseSsoMerchantBinding } from './pair-api/sso-merchant-callback';
+import { createSsoMerchantApprovalHandler } from './pair-api/sso-merchant-approval-route';
+import { ssoValidationResponse } from './pair-api/sso-validation-response';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
@@ -133,6 +137,7 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
 const PAIR_PUBLIC_ORIGIN = process.env.PAIR_PUBLIC_ORIGIN || `https://${WEBAUTHN_RP_ID}`;
+const SSO_CALLBACK_ORIGINS = (process.env.SSO_CALLBACK_ORIGINS || '').split(',').filter(Boolean);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const passkeyStore = createDdbPasskeyStore(ddb, TABLE);
@@ -285,6 +290,7 @@ interface SessionItem {
   nonce: string;
   expiresAt: number;
   cpi?: string | null;
+  challengeId?: string;
   proofRequired?: boolean;
   freshProofRequired?: boolean;
   desktopAttestation?: StoredAttestation;
@@ -299,6 +305,8 @@ interface SsoSessionItem {
   nonce: string;
   merchantSessionId: string;
   cpi: string;
+  merchantChallengeId?: string;
+  merchantCallbackUrl?: string;
   proofRequired: boolean;
   freshProofRequired: boolean;
   startProfile: SsoLegProfile;
@@ -360,6 +368,7 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       nonce: meta.nonce,
       expiresAt: meta.expiresAt,
       cpi: meta.cpi ?? null,
+      challengeId: meta.challengeId,
       proofRequired: meta.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
       freshProofRequired: meta.freshProofRequired ?? false,
       verdict: phone?.verdict ?? 'pending',
@@ -388,6 +397,12 @@ const redeemSsoApprovalRequest = createSsoApprovalRedemptionHandler({
   tableName: TABLE,
   loadSession: loadSsoSession,
 });
+const exchangeSsoMerchantApproval = createSsoMerchantApprovalHandler({
+  ddb,
+  tableName: TABLE,
+  loadSession: loadSsoSession,
+});
+const verifyVerdictRequest = createVerdictVerificationHandler({ getSecret: getVerdictSecret });
 
 const lambdaHandler = async (event: {
   routeKey: string;
@@ -406,6 +421,7 @@ const lambdaHandler = async (event: {
     'POST /api/session/start',
     'POST /api/sso/start',
     'POST /api/sso/approval/redeem',
+    'POST /api/sso/approval/exchange',
     'GET /api/_valkey-debug',
     'POST /api/verify',
     'POST /api/pair-token/redeem',
@@ -450,6 +466,11 @@ const lambdaHandler = async (event: {
       if (!startAllowed) {
         return jsonResp(429, { error: 'rate_limited', scope: 'session_start' });
       }
+      const merchantChallenge = parseMerchantChallenge(body.challengeId);
+      if (body.challengeId === undefined) {
+        return jsonResp(400, { error: 'missing_challenge_id' });
+      }
+      if (!merchantChallenge) return jsonResp(400, { error: 'invalid_challenge_id' });
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
@@ -467,6 +488,7 @@ const lambdaHandler = async (event: {
         const created = await startSessionValkey(id, {
           nonce,
           expiresAt,
+          challengeId: merchantChallenge,
           cpi,
           proofRequired,
           freshProofRequired,
@@ -482,6 +504,7 @@ const lambdaHandler = async (event: {
           SK: 'META',
           nonce,
           expiresAt,
+          challengeId: merchantChallenge,
           cpi,
           proofRequired,
           freshProofRequired,
@@ -531,6 +554,10 @@ const lambdaHandler = async (event: {
         typeof body.merchantSessionId === 'string' && body.merchantSessionId.length > 0
           ? body.merchantSessionId.slice(0, 128)
           : randomUUID();
+      const merchantBinding = parseSsoMerchantBinding(body, SSO_CALLBACK_ORIGINS);
+      if (!merchantBinding.ok) {
+        return jsonResp(400, { error: 'invalid_sso_merchant_binding' });
+      }
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
       const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
       const projection = await fetchProjection(argusSessionId);
@@ -543,6 +570,7 @@ const lambdaHandler = async (event: {
         nonce,
         merchantSessionId,
         cpi: scopedCpi.cpi,
+        ...merchantBinding.value,
         proofRequired,
         freshProofRequired: scopedCpi.freshProofRequired,
         startProfile: ssoProfileFromScan(argusSessionId, checked.attestation, scan),
@@ -602,7 +630,7 @@ const lambdaHandler = async (event: {
       return jsonResp(200, {
         ok: true,
         returnCode: code.value,
-        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}&cpi=${encodeURIComponent(s.cpi)}`,
+        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}&cpi=${encodeURIComponent(s.cpi)}${s.merchantCallbackUrl ? '&flow=merchant' : ''}`,
       });
     }
 
@@ -740,31 +768,23 @@ const lambdaHandler = async (event: {
           },
         })
       );
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-store',
-      };
-      return {
-        statusCode: verdict.ok ? 200 : 403,
-        headers,
-        ...(verdict.ok
-          ? {
-              cookies: [approvalCookie(approvalToken!, SSO_APPROVAL_TTL_SECONDS)],
-            }
-          : {}),
-        body: JSON.stringify({
-          verdict: verdict.ok ? 'approved' : 'failed',
-          reason: verdict.reason,
-          reasons: verdict.reasons,
-          merchantSessionId: s.merchantSessionId,
-          cpi: s.cpi,
-          nextDeviceTrust,
-        }),
-      };
+      return ssoValidationResponse({
+        verdict,
+        approvalToken,
+        merchantSessionId: s.merchantSessionId,
+        cpi: s.cpi,
+        merchantCallbackUrl: s.merchantCallbackUrl,
+        merchantChallengeId: s.merchantChallengeId,
+        nextDeviceTrust,
+      });
     }
 
     case 'POST /api/sso/approval/redeem': {
       return redeemSsoApprovalRequest(body, event.cookies);
+    }
+
+    case 'POST /api/sso/approval/exchange': {
+      return exchangeSsoMerchantApproval(body);
     }
 
     case 'GET /api/session/{id}/info': {
@@ -1358,10 +1378,12 @@ const lambdaHandler = async (event: {
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(404, { error: 'session_not_found' });
       if (s.verdict === 'pending') return jsonResp(409, { error: 'verdict_pending' });
+      if (!s.challengeId) return jsonResp(409, { error: 'challenge_binding_missing' });
       const secret = await getVerdictSecret();
       if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
       const token = signVerdict(secret, {
         cpi: s.cpi ?? null,
+        challengeId: s.challengeId,
         sessionId: sessionId!,
         verdict: s.verdict,
         reason: s.verdictReason ?? null,
@@ -1371,29 +1393,7 @@ const lambdaHandler = async (event: {
 
     // ── Server-to-server token verification (the host's backend calls this) ─
     case 'POST /api/verify': {
-      const vToken = (body as { token?: unknown }).token;
-      if (typeof vToken !== 'string') return jsonResp(400, { error: 'missing_token' });
-      const rawCpi = body.cpi;
-      if (rawCpi === undefined) return jsonResp(400, { error: 'missing_cpi' });
-      const expectedCpi = parseScopedCpi(rawCpi);
-      if (!expectedCpi) return jsonResp(400, { error: 'invalid_cpi' });
-      const secret = await getVerdictSecret();
-      if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
-      const result = verifyVerdictForCpi(secret, vToken, expectedCpi.cpi);
-      if (!result.ok) return jsonResp(200, { valid: false, reason: result.reason });
-      return jsonResp(200, {
-        // `valid` = the token's signature is authentic and unexpired. It does
-        // NOT mean the human passed — a genuine token can carry a "failed"
-        // verdict. `passed` is the admit/deny bit merchants should gate on.
-        valid: true,
-        passed: result.claims.verdict === 'paired',
-        cpi: result.claims.cpi,
-        sessionId: result.claims.sessionId,
-        verdict: result.claims.verdict,
-        reason: result.claims.reason,
-        iat: result.claims.iat,
-        exp: result.claims.exp,
-      });
+      return verifyVerdictRequest(body);
     }
 
     default:

@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_MERCHANT_CPI?: string;
+  readonly VITE_PAIR_URL_BASE?: string;
+  readonly VITE_PAIR_WS_URL?: string;
 }
 
 interface ImportMeta {

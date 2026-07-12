@@ -34,6 +34,8 @@ type UpMsg =
   | { event: 'error'; message: string };
 
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.(?:fastpass|stepup|forceauth))?$/;
+const CHALLENGE_FORMAT = /^[A-Za-z0-9_-]{16,128}$/;
+const PAIR_APP_ORIGIN = import.meta.env.VITE_PAIR_URL_BASE || window.location.origin;
 
 type Phase = 'scanning' | 'pairing' | 'verified' | 'failed';
 
@@ -86,16 +88,28 @@ const SealCross = () => (
 );
 
 /** Read the loader-provided config from the iframe URL (host origin + merchant CPI). */
-function useEmbedConfig(): { hostOrigin: string; cpi: string | undefined } {
+function useEmbedConfig(): {
+  hostOrigin: string;
+  cpi: string | undefined;
+  challengeId: string | undefined;
+  ssoReturnUrl: string | undefined;
+} {
   const params = new URLSearchParams(window.location.search);
   const hostOrigin = params.get('origin') || '*';
   const rawCpi = params.get('cpi') || '';
+  const rawChallenge = params.get('challengeId') || '';
+  const ssoReturnUrl = params.get('ssoReturnUrl') || '';
   // Only forward a well-formed CPI; otherwise fall back to the engine default.
-  return { hostOrigin, cpi: CPI_FORMAT.test(rawCpi) ? rawCpi : undefined };
+  return {
+    hostOrigin,
+    cpi: CPI_FORMAT.test(rawCpi) ? rawCpi : undefined,
+    challengeId: CHALLENGE_FORMAT.test(rawChallenge) ? rawChallenge : undefined,
+    ssoReturnUrl: ssoReturnUrl || undefined,
+  };
 }
 
 export function Embed() {
-  const { hostOrigin, cpi } = useEmbedConfig();
+  const { hostOrigin, cpi, challengeId, ssoReturnUrl } = useEmbedConfig();
   const [qrReady, setQrReady] = useState(false);
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -150,6 +164,7 @@ export function Embed() {
     let qrTimer: number | null = null;
     (async () => {
       try {
+        if (!challengeId) throw new Error('Missing or invalid merchant challenge');
         const session = await startDesktopSession(
           {
             onPhoneConnected: () => {
@@ -159,7 +174,7 @@ export function Embed() {
             },
             onError: (e) => postUp({ event: 'error', message: String(e) }),
           },
-          { cpi }
+          { cpi, challengeId }
         );
         if (cancelled) {
           session.stop();
@@ -215,7 +230,7 @@ export function Embed() {
       qrImageUrlsRef.current = [];
       sessionRef.current?.stop();
     };
-  }, [hostOrigin, cpi]);
+  }, [hostOrigin, cpi, challengeId]);
 
   const phase: Phase =
     done === 'paired'
@@ -227,6 +242,10 @@ export function Embed() {
           : 'scanning';
   // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
   const copy = COPY[phase];
+  const ssoHref =
+    cpi && challengeId && ssoReturnUrl
+      ? `${PAIR_APP_ORIGIN}/sso/mobile?${new URLSearchParams({ cpi, challengeId, returnUrl: ssoReturnUrl }).toString()}`
+      : null;
 
   return (
     <div className="aegis-stage">
@@ -267,6 +286,12 @@ export function Embed() {
           {copy.title}
           <span className="ax-sub">{copy.sub}</span>
         </p>
+
+        {ssoHref && (
+          <a className="ax-sso" href={ssoHref} target="_top">
+            MOBILE SSO
+          </a>
+        )}
 
         <div className="ax-link">
           <div className="ax-node here">

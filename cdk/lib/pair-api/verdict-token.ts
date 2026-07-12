@@ -4,8 +4,9 @@
  *
  *   token = base64url(JSON claims) + '.' + base64url(HMAC-SHA256(secret, payload))
  *
- * Claims bind { cpi, sessionId, verdict, reason, iat, exp } so a token minted for
- * one merchant/session can't be replayed for another, and goes stale in 5 min.
+ * Claims bind { cpi, challengeId, sessionId, verdict, reason, iat, exp } so a
+ * token minted for one merchant action can't be replayed for another, and goes
+ * stale in 5 min.
  * The host POSTs the token to /api/verify (siteverify-style) — we never trust a
  * browser-reported verdict. Symmetric (HMAC) on purpose: verification is a
  * server-to-server call to us, the conventional captcha model, and the secret is
@@ -19,6 +20,7 @@ export const VERDICT_TOKEN_TTL_SEC = 300; // matches the 5-min session TTL
 
 export interface VerdictClaims {
   cpi: string | null;
+  challengeId: string;
   sessionId: string;
   verdict: string;
   reason: string | null;
@@ -79,7 +81,11 @@ export function verifyVerdictToken(
   } catch {
     return { ok: false, reason: 'bad_payload' };
   }
-  if (typeof claims.sessionId !== 'string' || typeof claims.verdict !== 'string') {
+  if (
+    typeof claims.sessionId !== 'string' ||
+    typeof claims.challengeId !== 'string' ||
+    typeof claims.verdict !== 'string'
+  ) {
     return { ok: false, reason: 'bad_claims' };
   }
   const nowSec = Math.floor(now / 1000);
@@ -90,15 +96,18 @@ export function verifyVerdictToken(
   return { ok: true, claims };
 }
 
-/** Merchant-side binding: a valid token for another scoped CPI is not acceptable. */
-export function verifyVerdictForCpi(
+/** A valid token for another merchant, policy scope, or protected action is unusable. */
+export function verifyVerdictForContext(
   secret: string,
   token: string,
-  expectedCpi: string,
+  expected: { cpi: string; challengeId: string },
   now: number = Date.now()
 ): VerifyVerdictResult {
   const result = verifyVerdictToken(secret, token, now);
   if (!result.ok) return result;
-  if (result.claims.cpi !== expectedCpi) return { ok: false, reason: 'cpi_mismatch' };
+  if (result.claims.cpi !== expected.cpi) return { ok: false, reason: 'cpi_mismatch' };
+  if (result.claims.challengeId !== expected.challengeId) {
+    return { ok: false, reason: 'challenge_mismatch' };
+  }
   return result;
 }

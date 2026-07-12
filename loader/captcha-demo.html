@@ -63,8 +63,8 @@
       function onArgusResult(r) {
         push({ RESULT: r });
         // In production: send r.token to your server, which POSTs it to
-        //   {embedOrigin}/api/verify   body { token, cpi }
-        // for the trusted { valid, verdict, sessionId, cpi }. Never trust
+        //   {embedOrigin}/api/verify   body { token, cpi, challengeId }
+        // for the trusted { valid, verdict, sessionId, cpi, challengeId }. Never trust
         // r.verdict from the browser alone — the token is the proof.
       }
       window.onArgusResult = onArgusResult;
@@ -78,6 +78,7 @@
     <script
       src="/captcha.js"
       data-cpi="argus_cpi_test_demo123456"
+      data-challenge-id="captcha_demo_checkout_2026"
       data-onresult="onArgusResult"
     ></script>
   </body>

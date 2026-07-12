@@ -10,13 +10,18 @@
 import { describe, expect, it } from 'vitest';
 import {
   signVerdict,
-  verifyVerdictForCpi,
+  verifyVerdictForContext,
   verifyVerdictToken,
   VERDICT_TOKEN_TTL_SEC,
 } from '../cdk/lib/pair-api/verdict-token.ts';
 
 const SECRET = 'test-secret-abc';
-const base = { cpi: 'argus_cpi_test_x', sessionId: 'sess-1', reason: null };
+const base = {
+  cpi: 'argus_cpi_test_x',
+  challengeId: 'checkout_1234567890abcdef',
+  sessionId: 'sess-1',
+  reason: null,
+};
 
 /** Mirror the /api/verify admit derivation. */
 const passed = (verdict: string) => verdict === 'paired';
@@ -38,11 +43,28 @@ describe('verdict token', () => {
       expect(r.claims.cpi).toBe(scopedCpi);
       expect(r.claims.cpi).not.toBe('argus_cpi_live_AbC123xYz789');
     }
-    expect(verifyVerdictForCpi(SECRET, token, scopedCpi).ok).toBe(true);
-    expect(verifyVerdictForCpi(SECRET, token, 'argus_cpi_live_AbC123xYz789')).toEqual({
-      ok: false,
-      reason: 'cpi_mismatch',
-    });
+    expect(
+      verifyVerdictForContext(SECRET, token, {
+        cpi: scopedCpi,
+        challengeId: base.challengeId,
+      }).ok
+    ).toBe(true);
+    expect(
+      verifyVerdictForContext(SECRET, token, {
+        cpi: 'argus_cpi_live_AbC123xYz789',
+        challengeId: base.challengeId,
+      })
+    ).toEqual({ ok: false, reason: 'cpi_mismatch' });
+  });
+
+  it('rejects substitution into a different merchant challenge', () => {
+    const token = signVerdict(SECRET, { ...base, verdict: 'paired' });
+    expect(
+      verifyVerdictForContext(SECRET, token, {
+        cpi: base.cpi,
+        challengeId: 'checkout_A9mK3pQ7vN2xR5tZ',
+      })
+    ).toEqual({ ok: false, reason: 'challenge_mismatch' });
   });
 
   it('rejects a wrong-secret signature', () => {

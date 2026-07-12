@@ -209,6 +209,9 @@ export interface SsoValidateResult {
   reasons: string[];
   merchantSessionId: string;
   cpi: string;
+  approvalCode?: string;
+  merchantCallbackUrl?: string;
+  merchantChallengeId?: string;
   nextDeviceTrust?: string | null;
 }
 
@@ -236,6 +239,8 @@ export interface StartDesktopOptions {
    * unaffected; the embeddable widget passes the host's `data-cpi` through here.
    */
   cpi?: string;
+  /** Fresh opaque identifier for the merchant action this verdict may authorize. */
+  challengeId?: string;
 }
 
 /** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
@@ -248,6 +253,7 @@ export async function startDesktopSession(
   opts: StartDesktopOptions = {}
 ): Promise<DesktopSession> {
   events.onStatus?.('starting session');
+  const challengeId = opts.challengeId ?? crypto.randomUUID();
 
   // Race the WS TCP+TLS handshake against the /session/start HTTP
   // round-trip. The WS URL is static per deploy (baked in at build via
@@ -272,7 +278,7 @@ export async function startDesktopSession(
   const [session, eagerWs] = await Promise.all([
     jsonFetch<SessionStartResp>(`${API}/session/start`, {
       method: 'POST',
-      body: opts.cpi ? JSON.stringify({ cpi: opts.cpi }) : undefined,
+      body: JSON.stringify({ challengeId, ...(opts.cpi ? { cpi: opts.cpi } : {}) }),
     }),
     eagerWsPromise,
   ]);
@@ -627,12 +633,23 @@ async function runSsoLeg(
 
 export async function startSsoSession(
   merchantSessionId: string,
-  cpi: string
+  cpi: string,
+  merchantBinding?: { challengeId: string; callbackUrl: string }
 ): Promise<SsoStartResult> {
   const leg = await runSsoLeg(cpi, { role: 'merchant-start', merchantSessionId });
   return jsonFetch<SsoStartResult>(`${API}/sso/start`, {
     method: 'POST',
-    body: JSON.stringify({ merchantSessionId, cpi, ...leg }),
+    body: JSON.stringify({
+      merchantSessionId,
+      cpi,
+      ...(merchantBinding
+        ? {
+            merchantChallengeId: merchantBinding.challengeId,
+            merchantCallbackUrl: merchantBinding.callbackUrl,
+          }
+        : {}),
+      ...leg,
+    }),
   });
 }
 
