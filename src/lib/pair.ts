@@ -191,6 +191,9 @@ export interface SsoStartResult {
   sessionId: string;
   nonce: string;
   expiresAt: number;
+  cpi: string;
+  proofRequired: boolean;
+  freshProofRequired: boolean;
   challengeUrl: string;
 }
 
@@ -205,6 +208,7 @@ export interface SsoValidateResult {
   reason: string;
   reasons: string[];
   merchantSessionId: string;
+  cpi: string;
   nextDeviceTrust?: string | null;
 }
 
@@ -595,17 +599,24 @@ export async function startDesktopSession(
   };
 }
 
-async function runSsoLeg(payload: Record<string, unknown>): Promise<{
+export function defaultSsoCpi(): string {
+  return `${integrityCpi(ARGUS_CPI)}.stepup`;
+}
+
+async function runSsoLeg(
+  cpi: string,
+  payload: Record<string, unknown>
+): Promise<{
   argusSessionId: string;
   attestation: ArgusAttestation;
 }> {
   const run = await getArgus().run({
-    cpi: ARGUS_CPI,
+    cpi: integrityCpi(cpi),
     timeoutMs: 30_000,
     attest: {
       purpose: ATTEST_PURPOSE,
       ttlSeconds: ATTEST_TTL_SECONDS,
-      payload,
+      payload: { ...payload, cpi },
     },
   });
   if (!run.attestation) {
@@ -614,19 +625,23 @@ async function runSsoLeg(payload: Record<string, unknown>): Promise<{
   return { argusSessionId: run.argusSessionId, attestation: run.attestation };
 }
 
-export async function startSsoSession(merchantSessionId: string): Promise<SsoStartResult> {
-  const leg = await runSsoLeg({ role: 'merchant-start', merchantSessionId });
+export async function startSsoSession(
+  merchantSessionId: string,
+  cpi: string
+): Promise<SsoStartResult> {
+  const leg = await runSsoLeg(cpi, { role: 'merchant-start', merchantSessionId });
   return jsonFetch<SsoStartResult>(`${API}/sso/start`, {
     method: 'POST',
-    body: JSON.stringify({ merchantSessionId, ...leg }),
+    body: JSON.stringify({ merchantSessionId, cpi, ...leg }),
   });
 }
 
 export async function submitSsoChallenge(
   sessionId: string,
-  nonce: string
+  nonce: string,
+  cpi: string
 ): Promise<SsoChallengeResult> {
-  const leg = await runSsoLeg({ role: 'argus-challenge', ssoSessionId: sessionId, nonce });
+  const leg = await runSsoLeg(cpi, { role: 'argus-challenge', ssoSessionId: sessionId, nonce });
   return jsonFetch<SsoChallengeResult>(`${API}/sso/${encodeURIComponent(sessionId)}/challenge`, {
     method: 'POST',
     body: JSON.stringify(leg),
@@ -637,6 +652,7 @@ export async function validateSsoReturn({
   sessionId,
   nonce,
   returnCode,
+  cpi,
   mode,
   oauthResult,
   deviceTrustToken,
@@ -644,20 +660,22 @@ export async function validateSsoReturn({
   sessionId: string;
   nonce: string;
   returnCode: string;
-  mode?: 'passkey-create' | 'passkey-auth' | 'oauth' | 'device-trust';
+  cpi: string;
+  mode?: 'integrity-only' | 'passkey-create' | 'passkey-auth' | 'oauth' | 'device-trust';
   oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
   deviceTrustToken?: string;
 }): Promise<SsoValidateResult> {
   const useOAuth = mode === 'oauth';
   const useDeviceTrust = mode === 'device-trust';
+  const useIntegrityOnly = mode === 'integrity-only';
   const passkeyMode = mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
   const webauthnPromise: Promise<unknown | { error: string }> =
-    useOAuth || useDeviceTrust
+    useOAuth || useDeviceTrust || useIntegrityOnly
       ? Promise.resolve({ error: `mode_${mode}_skipped` })
       : passkeyMode === 'passkey-auth'
         ? authenticateExistingPasskey(nonce)
         : createNewPasskey(nonce);
-  const legPromise = runSsoLeg({
+  const legPromise = runSsoLeg(cpi, {
     role: 'merchant-validate',
     ssoSessionId: sessionId,
     nonce,
@@ -686,7 +704,7 @@ export async function validateSsoReturn({
         returnCode,
         ...legSettled.value,
         ...(useDeviceTrust && deviceTrustToken ? { deviceTrustToken } : {}),
-        ...(!useDeviceTrust && !useOAuth ? { webauthn } : {}),
+        ...(!useDeviceTrust && !useOAuth && !useIntegrityOnly ? { webauthn } : {}),
         ...(useOAuth && oauthResult ? { oauth: oauthResult } : {}),
       }),
     }
@@ -705,13 +723,17 @@ export async function validateSsoReturn({
 }
 
 export async function redeemSsoApproval(
-  sessionId: string
-): Promise<{ verdict: 'approved'; reason: 'approved' }> {
-  return jsonFetch<{ verdict: 'approved'; reason: 'approved' }>(`${API}/sso/approval/redeem`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: JSON.stringify({ sessionId }),
-  });
+  sessionId: string,
+  expectedCpi: string
+): Promise<{ verdict: 'approved'; reason: 'approved'; cpi: string; scope: string }> {
+  return jsonFetch<{ verdict: 'approved'; reason: 'approved'; cpi: string; scope: string }>(
+    `${API}/sso/approval/redeem`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: JSON.stringify({ sessionId, cpi: expectedCpi }),
+    }
+  );
 }
 
 // ── CLIENT (phone) ───────────────────────────────────────────────────────

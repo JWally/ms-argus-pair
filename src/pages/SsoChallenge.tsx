@@ -17,14 +17,15 @@ export function SsoChallenge() {
     }
     const nonce =
       params.get('n') ?? window.sessionStorage.getItem(`argus-demo-sso-nonce:${sessionId}`);
-    if (!nonce) {
-      queueMicrotask(() => setError('Missing SSO nonce'));
+    const cpi = params.get('cpi');
+    if (!nonce || !cpi) {
+      queueMicrotask(() => setError('Missing SSO session binding'));
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const r = await submitSsoChallenge(sessionId, nonce);
+        const r = await submitSsoChallenge(sessionId, nonce, cpi);
         if (cancelled) return;
         window.sessionStorage.setItem(`argus-demo-sso-nonce:${sessionId}`, nonce);
         navigate(r.returnUrl, { replace: true });

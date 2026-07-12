@@ -90,26 +90,20 @@ import {
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
-import {
-  getVerdictSecret,
-  signVerdict,
-  verifyVerdictForCpi,
-  verifyVerdictToken,
-} from './pair-api/verdict-token';
+import { getVerdictSecret, signVerdict, verifyVerdictForCpi } from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
 import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
+import { evaluateSsoProofPolicy } from './pair-api/sso-assurance';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
 import {
   approvalCookie,
-  checkApprovalRedemption,
-  clearApprovalCookie,
   hashApprovalToken,
   mintApprovalToken,
-  readApprovalCookie,
   SSO_APPROVAL_TTL_SECONDS,
 } from './pair-api/sso-approval';
+import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
@@ -304,6 +298,9 @@ interface SsoSessionItem {
   SK: 'META';
   nonce: string;
   merchantSessionId: string;
+  cpi: string;
+  proofRequired: boolean;
+  freshProofRequired: boolean;
   startProfile: SsoLegProfile;
   challengeProfile?: SsoLegProfile;
   validateProfile?: SsoLegProfile;
@@ -385,6 +382,12 @@ async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null>
   );
   return (res.Item as SsoSessionItem | undefined) ?? null;
 }
+
+const redeemSsoApprovalRequest = createSsoApprovalRedemptionHandler({
+  ddb,
+  tableName: TABLE,
+  loadSession: loadSsoSession,
+});
 
 const lambdaHandler = async (event: {
   routeKey: string;
@@ -512,7 +515,14 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/sso/start': {
-      const checked = validateSsoAttestation(body, { role: 'merchant-start' });
+      const rawCpi = body.cpi;
+      if (rawCpi === undefined) return jsonResp(400, { error: 'missing_cpi' });
+      const scopedCpi = parseScopedCpi(rawCpi);
+      if (!scopedCpi) return jsonResp(400, { error: 'invalid_cpi' });
+      const checked = validateSsoAttestation(body, {
+        role: 'merchant-start',
+        cpi: scopedCpi.cpi,
+      });
       if (!checked.ok) return jsonResp(checked.status, checked.body);
       const argusSessionId = body.argusSessionId as string;
       const id = randomUUID();
@@ -522,6 +532,7 @@ const lambdaHandler = async (event: {
           ? body.merchantSessionId.slice(0, 128)
           : randomUUID();
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+      const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
       const projection = await fetchProjection(argusSessionId);
       const scan = classifyScan(projection, 'sso_start');
       const phoneCheck = requirePhoneSsoScan(scan, 'start');
@@ -531,6 +542,9 @@ const lambdaHandler = async (event: {
         SK: 'META',
         nonce,
         merchantSessionId,
+        cpi: scopedCpi.cpi,
+        proofRequired,
+        freshProofRequired: scopedCpi.freshProofRequired,
         startProfile: ssoProfileFromScan(argusSessionId, checked.attestation, scan),
         verdict: 'pending',
         expiresAt,
@@ -546,6 +560,9 @@ const lambdaHandler = async (event: {
         sessionId: id,
         nonce,
         expiresAt,
+        cpi: scopedCpi.cpi,
+        proofRequired,
+        freshProofRequired: scopedCpi.freshProofRequired,
         challengeUrl: `/sso/challenge/${id}`,
       });
     }
@@ -558,6 +575,7 @@ const lambdaHandler = async (event: {
         role: 'argus-challenge',
         sessionId: sessionId!,
         nonce: s.nonce,
+        cpi: s.cpi,
       });
       if (!checked.ok) return jsonResp(checked.status, checked.body);
       const argusSessionId = body.argusSessionId as string;
@@ -584,7 +602,7 @@ const lambdaHandler = async (event: {
       return jsonResp(200, {
         ok: true,
         returnCode: code.value,
-        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}`,
+        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}&cpi=${encodeURIComponent(s.cpi)}`,
       });
     }
 
@@ -610,6 +628,7 @@ const lambdaHandler = async (event: {
         sessionId: sessionId!,
         nonce: s.nonce,
         returnCode,
+        cpi: s.cpi,
       });
       if (!checked.ok) return jsonResp(checked.status, checked.body);
       const argusSessionId = body.argusSessionId as string;
@@ -627,6 +646,9 @@ const lambdaHandler = async (event: {
       let proofOfLife = false;
       let proofAnnotations: Record<string, unknown> = {};
 
+      if (s.freshProofRequired && deviceTrustToken) {
+        return jsonResp(401, { error: 'fresh_proof_required' });
+      }
       if (deviceTrustToken) {
         trustResult = await verifyDeviceTrust(
           deviceTrustToken,
@@ -660,9 +682,19 @@ const lambdaHandler = async (event: {
         ...(trustResult?.ipChanged ? { phone_device_trust_ip_changed: true } : {}),
       };
 
-      if (!proofOfLife) {
+      const proofDecision = evaluateSsoProofPolicy(
+        {
+          proofRequired: s.proofRequired,
+          freshProofRequired: s.freshProofRequired,
+        },
+        {
+          proofSatisfied: proofOfLife,
+          usedDeviceTrust: trustResult?.ok === true,
+        }
+      );
+      if (!proofDecision.ok) {
         return jsonResp(401, {
-          error: 'proof_of_life_required',
+          error: proofDecision.reason,
           annotations: proofAnnotations,
         });
       }
@@ -725,55 +757,14 @@ const lambdaHandler = async (event: {
           reason: verdict.reason,
           reasons: verdict.reasons,
           merchantSessionId: s.merchantSessionId,
+          cpi: s.cpi,
           nextDeviceTrust,
         }),
       };
     }
 
     case 'POST /api/sso/approval/redeem': {
-      const approvalSessionId =
-        typeof body.sessionId === 'string' && body.sessionId.length <= 128 ? body.sessionId : '';
-      const approvalToken = readApprovalCookie(event.cookies);
-      if (!approvalSessionId || !approvalToken) {
-        return jsonResp(401, { error: 'sso_approval_missing' });
-      }
-
-      const approvalSession = await loadSsoSession(approvalSessionId);
-      if (!approvalSession) return jsonResp(410, { error: 'sso_session_not_found' });
-      const approvalCheck = checkApprovalRedemption(approvalSession, approvalToken);
-      if (approvalCheck !== 'approved') {
-        return jsonResp(409, { error: `sso_approval_${approvalCheck}` });
-      }
-
-      const tokenHash = hashApprovalToken(approvalToken);
-      const redeemedAt = Math.floor(Date.now() / 1000);
-      try {
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { PK: `SSO#${approvalSessionId}`, SK: 'META' },
-            UpdateExpression: 'SET approvalRedeemedAt = :now REMOVE approvalTokenHash',
-            ConditionExpression:
-              'attribute_exists(PK) AND verdict = :approved AND approvalTokenHash = :hash AND attribute_not_exists(approvalRedeemedAt)',
-            ExpressionAttributeValues: {
-              ':now': redeemedAt,
-              ':approved': 'approved',
-              ':hash': tokenHash,
-            },
-          })
-        );
-      } catch (error: unknown) {
-        const isConflict = (error as { name?: string })?.name === 'ConditionalCheckFailedException';
-        if (isConflict) return jsonResp(409, { error: 'sso_approval_invalid_or_consumed' });
-        throw error;
-      }
-
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-        cookies: [clearApprovalCookie()],
-        body: JSON.stringify({ verdict: 'approved', reason: 'approved' }),
-      };
+      return redeemSsoApprovalRequest(body, event.cookies);
     }
 
     case 'GET /api/session/{id}/info': {
@@ -1382,14 +1373,13 @@ const lambdaHandler = async (event: {
     case 'POST /api/verify': {
       const vToken = (body as { token?: unknown }).token;
       if (typeof vToken !== 'string') return jsonResp(400, { error: 'missing_token' });
+      const rawCpi = body.cpi;
+      if (rawCpi === undefined) return jsonResp(400, { error: 'missing_cpi' });
+      const expectedCpi = parseScopedCpi(rawCpi);
+      if (!expectedCpi) return jsonResp(400, { error: 'invalid_cpi' });
       const secret = await getVerdictSecret();
       if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
-      // Optional tenant assertion: if the caller names its CPI, it must match.
-      const wantCpi = (body as { cpi?: unknown }).cpi;
-      const result =
-        typeof wantCpi === 'string'
-          ? verifyVerdictForCpi(secret, vToken, wantCpi)
-          : verifyVerdictToken(secret, vToken);
+      const result = verifyVerdictForCpi(secret, vToken, expectedCpi.cpi);
       if (!result.ok) return jsonResp(200, { valid: false, reason: result.reason });
       return jsonResp(200, {
         // `valid` = the token's signature is authentic and unexpired. It does

@@ -21,13 +21,15 @@ export function MerchantValidate() {
   const [validating, setValidating] = useState(false);
   const [passkeySeen, setPasskeySeen] = useState(false);
   const sessionId = params.get('session');
+  const cpi = params.get('cpi');
   const approved = result?.verdict === 'approved';
   const failed = !!error || result?.verdict === 'failed';
 
   useEffect(() => {
     const sessionId = params.get('session');
     const returnCode = params.get('code');
-    if (!sessionId || !returnCode) {
+    const cpi = params.get('cpi');
+    if (!sessionId || !returnCode || !cpi) {
       queueMicrotask(() => setError('Missing return material'));
       return;
     }
@@ -40,6 +42,22 @@ export function MerchantValidate() {
     void (async () => {
       try {
         setPasskeySeen(hasPasskeyHint());
+        if (cpi.endsWith('.fastpass')) {
+          if (!cancelled) setValidating(true);
+          const validation = await validateSsoReturn({
+            sessionId,
+            nonce,
+            returnCode,
+            cpi,
+            mode: 'integrity-only',
+          });
+          if (!cancelled) setResult(validation);
+          return;
+        }
+        if (cpi.endsWith('.forceauth')) {
+          if (!cancelled) setNeedsProof(true);
+          return;
+        }
         const trustToken = await loadTrustToken();
         if (!trustToken) {
           if (!cancelled) setNeedsProof(true);
@@ -50,6 +68,7 @@ export function MerchantValidate() {
           sessionId,
           nonce,
           returnCode,
+          cpi,
           mode: 'device-trust',
           deviceTrustToken: trustToken,
         });
@@ -74,16 +93,18 @@ export function MerchantValidate() {
   }, [params]);
 
   useEffect(() => {
-    if (!approved || !sessionId) return;
-    navigate(`/merchant?complete=1&session=${encodeURIComponent(sessionId)}`, {
+    if (!approved || !sessionId || !cpi) return;
+    const merchantParams = new URLSearchParams({ complete: '1', session: sessionId, cpi });
+    navigate(`/merchant?${merchantParams.toString()}`, {
       replace: true,
     });
-  }, [approved, navigate, sessionId]);
+  }, [approved, cpi, navigate, sessionId]);
 
   async function runProof(mode: 'passkey-create' | 'passkey-auth' | 'google') {
     const sessionId = params.get('session');
     const returnCode = params.get('code');
-    if (!sessionId || !returnCode || validating) return;
+    const cpi = params.get('cpi');
+    if (!sessionId || !returnCode || !cpi || validating) return;
     const nonce = window.sessionStorage.getItem(`argus-demo-sso-nonce:${sessionId}`);
     if (!nonce) {
       setError('Missing merchant session state');
@@ -103,6 +124,7 @@ export function MerchantValidate() {
             sessionId,
             nonce,
             returnCode,
+            cpi,
             mode: 'oauth',
             oauthResult,
           })
@@ -112,6 +134,7 @@ export function MerchantValidate() {
           sessionId,
           nonce,
           returnCode,
+          cpi,
           mode,
         });
         if (

@@ -33,11 +33,24 @@ describe('SSO approval cookie', () => {
   });
 
   it('accepts only the unconsumed token for an approved session', () => {
-    const state = { verdict: 'approved' as const, approvalTokenHash: hashApprovalToken('secret') };
-    expect(checkApprovalRedemption(state, 'secret')).toBe('approved');
-    expect(checkApprovalRedemption(state, 'wrong')).toBe('invalid');
-    expect(checkApprovalRedemption({ verdict: 'pending' }, 'secret')).toBe('not_approved');
-    expect(checkApprovalRedemption({ verdict: 'approved' }, 'secret')).toBe('missing');
-    expect(checkApprovalRedemption({ ...state, approvalRedeemedAt: 1 }, 'secret')).toBe('consumed');
+    const cpi = 'argus_cpi_live_Example12345.forceauth';
+    const state = {
+      verdict: 'approved' as const,
+      approvalTokenHash: hashApprovalToken('secret'),
+      cpi,
+    };
+    expect(checkApprovalRedemption(state, 'secret', cpi)).toBe('approved');
+    expect(checkApprovalRedemption(state, 'wrong', cpi)).toBe('invalid');
+    expect(checkApprovalRedemption(state, 'secret', `${cpi}x`)).toBe('cpi_mismatch');
+    expect(checkApprovalRedemption({ verdict: 'pending', cpi }, 'secret', cpi)).toBe(
+      'not_approved'
+    );
+    expect(checkApprovalRedemption({ verdict: 'approved', cpi }, 'secret', cpi)).toBe('missing');
+    expect(checkApprovalRedemption({ ...state, approvalRedeemedAt: 1 }, 'secret', cpi)).toBe(
+      'consumed'
+    );
+    expect(checkApprovalRedemption({ ...state, cpi: undefined }, 'secret', cpi)).toBe(
+      'cpi_missing'
+    );
   });
 });

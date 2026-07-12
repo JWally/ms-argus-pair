@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { MerchantWordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
-import { redeemSsoApproval, startSsoSession } from '../lib/pair';
+import { defaultSsoCpi, redeemSsoApproval, startSsoSession } from '../lib/pair';
 
 const CAPTCHA_DEMO_URL = 'https://www-dev-jw.argus.pw/captcha';
 type MerchantStatus = 'idle' | 'profiling' | 'redeeming' | 'approved' | 'error';
@@ -86,21 +86,23 @@ export function MerchantSso() {
   const [params] = useSearchParams();
   const isReturn = params.get('complete') === '1';
   const approvalSessionId = params.get('session');
+  const requestedCpi = params.get('cpi');
+  const expectedCpi = requestedCpi ?? defaultSsoCpi();
   const [status, setStatus] = useState<MerchantStatus>(isReturn ? 'redeeming' : 'idle');
   const [error, setError] = useState<string | null>(null);
   const merchantSessionId = useMemo(() => newMerchantSessionId(), []);
 
   useEffect(() => {
     if (!isReturn) return;
-    if (!approvalSessionId) {
+    if (!approvalSessionId || !requestedCpi) {
       queueMicrotask(() => {
         setStatus('error');
-        setError('Missing approval session');
+        setError('Missing approval binding');
       });
       return;
     }
     let cancelled = false;
-    void redeemSsoApproval(approvalSessionId)
+    void redeemSsoApproval(approvalSessionId, requestedCpi)
       .then(() => {
         if (cancelled) return;
         window.sessionStorage.removeItem('argus-demo-merchant-session');
@@ -114,7 +116,7 @@ export function MerchantSso() {
     return () => {
       cancelled = true;
     };
-  }, [approvalSessionId, isReturn]);
+  }, [approvalSessionId, isReturn, requestedCpi]);
 
   useEffect(() => {
     if (status !== 'approved') return;
@@ -128,9 +130,10 @@ export function MerchantSso() {
     setStatus('profiling');
     setError(null);
     try {
-      const session = await startSsoSession(merchantSessionId);
+      const session = await startSsoSession(merchantSessionId, expectedCpi);
       window.sessionStorage.setItem(`argus-demo-sso-nonce:${session.sessionId}`, session.nonce);
-      navigate(`${session.challengeUrl}?n=${encodeURIComponent(session.nonce)}`);
+      const challengeParams = new URLSearchParams({ n: session.nonce, cpi: session.cpi });
+      navigate(`${session.challengeUrl}?${challengeParams.toString()}`);
     } catch (cause) {
       setStatus('error');
       setError(cause instanceof Error ? cause.message : String(cause));
