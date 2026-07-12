@@ -6,6 +6,7 @@ const root = process.cwd();
 const pairPage = fs.readFileSync(path.join(root, 'src/pages/Pair.tsx'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
 
 function assert(condition, message) {
   if (!condition) {
@@ -19,6 +20,14 @@ assert(
     pairPage.includes('PROVIDERS_CONFIGURED') &&
     pairPage.includes('isOAuthError'),
   'Pair page should wire Google OAuth proof-of-life helpers'
+);
+
+assert(
+  pairPage.includes('infoRef.current.freshProofRequired') &&
+    phoneEntry.includes('state.info.freshProofRequired') &&
+    pairLib.includes('info.freshProofRequired ? null : await loadTrustToken()') &&
+    pairApi.includes('s.freshProofRequired && deviceTrustToken'),
+  'forceauth should bypass cached trust in both phone UIs and reject it on the server'
 );
 
 assert(

@@ -9,6 +9,7 @@ describe('scoped CPI policy', () => {
       cpi: BASE_CPI,
       scope: 'integrity',
       proofRequired: false,
+      freshProofRequired: false,
     });
   });
 
@@ -17,6 +18,7 @@ describe('scoped CPI policy', () => {
       cpi: `${BASE_CPI}.stepup`,
       scope: 'stepup',
       proofRequired: true,
+      freshProofRequired: false,
     });
   });
 
@@ -25,6 +27,16 @@ describe('scoped CPI policy', () => {
       cpi: `${BASE_CPI}.fastpass`,
       scope: 'fastpass',
       proofRequired: false,
+      freshProofRequired: false,
+    });
+  });
+
+  it('binds forceauth to fresh proof and disallows cached device trust', () => {
+    expect(parseScopedCpi(`${BASE_CPI}.forceauth`)).toEqual({
+      cpi: `${BASE_CPI}.forceauth`,
+      scope: 'forceauth',
+      proofRequired: true,
+      freshProofRequired: true,
     });
   });
 

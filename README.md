@@ -34,8 +34,9 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 
 Or programmatically: `window.argusCaptcha.render(el, { cpi, onResult, onEvent })`.
 
-Append `.fastpass` for an explicit integrity-only flow, or `.stepup` to require
-proof-of-life for that integration point:
+Append `.fastpass` for an explicit integrity-only flow, `.stepup` to accept
+proof-of-life including cached device trust, or `.forceauth` to require a fresh
+passkey/Google ceremony on every run:
 
 ```html
 <script

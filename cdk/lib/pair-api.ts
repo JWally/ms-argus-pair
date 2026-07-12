@@ -407,6 +407,7 @@ interface SessionItem {
   expiresAt: number;
   cpi?: string | null;
   proofRequired?: boolean;
+  freshProofRequired?: boolean;
   desktopAttestation?: StoredAttestation;
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
@@ -478,6 +479,7 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       expiresAt: meta.expiresAt,
       cpi: meta.cpi ?? null,
       proofRequired: meta.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
+      freshProofRequired: meta.freshProofRequired ?? false,
       verdict: phone?.verdict ?? 'pending',
       verdictReason: phone?.reason ?? undefined,
       desktopAttestation: desktop as unknown as StoredAttestation | undefined,
@@ -570,8 +572,15 @@ const lambdaHandler = async (event: {
       }
       const cpi = scopedCpi?.cpi ?? null;
       const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
+      const freshProofRequired = scopedCpi?.freshProofRequired ?? false;
       if (isValkeySessionsEnabled()) {
-        const created = await startSessionValkey(id, { nonce, expiresAt, cpi, proofRequired });
+        const created = await startSessionValkey(id, {
+          nonce,
+          expiresAt,
+          cpi,
+          proofRequired,
+          freshProofRequired,
+        });
         if (!created) {
           // UUIDv4 collision — vanishingly rare, but mirrors the
           // DDB ConditionExpression rejection so the caller can retry.
@@ -585,6 +594,7 @@ const lambdaHandler = async (event: {
           expiresAt,
           cpi,
           proofRequired,
+          freshProofRequired,
           verdict: 'pending',
         };
         await ddb.send(
@@ -1009,6 +1019,9 @@ const lambdaHandler = async (event: {
       if (!s) return jsonResp(404, { error: 'session_not_found' });
       if (!s.desktopAttestation) {
         return jsonResp(409, { error: 'desktop_not_attested_yet' });
+      }
+      if (s.freshProofRequired && deviceTrustToken) {
+        return jsonResp(401, { error: 'fresh_proof_required', clearDeviceTrust: false });
       }
       // QR sessions are single-use. If a phoneAttestation already exists,
       // distinguish two cases by pubkey:
@@ -1438,6 +1451,7 @@ const lambdaHandler = async (event: {
         pt: pb.pt,
         n: pb.n,
         proofRequired: pairSession.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
+        freshProofRequired: pairSession.freshProofRequired ?? false,
       });
       try {
         const compression: QrCompression = 'none';

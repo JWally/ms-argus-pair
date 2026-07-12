@@ -236,7 +236,7 @@ export interface StartDesktopOptions {
 
 /** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
 function integrityCpi(cpi: string): string {
-  return cpi.replace(/\.(?:fastpass|stepup)$/, '');
+  return cpi.replace(/\.(?:fastpass|stepup|forceauth)$/, '');
 }
 
 export async function startDesktopSession(
@@ -728,6 +728,8 @@ export interface PhoneSessionInfo {
   nonce: string;
   /** Server-resolved CPI policy delivered through the single-use QR token. */
   proofRequired: boolean;
+  /** True when cached device trust cannot satisfy this session. */
+  freshProofRequired: boolean;
   expiresAt: number;
   desktopArgusSessionId: string;
   desktopKeyId: string;
@@ -763,6 +765,7 @@ interface PairHashParams {
   phoneToken: string;
   nonce: string;
   proofRequired: boolean;
+  freshProofRequired: boolean;
 }
 
 function parsePairHash(): PairHashParams {
@@ -774,10 +777,18 @@ function parsePairHash(): PairHashParams {
   const n = params.get('n');
   // Missing means strict for compatibility with QR tokens minted before this field existed.
   const proofRequired = params.get('pr') !== '0';
+  const freshProofRequired = params.get('fr') === '1';
   if (!wsUrl || !e || !pt || !n) {
     throw new Error('pair URL is missing WebSocket routing material in the fragment — open via QR');
   }
-  return { wsUrl, desktopEnvelope: e, phoneToken: pt, nonce: n, proofRequired };
+  return {
+    wsUrl,
+    desktopEnvelope: e,
+    phoneToken: pt,
+    nonce: n,
+    proofRequired,
+    freshProofRequired,
+  };
 }
 
 function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
@@ -830,7 +841,8 @@ export async function awaitDesktopReady(
   } = {}
 ): Promise<PhoneSessionInfo> {
   if (signal?.aborted) throw new Error('aborted');
-  const { wsUrl, desktopEnvelope, phoneToken, nonce, proofRequired } = parsePairHash();
+  const { wsUrl, desktopEnvelope, phoneToken, nonce, proofRequired, freshProofRequired } =
+    parsePairHash();
 
   const conn = await connectAndWhoami({
     url: wsUrl,
@@ -869,6 +881,7 @@ export async function awaitDesktopReady(
     return {
       nonce: data.nonce,
       proofRequired,
+      freshProofRequired,
       expiresAt: data.expiresAt,
       desktopArgusSessionId: data.desktopArgusSessionId,
       desktopKeyId: data.desktopKeyId,
@@ -1123,7 +1136,7 @@ export async function submitPhoneAttestation(
 ): Promise<AttestResponse> {
   // ── Silent redeem path ─────────────────────────────────────────
   const { loadTrustToken, saveTrustToken, clearTrustToken } = await import('./device-trust');
-  const trustToken = await loadTrustToken();
+  const trustToken = info.freshProofRequired ? null : await loadTrustToken();
   if (!trustToken && options.trustOnly) {
     throw new Error('device_trust_unavailable');
   }
