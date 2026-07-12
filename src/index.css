@@ -1462,122 +1462,295 @@
   padding: 1.5rem;
 }
 
-.sso-side-panel {
-  min-width: 0;
-  border: 1px solid rgb(42 42 48 / 0.9);
+.argus-page,
+.merchant-page {
+  min-height: 100dvh;
+}
+
+.argus-page {
+  background: var(--bg-primary);
+  color: var(--fg-primary);
+}
+
+.argus-layout,
+.merchant-layout {
+  width: min(100%, 64rem);
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.argus-layout {
+  display: flex;
+  max-width: 30rem;
+  flex-direction: column;
+}
+
+.argus-header,
+.merchant-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid;
+  padding-bottom: 1rem;
+}
+
+.argus-header {
+  border-color: rgb(42 44 64 / 0.75);
+}
+
+.argus-main,
+.merchant-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.argus-main {
+  gap: 1.25rem;
+}
+
+.merchant-page {
+  background: #f5f6f8;
+  color: #17151c;
+}
+
+.merchant-layout {
+  display: flex;
+  max-width: 56rem;
+  flex-direction: column;
+}
+
+.merchant-layout-narrow {
+  max-width: 36rem;
+}
+
+.merchant-header {
+  border-color: #dfe1e6;
+}
+
+.merchant-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: #17151c;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.merchant-mark {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #17151c;
+  color: #fff;
+  font-size: 0.78rem;
+}
+
+.merchant-demo-badge {
+  border: 1px solid #cfd1d7;
+  border-radius: 4px;
+  padding: 0.18rem 0.35rem;
+  color: #6c6675;
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.merchant-secured {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #686472;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.merchant-main {
+  width: min(100%, 31rem);
+  gap: 1rem;
+  margin: 0 auto;
+  padding: 3rem 0;
+}
+
+.merchant-card,
+.merchant-proof {
+  border: 1px solid #dfe1e6;
   border-radius: 8px;
-  background: rgb(10 10 13 / 0.72);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  background: #fff;
+  box-shadow: 0 18px 55px -38px rgb(34 28 45 / 0.35);
+}
+
+.merchant-card {
+  padding: clamp(1.5rem, 6vw, 2.5rem);
+}
+
+.merchant-card h1 {
+  margin-top: 0.55rem;
+  color: #17151c;
+  font-size: clamp(1.7rem, 7vw, 2.35rem);
+  font-weight: 650;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+
+.merchant-eyebrow {
+  color: #6c6675;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.merchant-copy {
+  margin-top: 0.8rem;
+  color: #686472;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.merchant-primary,
+.merchant-secondary,
+.merchant-done {
+  display: inline-flex;
+  width: 100%;
+  min-height: 3.25rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+
+.merchant-primary {
+  margin-top: 1.5rem;
+  border: 1px solid #17151c;
+  background: #17151c;
+  color: #fff;
+}
+
+.merchant-primary:hover {
+  background: #302c37;
+}
+
+.merchant-primary:disabled,
+.merchant-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.merchant-secondary,
+.merchant-done {
+  border: 1px solid #cfd1d7;
+  background: #fff;
+  color: #211e27;
+}
+
+.merchant-secondary:hover,
+.merchant-done:hover {
+  border-color: #91899e;
+  background: #fafafa;
+}
+
+.merchant-done-flat {
+  margin-top: 1.5rem;
+  border-color: #17151c;
+  background: transparent;
+}
+
+.merchant-done-flat:hover {
+  border-color: #17151c;
+  background: #17151c;
+  color: #fff;
+}
+
+.merchant-result {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  text-align: center;
+}
+
+.merchant-result-icon {
+  display: inline-flex;
+  width: 3.5rem;
+  height: 3.5rem;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.25rem;
+  border-radius: 50%;
+  background: #ece9f2;
+  color: #6d6378;
+}
+
+.merchant-result-icon.is-approved {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.merchant-result-icon.is-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.merchant-approved {
+  margin-top: 0.65rem;
+  color: #15803d;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-transform: lowercase;
+}
+
+.merchant-spinner {
+  border-color: rgb(23 21 28 / 0.18);
+  border-top-color: #17151c;
+}
+
+.merchant-proof {
   padding: 1.25rem;
 }
 
-.sso-session {
-  min-width: 10rem;
-  border: 1px solid rgb(77 25 121 / 0.42);
-  border-radius: 8px;
-  background: rgb(77 25 121 / 0.12);
-  padding: 0.9rem 1rem;
-}
-
-.sso-check-row {
-  display: flex;
-  gap: 0.8rem;
-  align-items: flex-start;
-  border-top: 1px solid rgb(42 42 48 / 0.72);
-  padding-top: 1rem;
-}
-
-.sso-check-row:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-
-.sso-route {
+.merchant-proof-actions {
   display: grid;
-  grid-template-columns: max-content minmax(1.5rem, 1fr) max-content minmax(1.5rem, 1fr) max-content;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  min-width: 0;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
 }
 
-.sso-route-node {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: center;
-  gap: 0.45rem;
-  border: 1px solid rgb(42 42 48 / 0.9);
-  border-radius: 8px;
-  background: rgb(255 255 255 / 0.035);
-  padding: 0.55rem 0.7rem;
-  color: rgb(148 148 158);
-  font-size: 0.72rem;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-  white-space: nowrap;
+.merchant-proof .merchant-primary {
+  margin-top: 0;
 }
 
-.sso-route-node-active {
-  border-color: rgb(168 85 247 / 0.55);
-  background: rgb(77 25 121 / 0.18);
-  color: rgb(245 245 246);
+.merchant-error {
+  margin-top: 1rem;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  background: #fef2f2;
+  padding: 0.75rem;
+  color: #991b1b;
+  font-size: 0.82rem;
 }
 
-.sso-route-node-done {
-  border-color: rgb(34 197 94 / 0.45);
-  background: rgb(34 197 94 / 0.12);
-  color: rgb(187 247 208);
-}
-
-.sso-route-line {
-  height: 1px;
-  min-width: 1.5rem;
-  background: rgb(42 42 48 / 0.95);
-}
-
-.sso-route-line-active {
-  background: linear-gradient(90deg, rgb(34 197 94 / 0.7), rgb(168 85 247 / 0.65));
-}
-
-.sso-input {
-  width: 100%;
-  border: 1px solid rgb(77 25 121 / 0.6);
-  border-radius: 8px;
-  background: rgb(0 0 0 / 0.42);
-  padding: 0.95rem 1rem;
-  color: white;
-  font-family:
-    JetBrains Mono,
-    ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Monaco,
-    Consolas,
-    monospace;
-  font-size: 0.95rem;
-  outline: none;
-}
-
-.sso-input::placeholder {
-  color: rgb(148 148 158 / 0.78);
-}
-
-.sso-input:focus {
-  border-color: rgb(168 85 247 / 0.86);
-  box-shadow: 0 0 0 3px rgb(77 25 121 / 0.22);
-}
-
-@media (max-width: 480px) {
-  .sso-route {
-    grid-template-columns: minmax(0, 1fr) 0.75rem minmax(0, 1fr) 0.75rem minmax(0, 1fr);
-    gap: 0.35rem;
+@media (max-width: 520px) {
+  .argus-layout,
+  .merchant-layout {
+    padding: 1.1rem;
   }
 
-  .sso-route-node {
-    gap: 0.28rem;
-    padding: 0.5rem 0.35rem;
-    font-size: 0.62rem;
+  .merchant-secured {
+    max-width: 8rem;
+    justify-content: flex-end;
+    text-align: right;
+  }
+
+  .merchant-main {
+    padding: 2rem 0;
   }
 }

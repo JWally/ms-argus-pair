@@ -32,3 +32,15 @@ export function Wordmark({ className = '' }: { className?: string }) {
     </div>
   );
 }
+
+export function MerchantWordmark({ className = '' }: { className?: string }) {
+  return (
+    <div className={`merchant-wordmark ${className}`}>
+      <span className="merchant-mark" aria-hidden>
+        M
+      </span>
+      <span>Merchant SSO</span>
+      <span className="merchant-demo-badge">DEMO</span>
+    </div>
+  );
+}

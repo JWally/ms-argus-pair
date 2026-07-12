@@ -214,8 +214,8 @@ export class PairStack extends cdk.Stack {
         VALKEY_PORT: '6379',
         USE_VALKEY_RATE_LIMITS: 'true',
         // Valkey session-state backend. USE_VALKEY_SESSIONS=true routes
-        // session/start, desktop-attest, phone-attest, argus claims,
-        // and raffle-hash claims through per-key SET NX EX commands
+        // session/start, desktop-attest, phone-attest, and Argus claims
+        // through per-key SET NX EX commands
         // instead of DDB Put/UpdateCommand. Both code paths ship; flip
         // the env to roll back without a code redeploy. Live on dev-jw
         // after smoke-testing /session/start and /info through the
@@ -311,7 +311,7 @@ export class PairStack extends cdk.Stack {
       integration,
     });
     api.addRoutes({
-      path: '/api/sso/{id}/claim',
+      path: '/api/sso/approval/redeem',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });

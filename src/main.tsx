@@ -6,9 +6,8 @@ import './fonts.css';
 import './index.css';
 
 // Route-split: each page lands in its own Vite chunk. Phone users
-// hitting /pair/:id download only the Pair chunk + entry, NOT the
-// raffle / leaderboard / QR generator that live in Demo. Saves
-// ~150KB minified on the phone-side cold load.
+// hitting /pair/:id download only the Pair chunk + entry. Saves ~150KB
+// minified on the phone-side cold load.
 //
 // Named exports → default-export shape that React.lazy expects.
 const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));

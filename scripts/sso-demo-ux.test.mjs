@@ -12,13 +12,14 @@ function assert(condition, message) {
   }
 }
 
+const merchant = read('src/pages/MerchantSso.tsx');
+const challenge = read('src/pages/SsoChallenge.tsx');
 const validate = read('src/pages/MerchantValidate.tsx');
-const valkey = read('cdk/lib/valkey-client.ts');
+const brand = read('src/components/Brand.tsx');
 
-assert(validate.includes('nameInput'), 'merchant validate page should capture a demo name');
 assert(
-  validate.includes('submitSsoClaim'),
-  'merchant validate page should submit names to backend claim gate'
+  !validate.includes('nameInput') && !validate.includes('submitSsoClaim'),
+  'merchant validate page should not contain the retired game claim'
 );
 assert(
   validate.includes('proof required') &&
@@ -27,15 +28,51 @@ assert(
     validate.includes('Continue with Google'),
   'merchant validate page should gate SSO validation behind proof buttons'
 );
-assert(validate.includes('Your name'), 'merchant validate page should expose a clear name field');
 assert(
-  validate.includes('VERIFIED') && validate.includes('NOT VERIFIED'),
-  'merchant validate page should show explicit validity state'
+  merchant.includes('Session is Valid') && merchant.includes("'approved'"),
+  'final merchant page should show the exact approved session state'
 );
-assert(validate.includes('DONE'), 'merchant validate page should offer a bottom DONE action');
 assert(
-  valkey.includes('return tonumber(ARGV[1]) + 1'),
-  'Valkey rate limiter should return an over-cap value once the cap is reached'
+  validate.includes('useNavigate') &&
+    validate.includes('navigate(`/merchant?complete=1&session=') &&
+    validate.includes('replace: true'),
+  'approved validation should automatically continue to approval-cookie redemption'
+);
+assert(
+  !validate.includes('DONE') && merchant.includes('DONE'),
+  'only the final merchant approval screen should show DONE'
+);
+assert(
+  merchant.includes('merchant-page') && validate.includes('merchant-page'),
+  'both merchant legs should use the daylight merchant theme'
+);
+assert(
+  challenge.includes('argus-page') && !challenge.includes('sso-route'),
+  'the hosted Argus leg should stay dark and omit the redundant route map'
+);
+assert(
+  !merchant.includes('sso-route') && !validate.includes('sso-route'),
+  'merchant pages should omit the redundant route map'
+);
+assert(
+  merchant.includes('https://www-dev-jw.argus.pw/captcha') &&
+    merchant.includes('window.setTimeout') &&
+    merchant.includes('3_000'),
+  'approved merchant return should redirect to the captcha demo after three seconds'
+);
+assert(
+  merchant.includes('merchant-done-flat') && merchant.includes('DONE'),
+  'approved merchant return should also expose a flat DONE action'
+);
+assert(
+  brand.includes('merchant-demo-badge') && brand.includes('DEMO'),
+  'merchant SSO wordmark should identify the experience as a demo'
+);
+assert(
+  merchant.includes('Try the SSO demo') &&
+    merchant.includes('No account or sign-in is required') &&
+    merchant.includes('Run demo'),
+  'merchant entry should make clear that no real sign-in is required'
 );
 
 if (process.exitCode) process.exit(process.exitCode);
