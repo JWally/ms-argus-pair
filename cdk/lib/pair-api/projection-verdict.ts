@@ -3,15 +3,6 @@
 // scores.
 export const INDIVIDUAL_SCORE_LIMIT = 30;
 const TOTAL_SCORE_LIMIT = 50;
-// #13: PAT is a strong Apple-device signal but FARMABLE (the upstream
-// /v1/pat-attestation challenge is unbound + not single-use). So PAT is no
-// longer an unconditional golden ticket. It EXTENDS the per-side score
-// tolerance from INDIVIDUAL_SCORE_LIMIT up to PAT_SCORE_FLOOR for an
-// attested side, but cannot whitewash hard automation/tampering evidence
-// (score >= floor), and no longer exempts the datacenter or total-score
-// checks. A genuine Apple device scores well under 30, so this never costs a
-// legit PAT user; it only denies a farmed PAT stapled onto a dirty device.
-const PAT_SCORE_FLOOR = 70;
 
 export const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
 
@@ -274,9 +265,7 @@ export function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): 
   if (desktop.isProxy) return { verdict: 'failed', reason: 'desktop_on_proxy', annotations };
   if (phone.isProxy) return { verdict: 'failed', reason: 'phone_on_proxy', annotations };
 
-  const scoreOk = (s: ClassifiedScan) =>
-    s.individualScore < INDIVIDUAL_SCORE_LIMIT ||
-    (s.patAttested && s.individualScore < PAT_SCORE_FLOOR);
+  const scoreOk = (s: ClassifiedScan) => s.individualScore < INDIVIDUAL_SCORE_LIMIT;
   if (!scoreOk(desktop)) {
     return { verdict: 'failed', reason: 'desktop_score_high', annotations };
   }

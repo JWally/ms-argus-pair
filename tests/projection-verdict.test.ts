@@ -71,6 +71,14 @@ describe('projection verdict', () => {
     expect(summarizeDesktopScan(scan({ patAttested: true, isDatacenter: true })).clean).toBe(false);
   });
 
+  it('does not let PAT raise the individual score limit', () => {
+    const result = computeVerdict(
+      scan({ individualScore: 45, patAttested: true }),
+      scan({ individualScore: 0, isPhone: true })
+    );
+    expect(result).toMatchObject({ verdict: 'failed', reason: 'desktop_score_high' });
+  });
+
   it('requires fresh created_at timestamps', () => {
     expect(isProjectionFresh({ created_at: Date.now() })).toBe(true);
     expect(isProjectionFresh({ created_at: Date.now() - 300_000 })).toBe(false);
