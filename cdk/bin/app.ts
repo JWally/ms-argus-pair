@@ -23,6 +23,10 @@ const oauthFacebookAppId = app.node.tryGetContext('oauthFacebookAppId') as strin
 const oauthFacebookAppSecretArn = app.node.tryGetContext('oauthFacebookAppSecretArn') as
   | string
   | undefined;
+const ssoCallbackOrigins = String(app.node.tryGetContext('ssoCallbackOrigins') ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 new PairStack(app, 'ms-argus-pair-dev-jw', {
   env: { account, region: 'us-east-1' },
@@ -33,6 +37,7 @@ new PairStack(app, 'ms-argus-pair-dev-jw', {
   merchantApiUrl,
   merchantApiCredential,
   merchantCpi,
+  ssoCallbackOrigins,
   oauthGoogleClientId,
   oauthGithubClientId,
   oauthGithubClientSecretArn,

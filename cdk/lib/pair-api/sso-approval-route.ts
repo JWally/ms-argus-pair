@@ -1,13 +1,8 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { jsonResp } from './shared/http';
 import { parseScopedCpi } from './scoped-cpi';
-import {
-  checkApprovalRedemption,
-  clearApprovalCookie,
-  hashApprovalToken,
-  readApprovalCookie,
-} from './sso-approval';
+import { checkApprovalRedemption, clearApprovalCookie, readApprovalCookie } from './sso-approval';
+import { consumeSsoApproval } from './sso-approval-consume';
 
 interface ApprovalSession {
   verdict: 'pending' | 'approved' | 'failed';
@@ -41,27 +36,14 @@ export function createSsoApprovalRedemptionHandler(deps: ApprovalRouteDeps) {
       return jsonResp(409, { error: `sso_approval_${approvalCheck}` });
     }
 
-    try {
-      await deps.ddb.send(
-        new UpdateCommand({
-          TableName: deps.tableName,
-          Key: { PK: `SSO#${sessionId}`, SK: 'META' },
-          UpdateExpression: 'SET approvalRedeemedAt = :now REMOVE approvalTokenHash',
-          ConditionExpression:
-            'attribute_exists(PK) AND verdict = :approved AND cpi = :cpi AND approvalTokenHash = :hash AND attribute_not_exists(approvalRedeemedAt)',
-          ExpressionAttributeValues: {
-            ':now': Math.floor((deps.now?.() ?? Date.now()) / 1000),
-            ':approved': 'approved',
-            ':cpi': expectedCpi.cpi,
-            ':hash': hashApprovalToken(approvalToken),
-          },
-        })
-      );
-    } catch (error: unknown) {
-      if ((error as { name?: string })?.name === 'ConditionalCheckFailedException') {
-        return jsonResp(409, { error: 'sso_approval_invalid_or_consumed' });
-      }
-      throw error;
+    const consumed = await consumeSsoApproval(
+      deps.ddb,
+      deps.tableName,
+      { sessionId, cpi: expectedCpi.cpi, token: approvalToken },
+      deps.now?.()
+    );
+    if (!consumed) {
+      return jsonResp(409, { error: 'sso_approval_invalid_or_consumed' });
     }
 
     return {

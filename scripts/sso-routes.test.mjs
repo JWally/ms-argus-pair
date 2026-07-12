@@ -18,9 +18,14 @@ const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
 const ssoApproval = read('cdk/lib/pair-api/sso-approval.ts');
-const verifyRoute = api.slice(api.indexOf("case 'POST /api/verify':"), api.indexOf('default:'));
+const verifyRoute = read('cdk/lib/pair-api/verdict-verification-route.ts');
 
-for (const route of ['/merchant', '/sso/challenge/:sessionId', '/merchant/validate']) {
+for (const route of [
+  '/merchant',
+  '/sso/mobile',
+  '/sso/challenge/:sessionId',
+  '/merchant/validate',
+]) {
   assert(main.includes(`path="${route}"`), `missing SPA route ${route}`);
 }
 
@@ -29,6 +34,7 @@ for (const endpoint of [
   '/api/sso/{id}/challenge',
   '/api/sso/{id}/validate',
   '/api/sso/approval/redeem',
+  '/api/sso/approval/exchange',
 ]) {
   assert(stack.includes(`path: '${endpoint}'`), `missing CDK HTTP route ${endpoint}`);
 }
@@ -38,6 +44,7 @@ for (const routeKey of [
   'POST /api/sso/{id}/challenge',
   'POST /api/sso/{id}/validate',
   'POST /api/sso/approval/redeem',
+  'POST /api/sso/approval/exchange',
 ]) {
   assert(api.includes(`case '${routeKey}'`), `missing Lambda handler for ${routeKey}`);
 }
@@ -52,7 +59,7 @@ assert(
 );
 assert(
   verifyRoute.includes("error: 'missing_cpi'") &&
-    verifyRoute.includes('verifyVerdictForCpi') &&
+    verifyRoute.includes('verifyVerdictForContext') &&
     !verifyRoute.includes('verifyVerdictToken'),
   'verdict verification must require an exact merchant CPI assertion'
 );

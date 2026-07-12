@@ -20,6 +20,7 @@ const SsoChallenge = lazy(() =>
 const MerchantValidate = lazy(() =>
   import('./pages/MerchantValidate').then((m) => ({ default: m.MerchantValidate }))
 );
+const MobileSso = lazy(() => import('./pages/MobileSso').then((m) => ({ default: m.MobileSso })));
 const Embed = lazy(() => import('./pages/Embed').then((m) => ({ default: m.Embed })));
 
 const rootElement = document.getElementById('root');
@@ -35,6 +36,7 @@ createRoot(rootElement).render(
           <Route path="/merchant" element={<MerchantSso />} />
           <Route path="/sso/challenge/:sessionId" element={<SsoChallenge />} />
           <Route path="/merchant/validate" element={<MerchantValidate />} />
+          <Route path="/sso/mobile" element={<MobileSso />} />
           <Route path="/pair/:roomId" element={<Pair />} />
           <Route path="/embed" element={<Embed />} />
         </Routes>

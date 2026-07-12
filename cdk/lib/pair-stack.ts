@@ -62,6 +62,8 @@ interface PairStackProps extends cdk.StackProps {
   merchantApiCredential?: string;
   /** Public CPI used to partition integrity records (e.g. argus_cpi_test_…). */
   merchantCpi?: string;
+  /** HTTPS merchant origins allowed to receive one-time mobile SSO callbacks. */
+  ssoCallbackOrigins?: string[];
 
   /**
    * OAuth provider configuration. Optional — when absent, the matching
@@ -90,6 +92,7 @@ export class PairStack extends cdk.Stack {
       merchantApiUrl,
       merchantApiCredential,
       merchantCpi,
+      ssoCallbackOrigins = [],
       oauthGoogleClientId,
       oauthGithubClientId,
       oauthGithubClientSecretArn,
@@ -205,6 +208,7 @@ export class PairStack extends cdk.Stack {
         TABLE_NAME: table.tableName,
         ALLOWED_ORIGINS: allOrigins.join(','),
         PAIR_PUBLIC_ORIGIN: `https://${domainName}`,
+        SSO_CALLBACK_ORIGINS: ssoCallbackOrigins.join(','),
         DEVICE_TRUST_SECRET_ARN: deviceTrustSecret.secretArn,
         VERDICT_SIGNING_SECRET_ARN: verdictSigningSecret.secretArn,
         // Valkey rate-limit backend. USE_VALKEY_RATE_LIMITS=true switches
@@ -312,6 +316,11 @@ export class PairStack extends cdk.Stack {
     });
     api.addRoutes({
       path: '/api/sso/approval/redeem',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
+      path: '/api/sso/approval/exchange',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
     });

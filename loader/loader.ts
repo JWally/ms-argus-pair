@@ -2,7 +2,8 @@
  * Argus Captcha — embeddable QR device-pairing widget loader.
  *
  *   <script src="https://static-captcha.argus.pw/captcha.js"
- *           data-cpi="argus_cpi_live_..." data-onresult="myCallback"></script>
+ *           data-cpi="argus_cpi_live_..." data-challenge-id="..."
+ *           data-onresult="myCallback"></script>
  *   <div class="argus-captcha"></div>
  *
  * The loader injects a CROSS-ORIGIN iframe at the Argus pairing app's `/embed`
@@ -27,7 +28,9 @@ type CaptchaResult = {
 
 interface RenderOpts {
   cpi?: string;
+  challengeId?: string;
   embedOrigin?: string;
+  ssoReturnUrl?: string;
   onResult?: (r: CaptchaResult) => void;
   onEvent?: (e: Record<string, unknown>) => void;
 }
@@ -43,6 +46,8 @@ interface CaptchaHandle {
   // Embed origin: data-embed-origin override (testing) else the baked default.
   const BAKED_ORIGIN = me.getAttribute('data-embed-origin') || __EMBED_ORIGIN__;
   const defaultCpi = me.getAttribute('data-cpi') || '';
+  const defaultChallengeId = me.getAttribute('data-challenge-id') || '';
+  const defaultSsoReturnUrl = me.getAttribute('data-sso-return-url') || '';
   const defaultCbName = me.getAttribute('data-onresult') || '';
   const hostOrigin = window.location.origin;
   const win = window as unknown as Record<string, unknown>;
@@ -59,7 +64,9 @@ interface CaptchaHandle {
     slot.__argusMounted = true;
 
     const cpi = opts.cpi || defaultCpi;
+    const challengeId = opts.challengeId || defaultChallengeId;
     const origin = opts.embedOrigin || BAKED_ORIGIN;
+    const ssoReturnUrl = opts.ssoReturnUrl || defaultSsoReturnUrl;
     const onResult = resolveCb(defaultCbName, opts.onResult);
 
     const iframe = document.createElement('iframe');
@@ -67,8 +74,12 @@ interface CaptchaHandle {
       origin +
       '/embed?cpi=' +
       encodeURIComponent(cpi) +
+      '&challengeId=' +
+      encodeURIComponent(challengeId) +
       '&origin=' +
-      encodeURIComponent(hostOrigin);
+      encodeURIComponent(hostOrigin) +
+      '&ssoReturnUrl=' +
+      encodeURIComponent(ssoReturnUrl);
     iframe.title = 'Argus device pairing';
     iframe.setAttribute('referrerpolicy', 'origin');
     // color-scheme:normal keeps the iframe transparent — a light-host/dark-embed

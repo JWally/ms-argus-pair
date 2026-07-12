@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+const [api, verifyRoute, store, pair, embed, loader, readme] = await Promise.all([
+  read('cdk/lib/pair-api.ts'),
+  read('cdk/lib/pair-api/verdict-verification-route.ts'),
+  read('cdk/lib/session-store.ts'),
+  read('src/lib/pair.ts'),
+  read('src/pages/Embed.tsx'),
+  read('loader/loader.ts'),
+  read('README.md'),
+]);
+
+assert.match(api, /parseMerchantChallenge\(body\.challengeId\)/);
+assert.match(api, /challengeId: merchantChallenge/);
+assert.match(api, /challengeId: s\.challengeId/);
+assert.match(verifyRoute, /verifyVerdictForContext/);
+assert.match(verifyRoute, /missing_challenge_id/);
+assert.match(store, /challengeId: string/);
+assert.match(pair, /challengeId\?: string/);
+assert.match(loader, /getAttribute\('data-challenge-id'\)/);
+assert.match(loader, /opts\.challengeId/);
+assert.match(loader, /&challengeId=/);
+assert.match(embed, /challengeId/);
+assert.match(embed, /Missing or invalid merchant challenge/);
+assert.match(readme, /merchant backend/i);
+assert.match(readme, /challengeId/);
+
+console.log('verdict-challenge-binding: ok');
