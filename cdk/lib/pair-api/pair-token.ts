@@ -24,6 +24,10 @@ export interface PairBlob {
   e: string; // desktop's sealed connection envelope
   pt: string; // phone WS bootstrap token
   n: string; // session nonce
+  /** Server-resolved policy bit. The desktop cannot select this value. */
+  proofRequired: boolean;
+  /** Server-resolved fresh-auth bit. Cached device trust cannot satisfy it. */
+  freshProofRequired: boolean;
 }
 
 /** Minimal KV the token needs. `take` must be atomic get-and-delete (single-use). */
@@ -52,7 +56,9 @@ export async function redeemPairToken(store: KvStore, token: string): Promise<Pa
       typeof b.wsUrl === 'string' &&
       typeof b.e === 'string' &&
       typeof b.pt === 'string' &&
-      typeof b.n === 'string'
+      typeof b.n === 'string' &&
+      typeof b.proofRequired === 'boolean' &&
+      typeof b.freshProofRequired === 'boolean'
     ) {
       return b;
     }

@@ -64,6 +64,10 @@ export interface SessionMeta {
   expiresAt: number;
   /** Merchant CPI this session is attributed to, when created via the embed widget. */
   cpi?: string | null;
+  /** Server-resolved scoped-CPI policy, snapshotted when the session starts. */
+  proofRequired?: boolean;
+  /** Cached device trust is insufficient; require a fresh passkey/OAuth ceremony. */
+  freshProofRequired?: boolean;
 }
 
 export interface PhoneBundle {

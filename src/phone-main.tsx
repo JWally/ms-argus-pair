@@ -4,7 +4,7 @@ import { startBioDotPlate } from './lib/bio-dot-plate';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = 'passkey' | 'passkey-create' | 'google';
+type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google';
 type Phase =
   | 'awaiting-desktop'
   | 'ready'
@@ -132,9 +132,18 @@ async function redeemPairTokenAndGo(token: string): Promise<void> {
       e: string;
       pt: string;
       n: string;
+      proofRequired: boolean;
+      freshProofRequired: boolean;
     };
     sendPhonePerf('token_redeem_done', { entry: 'pair_token', sessionId: b.sessionId });
-    const hash = new URLSearchParams({ wsUrl: b.wsUrl, e: b.e, pt: b.pt, n: b.n }).toString();
+    const hash = new URLSearchParams({
+      wsUrl: b.wsUrl,
+      e: b.e,
+      pt: b.pt,
+      n: b.n,
+      pr: b.proofRequired ? '1' : '0',
+      fr: b.freshProofRequired ? '1' : '0',
+    }).toString();
     window.location.replace(
       `/pair/${encodeURIComponent(b.sessionId)}${window.location.search}#${hash}`
     );
@@ -229,6 +238,8 @@ function maybeStartFastPass(): void {
     !state.trustChecked ||
     !state.desktopReady ||
     !state.info ||
+    !state.info.proofRequired ||
+    state.info.freshProofRequired ||
     !state.pairMod ||
     state.verdict
   ) {
@@ -262,6 +273,15 @@ function advanceChallenge(): void {
     setState({ phase: 'ready' });
     return;
   }
+  if (!state.info.proofRequired) {
+    setState({ phase: 'pairing' });
+    void pair('integrity');
+    return;
+  }
+  if (state.info.freshProofRequired) {
+    setState({ phase: 'ready' });
+    return;
+  }
   if (state.hasTrust) {
     setState({ phase: 'returning' });
     void pair();
@@ -283,7 +303,7 @@ async function pair(
     updateBioDrawActionLabel();
   } else {
     setState({
-      phase: state.hasTrust ? 'returning' : 'pairing',
+      phase: state.hasTrust && !state.info.freshProofRequired ? 'returning' : 'pairing',
       status: 'starting',
       errorMsg: null,
     });
@@ -291,7 +311,8 @@ async function pair(
   try {
     const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
     const options: SubmitPhoneAttestationOptions = {
-      mode: proofMode === 'google' ? 'oauth' : passkeyMode,
+      mode:
+        proofMode === 'integrity' ? 'integrity' : proofMode === 'google' ? 'oauth' : passkeyMode,
     };
     if (proofMode === 'google') {
       const oauthMod = await loadOAuthModule();
@@ -319,6 +340,7 @@ async function pair(
     });
     sendPhonePerf('attest_done', { verdict: result.verdict, trustOnly: opts.trustOnly === true });
     if (
+      proofMode !== 'integrity' &&
       passkeyMode === 'passkey-auth' &&
       result.annotations?.phone_webauthn_error === 'credential_not_registered'
     ) {
@@ -639,6 +661,7 @@ function setDisabled(
 
 async function renderReady(): Promise<void> {
   const googleConfigured = await isGoogleConfigured();
+  const canUseTrust = state.hasTrust && !state.info?.freshProofRequired;
   root.innerHTML = `
     <div class="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
       <header class="flex items-center justify-between">
@@ -648,9 +671,9 @@ async function renderReady(): Promise<void> {
       <div class="flex flex-1 flex-col items-center justify-center gap-8 text-center">
         <div class="flex h-24 w-24 items-center justify-center rounded-3xl bg-accent/15 text-accent">◆</div>
         <div class="space-y-2">
-          <h1 class="text-2xl font-semibold tracking-tight">${state.hasTrust ? 'Welcome back' : 'Choose a check'}</h1>
+          <h1 class="text-2xl font-semibold tracking-tight">${canUseTrust ? 'Welcome back' : 'Choose a check'}</h1>
           <p class="text-sm leading-relaxed text-muted">${
-            state.hasTrust
+            canUseTrust
               ? 'We remember this device. One tap to confirm.'
               : 'Use a passkey if you already have one, or pick another proof.'
           }</p>
@@ -658,7 +681,7 @@ async function renderReady(): Promise<void> {
         ${state.errorMsg ? `<div class="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-left text-xs text-red-100">${escapeHtml(state.errorMsg)}</div>` : ''}
         <div class="w-full space-y-3">
           ${
-            state.hasTrust
+            canUseTrust
               ? '<button data-action="confirm" class="btn btn-primary w-full py-4 text-base">Confirm</button>'
               : `
               <button data-action="passkey" class="btn btn-primary w-full py-4 text-base">Use passkey</button>
@@ -667,7 +690,7 @@ async function renderReady(): Promise<void> {
           }
         </div>
         <div class="text-[11px] uppercase tracking-[0.18em] text-muted/70">${
-          state.hasTrust
+          canUseTrust
             ? 'Trusted device · same network'
             : googleConfigured
               ? 'Passkey · Google · device check'

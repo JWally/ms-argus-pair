@@ -90,9 +90,15 @@ import {
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
-import { getVerdictSecret, signVerdict, verifyVerdictToken } from './pair-api/verdict-token';
+import {
+  getVerdictSecret,
+  signVerdict,
+  verifyVerdictForCpi,
+  verifyVerdictToken,
+} from './pair-api/verdict-token';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
+import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
 import {
@@ -125,9 +131,6 @@ const pairTokenStore: KvStore = {
 };
 
 const TABLE = process.env.TABLE_NAME!;
-
-/** Public merchant client id embedded in the widget; attributes a pairing. */
-const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}$/;
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -403,6 +406,8 @@ interface SessionItem {
   nonce: string;
   expiresAt: number;
   cpi?: string | null;
+  proofRequired?: boolean;
+  freshProofRequired?: boolean;
   desktopAttestation?: StoredAttestation;
   phoneAttestation?: StoredAttestation;
   verdict: Verdict;
@@ -473,6 +478,8 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       nonce: meta.nonce,
       expiresAt: meta.expiresAt,
       cpi: meta.cpi ?? null,
+      proofRequired: meta.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
+      freshProofRequired: meta.freshProofRequired ?? false,
       verdict: phone?.verdict ?? 'pending',
       verdictReason: phone?.reason ?? undefined,
       desktopAttestation: desktop as unknown as StoredAttestation | undefined,
@@ -556,12 +563,24 @@ const lambdaHandler = async (event: {
       const id = randomUUID();
       const nonce = randomBytes(32).toString('base64url');
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-      // Embeddable widget attributes the pairing to the merchant's CPI. Only a
-      // well-formed CPI is persisted; anything else stays null (demo/own-site).
+      // The suffix is public, but its meaning is server-owned and snapshotted
+      // here. Unknown scopes fail instead of silently becoming an unscoped CPI.
       const rawCpi = (body as { cpi?: unknown }).cpi;
-      const cpi = typeof rawCpi === 'string' && CPI_FORMAT.test(rawCpi) ? rawCpi : null;
+      const scopedCpi = parseScopedCpi(rawCpi);
+      if (rawCpi !== undefined && !scopedCpi) {
+        return jsonResp(400, { error: 'invalid_cpi' });
+      }
+      const cpi = scopedCpi?.cpi ?? null;
+      const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
+      const freshProofRequired = scopedCpi?.freshProofRequired ?? false;
       if (isValkeySessionsEnabled()) {
-        const created = await startSessionValkey(id, { nonce, expiresAt, cpi });
+        const created = await startSessionValkey(id, {
+          nonce,
+          expiresAt,
+          cpi,
+          proofRequired,
+          freshProofRequired,
+        });
         if (!created) {
           // UUIDv4 collision — vanishingly rare, but mirrors the
           // DDB ConditionExpression rejection so the caller can retry.
@@ -574,6 +593,8 @@ const lambdaHandler = async (event: {
           nonce,
           expiresAt,
           cpi,
+          proofRequired,
+          freshProofRequired,
           verdict: 'pending',
         };
         await ddb.send(
@@ -999,6 +1020,9 @@ const lambdaHandler = async (event: {
       if (!s.desktopAttestation) {
         return jsonResp(409, { error: 'desktop_not_attested_yet' });
       }
+      if (s.freshProofRequired && deviceTrustToken) {
+        return jsonResp(401, { error: 'fresh_proof_required', clearDeviceTrust: false });
+      }
       // QR sessions are single-use. If a phoneAttestation already exists,
       // distinguish two cases by pubkey:
       //   - Same pubkey  → same device retrying (network blip, double-tap).
@@ -1146,7 +1170,7 @@ const lambdaHandler = async (event: {
       const desktopAgeSec = projectionAgeSeconds(desktopProj);
       const phoneAgeSec = projectionAgeSeconds(phoneProj);
 
-      if (REQUIRE_PROOF_OF_LIFE && !proofOfLife) {
+      if ((s.proofRequired ?? REQUIRE_PROOF_OF_LIFE) && !proofOfLife) {
         verdict = 'failed';
         reason = 'no_proof_of_life';
         annotations = {
@@ -1408,6 +1432,8 @@ const lambdaHandler = async (event: {
         return jsonResp(parsedPairTokenBody.status, parsedPairTokenBody.body);
       }
       const pb = parsedPairTokenBody.body;
+      const pairSession = await loadSession(sessionId!);
+      if (!pairSession) return jsonResp(404, { error: 'session_not_found' });
       const workerIntegrity = await verifyWorkerIntegrity({
         workerUrl: pb.workerUrl,
         workerSha256: pb.workerSha256,
@@ -1424,6 +1450,8 @@ const lambdaHandler = async (event: {
         e: pb.e,
         pt: pb.pt,
         n: pb.n,
+        proofRequired: pairSession.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
+        freshProofRequired: pairSession.freshProofRequired ?? false,
       });
       try {
         const compression: QrCompression = 'none';
@@ -1487,13 +1515,13 @@ const lambdaHandler = async (event: {
       if (typeof vToken !== 'string') return jsonResp(400, { error: 'missing_token' });
       const secret = await getVerdictSecret();
       if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
-      const result = verifyVerdictToken(secret, vToken);
-      if (!result.ok) return jsonResp(200, { valid: false, reason: result.reason });
       // Optional tenant assertion: if the caller names its CPI, it must match.
       const wantCpi = (body as { cpi?: unknown }).cpi;
-      if (typeof wantCpi === 'string' && result.claims.cpi !== wantCpi) {
-        return jsonResp(200, { valid: false, reason: 'cpi_mismatch' });
-      }
+      const result =
+        typeof wantCpi === 'string'
+          ? verifyVerdictForCpi(secret, vToken, wantCpi)
+          : verifyVerdictToken(secret, vToken);
+      if (!result.ok) return jsonResp(200, { valid: false, reason: result.reason });
       return jsonResp(200, {
         // `valid` = the token's signature is authentic and unexpired. It does
         // NOT mean the human passed — a genuine token can carry a "failed"

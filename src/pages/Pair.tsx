@@ -18,7 +18,7 @@ import {
   TerminalScreen,
 } from './PairScreens';
 
-type ProofChoice = 'passkey' | 'passkey-create' | 'google';
+type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google';
 
 type Phase =
   | 'awaiting-desktop'
@@ -60,6 +60,7 @@ export function Pair() {
   const [nonce, setNonce] = useState<string | null>(initialNonce);
   const [challengeIndex, setChallengeIndex] = useState(0);
   const [desktopReady, setDesktopReady] = useState(false);
+  const [freshProofRequired, setFreshProofRequired] = useState(false);
   const infoRef = useRef<PhoneSessionInfo | null>(null);
   const inflightRef = useRef(false);
   const startedInChallengeRef = useRef(!!initialNonce);
@@ -92,6 +93,7 @@ export function Pair() {
         if (ctl.signal.aborted) return;
         infoRef.current = info;
         setNonce(info.nonce);
+        setFreshProofRequired(info.freshProofRequired);
         setDesktopReady(true);
         if (!startedInChallengeRef.current) {
           setPhase('ready');
@@ -144,7 +146,7 @@ export function Pair() {
     if (!sessionId || !infoRef.current || inflightRef.current) return;
     const info = infoRef.current;
     inflightRef.current = true;
-    setPhase(hasTrust ? 'returning' : 'pairing');
+    setPhase(hasTrust && !info.freshProofRequired ? 'returning' : 'pairing');
     setStatus('starting');
     setErrorMsg(null);
     try {
@@ -163,11 +165,17 @@ export function Pair() {
           onStatus: setStatus,
         },
         {
-          mode: proofMode === 'google' ? 'oauth' : passkeyMode,
+          mode:
+            proofMode === 'integrity'
+              ? 'integrity'
+              : proofMode === 'google'
+                ? 'oauth'
+                : passkeyMode,
           ...(oauthResult ? { oauthResult } : {}),
         }
       );
       if (
+        proofMode !== 'integrity' &&
         passkeyMode === 'passkey-auth' &&
         r.annotations?.phone_webauthn_error === 'credential_not_registered'
       ) {
@@ -204,6 +212,15 @@ export function Pair() {
       setPhase('ready');
       return;
     }
+    if (!infoRef.current.proofRequired) {
+      setPhase('pairing');
+      void pair('integrity');
+      return;
+    }
+    if (infoRef.current.freshProofRequired) {
+      setPhase('ready');
+      return;
+    }
     // Calculator solved + desktop ready. Returning trusted devices can
     // redeem silently; fresh or storage-partitioned phones choose a proof
     // path so we do not force a new passkey registration every scan.
@@ -237,7 +254,7 @@ export function Pair() {
 
       {phase === 'ready' && (
         <ReadyScreen
-          hasTrust={hasTrust}
+          hasTrust={hasTrust && !freshProofRequired}
           errorMsg={errorMsg}
           googleConfigured={PROVIDERS_CONFIGURED.google}
           onConfirm={() => pair()}

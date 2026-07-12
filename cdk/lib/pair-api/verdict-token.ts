@@ -89,3 +89,16 @@ export function verifyVerdictToken(
     return { ok: false, reason: 'future' };
   return { ok: true, claims };
 }
+
+/** Merchant-side binding: a valid token for another scoped CPI is not acceptable. */
+export function verifyVerdictForCpi(
+  secret: string,
+  token: string,
+  expectedCpi: string,
+  now: number = Date.now()
+): VerifyVerdictResult {
+  const result = verifyVerdictToken(secret, token, now);
+  if (!result.ok) return result;
+  if (result.claims.cpi !== expectedCpi) return { ok: false, reason: 'cpi_mismatch' };
+  return result;
+}

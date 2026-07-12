@@ -41,6 +41,8 @@ const blob: PairBlob = {
   e: 'sealed-envelope',
   pt: 'phone-tok',
   n: 'nonce-xyz',
+  proofRequired: true,
+  freshProofRequired: true,
 };
 
 describe('pair-token mint/redeem', () => {
