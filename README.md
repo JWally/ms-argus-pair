@@ -114,8 +114,9 @@ A second flow (`/merchant` → `/sso/challenge/:id` → `/merchant/validate`)
 proving the _same phone, device, and network_ across a merchant round-trip:
 three Argus scans + 90s single-use return codes, evaluated by
 `cdk/lib/sso-continuity.ts` (same device keyId, same/nearby network, bounded
-risk drift). Approval sets a cookie and can mint a device-trust token.
-`POST /api/sso/{id}/claim` records a display-name claim.
+risk drift). Approval mints an opaque HttpOnly cookie and can mint a
+device-trust token. The merchant return consumes the cookie once at
+`POST /api/sso/approval/redeem`; only its hash is stored server-side.
 
 ## Repo layout
 
@@ -150,7 +151,7 @@ it (everything else keeps DENY).
 
 Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection
-slots, SSO sessions, and the claim counter (and is the session fallback).
+slots and SSO sessions (and is the session fallback).
 Secrets Manager holds the device-trust, verdict-signing, and WS-envelope keys.
 
 ## Local development

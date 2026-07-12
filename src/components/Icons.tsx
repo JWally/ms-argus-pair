@@ -36,24 +36,6 @@ export function IconX({ className = 'h-5 w-5' }: IconProps) {
   );
 }
 
-export function IconPhone({ className = 'h-5 w-5' }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="6" y="2" width="12" height="20" rx="3" />
-      <path d="M11 18h2" />
-    </svg>
-  );
-}
-
 export function IconShield({ className = 'h-5 w-5' }: IconProps) {
   return (
     <svg

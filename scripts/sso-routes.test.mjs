@@ -26,7 +26,7 @@ for (const endpoint of [
   '/api/sso/start',
   '/api/sso/{id}/challenge',
   '/api/sso/{id}/validate',
-  '/api/sso/{id}/claim',
+  '/api/sso/approval/redeem',
 ]) {
   assert(stack.includes(`path: '${endpoint}'`), `missing CDK HTTP route ${endpoint}`);
 }
@@ -35,7 +35,7 @@ for (const routeKey of [
   'POST /api/sso/start',
   'POST /api/sso/{id}/challenge',
   'POST /api/sso/{id}/validate',
-  'POST /api/sso/{id}/claim',
+  'POST /api/sso/approval/redeem',
 ]) {
   assert(api.includes(`case '${routeKey}'`), `missing Lambda handler for ${routeKey}`);
 }
@@ -47,10 +47,20 @@ for (const clientFn of [
   'startSsoSession',
   'submitSsoChallenge',
   'validateSsoReturn',
-  'submitSsoClaim',
+  'redeemSsoApproval',
 ]) {
-  assert(pairLib.includes(`export async function ${clientFn}`), `missing client function ${clientFn}`);
+  assert(
+    pairLib.includes(`export async function ${clientFn}`),
+    `missing client function ${clientFn}`
+  );
 }
+
+assert(!stack.includes("path: '/api/sso/{id}/claim'"), 'retired SSO claim route should be removed');
+assert(
+  !api.includes("case 'POST /api/sso/{id}/claim'"),
+  'retired SSO claim handler should be removed'
+);
+assert(!pairLib.includes('submitSsoClaim'), 'retired SSO claim client should be removed');
 
 if (process.exitCode) process.exit(process.exitCode);
 console.log('sso-routes: ok');

@@ -704,21 +704,13 @@ export async function validateSsoReturn({
   return result;
 }
 
-/** Result of a claim submission (the SSO name-claim gate). */
-export interface RaffleEntryResult {
-  ok: true;
-  /** Short public identifier (`xxxx-xxxx`) derived from the handle hash. */
-  code: string;
-  count: number;
-}
-
-export async function submitSsoClaim(
-  sessionId: string,
-  handle: string
-): Promise<RaffleEntryResult> {
-  return jsonFetch<RaffleEntryResult>(`${API}/sso/${encodeURIComponent(sessionId)}/claim`, {
+export async function redeemSsoApproval(
+  sessionId: string
+): Promise<{ verdict: 'approved'; reason: 'approved' }> {
+  return jsonFetch<{ verdict: 'approved'; reason: 'approved' }>(`${API}/sso/approval/redeem`, {
     method: 'POST',
-    body: JSON.stringify({ handle: handle.trim().toLowerCase() }),
+    credentials: 'same-origin',
+    body: JSON.stringify({ sessionId }),
   });
 }
 
@@ -1291,10 +1283,5 @@ export async function submitPhoneAttestation(
     throw e;
   }
 }
-
-// Raffle/leaderboard frontend fetchers moved out with the marketing pages
-// (Demo/ClaimSpot → ms-argus-www), then the dormant /api/raffle/* backend
-// was removed too. The shared rate limiter (checkRaffleRateLimits) lives on
-// for SSO claims.
 
 export { HttpError };

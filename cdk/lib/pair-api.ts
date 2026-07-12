@@ -102,15 +102,14 @@ import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
 import { pushVerdictToDesktop } from './pair-api/verdict-push';
 import { fetchProjection } from './pair-api/projection-client';
 import {
-  buildRaffleBuckets,
-  desktopSiteHost,
-  handleHash,
-  hashToCode,
-  normalizeHandle,
-  RAFFLE_BUCKET_MAX,
-  RAFFLE_BUCKET_TTL_SECONDS,
-  type RaffleRateLimitInputs,
-} from './pair-api/raffle-claims';
+  approvalCookie,
+  checkApprovalRedemption,
+  clearApprovalCookie,
+  hashApprovalToken,
+  mintApprovalToken,
+  readApprovalCookie,
+  SSO_APPROVAL_TTL_SECONDS,
+} from './pair-api/sso-approval';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
@@ -225,56 +224,10 @@ export async function claimArgusSessionId(
 // "clean scan on both sides."
 const REQUIRE_PROOF_OF_LIFE = process.env.PAIR_REQUIRE_PROOF_OF_LIFE === 'true';
 
-// ── Raffle / leaderboard ──────────────────────────────────────────────────
-//
-// After a paired verdict, the desktop can submit a handle to claim one
-// leaderboard entry. Three independent rate-limit buckets, each capped per
-// rolling hour, ALL scoped by the desktop's site host so one phone (or
-// desktop, or UA+IP) can spend its 5/hr separately on each site:
-//   1. phone device pubkey + site   (SDK persistent key — strongest anti-Sybil)
-//   2. desktop device pubkey + site (same on the host side)
-//   3. UA + IP + site               (weakest, catches header-swap reruns)
-// "Site" is the desktop's loaded alias (Origin header), not a fixed string —
-// CloudFront's ALL_VIEWER_EXCEPT_HOST_HEADER policy strips Host, so Origin is
-// the trustworthy signal here (and originAllowed has already validated it
-// against ALLOWED_ORIGINS by the time we read it).
-async function incrementLeaderboard(handle: string): Promise<{
-  hash: string;
-  code: string;
-  count: number;
-}> {
-  const { hash, code } = handleHash(handle);
-  const updated = await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { PK: `HANDLE#${hash}`, SK: 'CT' },
-      // `code` is the user-facing 6-char handle code, persisted so callers
-      // don't recompute it from PK. (The LeaderboardIndex GSI + its `lbPk`
-      // write were removed with the dormant /api/raffle/* endpoints.)
-      UpdateExpression: 'ADD ct :one SET lastEntryAt = :t, code = :code',
-      ExpressionAttributeValues: {
-        ':one': 1,
-        ':t': Math.floor(Date.now() / 1000),
-        ':code': code,
-      },
-      ReturnValues: 'ALL_NEW',
-    })
-  );
-  const count = Number((updated.Attributes as { ct?: number } | undefined)?.ct ?? 1);
-  return { hash, code, count };
-}
-
-interface RateLimitResult {
-  ok: boolean;
-  tripped?: string;
-  siteHash?: string;
-}
-
+// Rate-limit backend selection.
 /**
- * USE_VALKEY_RATE_LIMITS=true switches the 5 rate-limit buckets from
- * DDB (5 UpdateCommand / 5 GetCommand per call) to Valkey (1 pipeline
- * of 5 INCR-or-GET commands). The Lambda must be VPC-attached with
- * VALKEY_ENDPOINT set; otherwise the DDB path runs.
+ * USE_VALKEY_RATE_LIMITS=true switches rate limits from DDB to Valkey. The
+ * Lambda must be VPC-attached with VALKEY_ENDPOINT set; otherwise DDB runs.
  *
  * Both code paths are shipped intentionally — flip the env flag to
  * roll back without a code redeploy.
@@ -283,84 +236,16 @@ function isValkeyRateLimitsEnabled(): boolean {
   return process.env.USE_VALKEY_RATE_LIMITS === 'true';
 }
 
-async function checkRaffleRateLimits(inputs: RaffleRateLimitInputs): Promise<RateLimitResult> {
-  const { siteHash, buckets } = buildRaffleBuckets(inputs);
-  const hour = Math.floor(Date.now() / 3_600_000);
-  const ttl = Math.floor(Date.now() / 1000) + RAFFLE_BUCKET_TTL_SECONDS;
-
-  if (isValkeyRateLimitsEnabled()) {
-    const { getValkey } = await import('./valkey-client');
-    const valkey = getValkey();
-    // One pipelined round-trip: each EVAL atomically reads the counter,
-    // returns it unchanged if over cap, otherwise INCRs (and EXPIREs on
-    // first hit). Lua serializes the GET-check-INCR sequence so two
-    // concurrent requests can't both slip past cap. Same hard-stop
-    // semantics as the DDB ConditionalCheck path.
-    const pipeline = valkey.pipeline();
-    for (const k of buckets) {
-      pipeline.rlIncr(`pair:rl:${k}:${hour}`, RAFFLE_BUCKET_MAX, RAFFLE_BUCKET_TTL_SECONDS);
-    }
-    const results = (await pipeline.exec()) ?? [];
-    for (let i = 0; i < results.length; i++) {
-      const [err, val] = results[i];
-      if (err) throw err;
-      if (Number(val ?? 0) > RAFFLE_BUCKET_MAX) {
-        // Cap held — script returned the pre-existing over-cap value
-        // without incrementing. Same axis-naming convention as the DDB
-        // path (first 8 chars of the bucket hash).
-        return { ok: false, tripped: buckets[i].slice(0, 8), siteHash };
-      }
-      // val === RAFFLE_BUCKET_MAX is the edge case where this caller
-      // is the LAST one allowed; let it through but note that any
-      // subsequent caller for the same bucket trips.
-    }
-    return { ok: true, siteHash };
-  }
-
-  // DDB path — fallback / rollback target. allSettled keeps the loop
-  // simple: every bucket's conditional update runs independently;
-  // any one rejecting with ConditionalCheckFailed is a 429 trip.
-  const results = await Promise.allSettled(
-    buckets.map((k) =>
-      ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `RL#${k}#${hour}`, SK: 'CT' },
-          UpdateExpression: 'ADD ct :one SET expiresAt = if_not_exists(expiresAt, :ttl)',
-          ConditionExpression: 'attribute_not_exists(ct) OR ct < :max',
-          ExpressionAttributeValues: {
-            ':one': 1,
-            ':max': RAFFLE_BUCKET_MAX,
-            ':ttl': ttl,
-          },
-        })
-      )
-    )
-  );
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    if (r.status === 'rejected') {
-      const isConflict =
-        (r.reason as { name?: string } | undefined)?.name === 'ConditionalCheckFailedException';
-      if (isConflict) return { ok: false, tripped: buckets[i].slice(0, 8), siteHash };
-      throw r.reason;
-    }
-  }
-  return { ok: true, siteHash };
-}
-
 // ── #10: throttle POST /session/start ──────────────────────────────────
 // Session creation was unbounded — 20 concurrent → 20×200 (verified live
 // 2026-06-24), enabling attempt-volume / resource abuse. Cap per source IP
 // per fixed window. Generous enough for a shared NAT / enthusiastic tester,
-// tight enough to deny a single-IP farm. Hardcoded (like RAFFLE_BUCKET_MAX)
-// to avoid CDK env plumbing.
+// tight enough to deny a single-IP farm. Hardcoded to avoid CDK env plumbing.
 /**
  * Returns true if a new session-start from `ip` is allowed. Single fixed
  * window bucket. Note: we pass `max + 1` to the Valkey rlIncr cap and allow
- * `<= max` — the Lua caps the counter AT the cap and the raffle path's
- * strict `> cap` check never trips at the boundary; `max + 1` makes the
- * Valkey semantics match the DDB `ct < max` path (both allow exactly `max`).
+ * `<= max`; `max + 1` makes the Valkey semantics match the DDB `ct < max`
+ * path so both allow exactly `max`.
  */
 async function checkSessionStartRateLimit(ip: string): Promise<boolean> {
   const gate = buildSessionStartRateLimit(ip);
@@ -425,8 +310,8 @@ interface SsoSessionItem {
   returnCodeHash?: string;
   returnCodeExpiresAt?: number;
   returnCodeConsumedAt?: number;
-  claimHash?: string;
-  claimEnteredAt?: number;
+  approvalTokenHash?: string;
+  approvalRedeemedAt?: number;
   verdict: 'pending' | 'approved' | 'failed';
   verdictReason?: string;
   expiresAt: number;
@@ -507,6 +392,7 @@ const lambdaHandler = async (event: {
   queryStringParameters?: Record<string, string | undefined>;
   body?: string;
   headers?: Record<string, string | undefined>;
+  cookies?: string[];
 }) => {
   if (!originAllowed(event)) return jsonResp(403, { error: 'origin_not_allowed' });
 
@@ -516,6 +402,7 @@ const lambdaHandler = async (event: {
   const idLessRoutes = new Set([
     'POST /api/session/start',
     'POST /api/sso/start',
+    'POST /api/sso/approval/redeem',
     'GET /api/_valkey-debug',
     'POST /api/verify',
     'POST /api/pair-token/redeem',
@@ -785,6 +672,7 @@ const lambdaHandler = async (event: {
         validate: validateProfile,
       });
       const approvedAt = verdict.ok ? now : undefined;
+      const approvalToken = verdict.ok ? mintApprovalToken() : null;
       let nextDeviceTrust: string | null = null;
       if (verdict.ok && !trustResult?.ok && proofAnnotations.phone_webauthn_attested === true) {
         nextDeviceTrust = await mintDeviceTrust(
@@ -799,7 +687,9 @@ const lambdaHandler = async (event: {
           Key: { PK: `SSO#${sessionId}`, SK: 'META' },
           UpdateExpression:
             'SET validateProfile = :v, verdict = :verdict, verdictReason = :reason, returnCodeConsumedAt = :now, proofAnnotations = :proof' +
-            (approvedAt ? ', approvedAt = :approvedAt' : ''),
+            (approvedAt
+              ? ', approvedAt = :approvedAt, approvalTokenHash = :approvalTokenHash, expiresAt = :approvalExpiresAt'
+              : ''),
           ConditionExpression:
             'attribute_exists(PK) AND attribute_not_exists(returnCodeConsumedAt)',
           ExpressionAttributeValues: {
@@ -808,7 +698,13 @@ const lambdaHandler = async (event: {
             ':reason': verdict.reason,
             ':now': now,
             ':proof': proofAnnotations,
-            ...(approvedAt ? { ':approvedAt': approvedAt } : {}),
+            ...(approvedAt && approvalToken
+              ? {
+                  ':approvedAt': approvedAt,
+                  ':approvalTokenHash': hashApprovalToken(approvalToken),
+                  ':approvalExpiresAt': approvedAt + SSO_APPROVAL_TTL_SECONDS,
+                }
+              : {}),
           },
         })
       );
@@ -821,9 +717,7 @@ const lambdaHandler = async (event: {
         headers,
         ...(verdict.ok
           ? {
-              cookies: [
-                `argus_sso_approval=${encodeURIComponent(sessionId!)}; Path=/merchant; Max-Age=600; Secure; HttpOnly; SameSite=Lax`,
-              ],
+              cookies: [approvalCookie(approvalToken!, SSO_APPROVAL_TTL_SECONDS)],
             }
           : {}),
         body: JSON.stringify({
@@ -836,75 +730,50 @@ const lambdaHandler = async (event: {
       };
     }
 
-    case 'POST /api/sso/{id}/claim': {
-      const handle = normalizeHandle(body.handle);
-      if (!handle) {
-        return jsonResp(400, {
-          error: 'invalid_handle',
-          allowed: '3-64 chars, [a-z0-9._@-]',
-        });
-      }
-      const s = await loadSsoSession(sessionId!);
-      if (!s) return jsonResp(410, { error: 'sso_session_not_found' });
-      if (s.verdict !== 'approved' || !s.challengeProfile || !s.validateProfile) {
-        return jsonResp(409, { error: 'sso_session_not_approved', verdict: s.verdict });
-      }
-      if (s.claimHash) {
-        return jsonResp(409, {
-          error: 'session_already_entered',
-          code: hashToCode(s.claimHash),
-        });
+    case 'POST /api/sso/approval/redeem': {
+      const approvalSessionId =
+        typeof body.sessionId === 'string' && body.sessionId.length <= 128 ? body.sessionId : '';
+      const approvalToken = readApprovalCookie(event.cookies);
+      if (!approvalSessionId || !approvalToken) {
+        return jsonResp(401, { error: 'sso_approval_missing' });
       }
 
-      const siteHost = desktopSiteHost(event);
-      const deviceKey = s.validateProfile.keyId || s.challengeProfile.keyId || s.startProfile.keyId;
-      if (!deviceKey) return jsonResp(409, { error: 'sso_session_missing_device_key' });
-
-      // Reuse the game/raffle rate limiter for SSO claims. The SSO flow
-      // is single-device, so its buckets map to the stable SDK key plus
-      // the observed start/return networks instead of phone+desktop.
-      const rl = await checkRaffleRateLimits({
-        phonePub: deviceKey,
-        desktopPub: s.startProfile.keyId ?? deviceKey,
-        desktopUa: 'sso-start',
-        desktopIp: s.startProfile.ip ?? '',
-        phoneUa: 'sso-validate',
-        phoneIp: s.validateProfile.ip ?? '',
-        authIdentity: `sso-device:${deviceKey}`,
-        siteHost,
-      });
-      if (!rl.ok) {
-        return jsonResp(429, {
-          error: 'rate_limited',
-          bucket: rl.tripped,
-          site: siteHost,
-        });
+      const approvalSession = await loadSsoSession(approvalSessionId);
+      if (!approvalSession) return jsonResp(410, { error: 'sso_session_not_found' });
+      const approvalCheck = checkApprovalRedemption(approvalSession, approvalToken);
+      if (approvalCheck !== 'approved') {
+        return jsonResp(409, { error: `sso_approval_${approvalCheck}` });
       }
 
-      const { hash, code } = handleHash(handle);
-      const enteredAt = Math.floor(Date.now() / 1000);
+      const tokenHash = hashApprovalToken(approvalToken);
+      const redeemedAt = Math.floor(Date.now() / 1000);
       try {
         await ddb.send(
           new UpdateCommand({
             TableName: TABLE,
-            Key: { PK: `SSO#${sessionId}`, SK: 'META' },
-            UpdateExpression: 'SET claimHash = :h, claimEnteredAt = :t',
-            ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(claimHash)',
+            Key: { PK: `SSO#${approvalSessionId}`, SK: 'META' },
+            UpdateExpression: 'SET approvalRedeemedAt = :now REMOVE approvalTokenHash',
+            ConditionExpression:
+              'attribute_exists(PK) AND verdict = :approved AND approvalTokenHash = :hash AND attribute_not_exists(approvalRedeemedAt)',
             ExpressionAttributeValues: {
-              ':h': hash,
-              ':t': enteredAt,
+              ':now': redeemedAt,
+              ':approved': 'approved',
+              ':hash': tokenHash,
             },
           })
         );
-      } catch (err: unknown) {
-        const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-        if (isConflict) return jsonResp(409, { error: 'session_already_entered' });
-        throw err;
+      } catch (error: unknown) {
+        const isConflict = (error as { name?: string })?.name === 'ConditionalCheckFailedException';
+        if (isConflict) return jsonResp(409, { error: 'sso_approval_invalid_or_consumed' });
+        throw error;
       }
 
-      const entry = await incrementLeaderboard(handle);
-      const count = entry.count;
-      return jsonResp(200, { ok: true, code, count });
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        cookies: [clearApprovalCookie()],
+        body: JSON.stringify({ verdict: 'approved', reason: 'approved' }),
+      };
     }
 
     case 'GET /api/session/{id}/info': {
