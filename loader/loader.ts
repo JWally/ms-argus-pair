@@ -30,9 +30,14 @@ interface RenderOpts {
   cpi?: string;
   challengeId?: string;
   embedOrigin?: string;
-  ssoReturnUrl?: string;
   onResult?: (r: CaptchaResult) => void;
   onEvent?: (e: Record<string, unknown>) => void;
+}
+
+interface MobileSsoOpts {
+  cpi?: string;
+  challengeId?: string;
+  returnUrl: string;
 }
 
 interface CaptchaHandle {
@@ -47,10 +52,12 @@ interface CaptchaHandle {
   const BAKED_ORIGIN = me.getAttribute('data-embed-origin') || __EMBED_ORIGIN__;
   const defaultCpi = me.getAttribute('data-cpi') || '';
   const defaultChallengeId = me.getAttribute('data-challenge-id') || '';
-  const defaultSsoReturnUrl = me.getAttribute('data-sso-return-url') || '';
   const defaultCbName = me.getAttribute('data-onresult') || '';
   const hostOrigin = window.location.origin;
   const win = window as unknown as Record<string, unknown>;
+  // Matches Tailwind's max-w-md: roomy enough for the widget while still
+  // yielding to narrower merchant containers and mobile viewports.
+  const DEFAULT_WIDGET_MAX_WIDTH = '28rem';
 
   const resolveCb = (name: string, optsCb?: RenderOpts['onResult']) => {
     if (typeof optsCb === 'function') return optsCb;
@@ -66,7 +73,6 @@ interface CaptchaHandle {
     const cpi = opts.cpi || defaultCpi;
     const challengeId = opts.challengeId || defaultChallengeId;
     const origin = opts.embedOrigin || BAKED_ORIGIN;
-    const ssoReturnUrl = opts.ssoReturnUrl || defaultSsoReturnUrl;
     const onResult = resolveCb(defaultCbName, opts.onResult);
 
     const iframe = document.createElement('iframe');
@@ -77,17 +83,14 @@ interface CaptchaHandle {
       '&challengeId=' +
       encodeURIComponent(challengeId) +
       '&origin=' +
-      encodeURIComponent(hostOrigin) +
-      '&ssoReturnUrl=' +
-      encodeURIComponent(ssoReturnUrl);
+      encodeURIComponent(hostOrigin);
     iframe.title = 'Argus device pairing';
     iframe.setAttribute('referrerpolicy', 'origin');
     // color-scheme:normal keeps the iframe transparent — a light-host/dark-embed
     // scheme mismatch would otherwise force an opaque canvas behind the widget.
     // The 420px height is a pre-render fallback; the embed posts its real
     // height via `size` events and we follow it.
-    iframe.style.cssText =
-      'border:0;display:block;width:100%;max-width:320px;height:420px;color-scheme:normal;background:transparent;';
+    iframe.style.cssText = `border:0;display:block;width:100%;max-width:${DEFAULT_WIDGET_MAX_WIDTH};height:420px;color-scheme:normal;background:transparent;`;
     slot.appendChild(iframe);
 
     // Report the host viewport down so the widget can adapt to small screens —
@@ -134,11 +137,26 @@ interface CaptchaHandle {
     };
   }
 
+  function startMobileSso(opts: MobileSsoOpts): void {
+    const cpi = opts.cpi || defaultCpi;
+    const challengeId = opts.challengeId || defaultChallengeId;
+    if (!cpi || !challengeId || !opts.returnUrl) {
+      throw new Error('cpi, challengeId, and returnUrl are required');
+    }
+    const launch = new URL('/sso/mobile', BAKED_ORIGIN);
+    launch.search = new URLSearchParams({
+      cpi,
+      challengeId,
+      returnUrl: opts.returnUrl,
+    }).toString();
+    window.location.assign(launch.toString());
+  }
+
   const auto = () => {
     document.querySelectorAll('.argus-captcha').forEach((el) => render(el, {}));
   };
 
-  win.argusCaptcha = { render, _auto: auto, embedOrigin: BAKED_ORIGIN };
+  win.argusCaptcha = { render, startMobileSso, _auto: auto, embedOrigin: BAKED_ORIGIN };
   if (document.readyState !== 'loading') auto();
   else document.addEventListener('DOMContentLoaded', auto);
 })();

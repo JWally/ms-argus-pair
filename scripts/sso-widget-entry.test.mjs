@@ -8,19 +8,20 @@ const [embed, loader, css] = await Promise.all([
   read('src/pages/embed.css'),
 ]);
 
-assert.match(embed, /className="ax-sso"/);
-assert.match(embed, /\/sso\/mobile\?/);
-assert.match(embed, /VITE_PAIR_URL_BASE/);
-assert.doesNotMatch(embed, /\/merchant\?/);
-assert.match(embed, /cpi/);
-assert.match(embed, /challengeId/);
-assert.match(embed, /ssoReturnUrl/);
-assert.match(embed, /target="_top"/);
-assert.match(embed, />\s*MOBILE SSO/);
-assert.match(loader, /ssoReturnUrl\?: string/);
-assert.match(loader, /ssoReturnUrl/);
-assert.match(loader, /data-sso-return-url/);
-assert.match(css, /\.aegis \.ax-sso/);
-assert.match(css, /\.aegis\.compact \.ax-sso[^}]*display: flex/s);
+assert.doesNotMatch(embed, /className="ax-sso"/);
+assert.doesNotMatch(embed, /ssoReturnUrl/);
+assert.doesNotMatch(embed, />\s*MOBILE SSO/);
+assert.doesNotMatch(loader, /data-sso-return-url/);
+assert.doesNotMatch(loader, /&ssoReturnUrl=/);
+assert.match(loader, /function startMobileSso/);
+assert.match(loader, /\/sso\/mobile/);
+assert.match(loader, /returnUrl/);
+assert.match(loader, /win\.argusCaptcha = \{ render, startMobileSso/);
+assert.match(loader, /DEFAULT_WIDGET_MAX_WIDTH = '28rem'/);
+assert.match(loader, /max-width:\$\{DEFAULT_WIDGET_MAX_WIDTH\}/);
+assert.doesNotMatch(css, /\.ax-sso/);
+assert.doesNotMatch(css, /\.ax-body/);
+assert.doesNotMatch(css, /\.ax-context/);
+assert.doesNotMatch(css, /grid-template-columns:\s*minmax\(220px, 248px\)/);
 
 console.log('sso-widget-entry: ok');

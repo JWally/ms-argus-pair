@@ -50,7 +50,7 @@ assert(
     pairPage.includes("proofMode === 'integrity'") &&
     phoneEntry.includes("proofMode === 'integrity'") &&
     pairPage.includes("void pair('integrity')") &&
-    phoneEntry.includes("void pair('integrity')"),
+    phoneEntry.includes("void pair('integrity', { keepDialpad: true })"),
   'integrity-only sessions should submit without opening a passkey or OAuth ceremony'
 );
 

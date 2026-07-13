@@ -43,9 +43,9 @@ body:has(.aegis-stage) {
   --paper: #ffffff;
   --state: var(--violet);
 
-  /* Fluid: the host's iframe decides the width (the loader caps its iframe at
-     320px, so customer embeds are unchanged; wider hosts get a wider module).
-     640px is a sanity cap for unframed direct visits. */
+  /* Fluid: the host's iframe decides the width. The loader defaults to a 28rem
+     cap, while narrower merchant containers still win. 640px is a sanity cap
+     for unframed direct visits. */
   width: 100%;
   max-width: 640px;
   min-height: 400px;
@@ -249,39 +249,6 @@ body:has(.aegis-stage) {
   color: var(--muted);
 }
 
-.aegis .ax-sso {
-  width: 100%;
-  min-height: 40px;
-  margin-top: 12px;
-  border: 1px solid color-mix(in srgb, var(--violet-lit) 58%, var(--violet));
-  border-radius: 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #ffffff;
-  background: var(--violet);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-decoration: none;
-  transition:
-    background 0.18s ease,
-    border-color 0.18s ease,
-    transform 0.18s ease;
-}
-.aegis .ax-sso:hover {
-  border-color: var(--violet-lit);
-  background: color-mix(in srgb, var(--violet) 84%, #ffffff);
-}
-.aegis .ax-sso:active {
-  transform: translateY(1px);
-}
-.aegis .ax-sso:focus-visible {
-  outline: 2px solid var(--violet-lit);
-  outline-offset: 2px;
-}
-
 /* Compact (small host screens, reported by the loader): the module ends at
    the human line — no handshake track, no reserved height. */
 .aegis.compact {
@@ -289,9 +256,6 @@ body:has(.aegis-stage) {
 }
 .aegis.compact .ax-link {
   display: none;
-}
-.aegis.compact .ax-sso {
-  display: flex;
 }
 
 /* ---- handshake signature ---- */

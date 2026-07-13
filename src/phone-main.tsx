@@ -168,6 +168,19 @@ function setState(patch: Partial<Runtime>): void {
   render();
 }
 
+/**
+ * Bootstrap work finishes while the user may already be drawing. Updating
+ * trust/desktop readiness must not replace the active canvas: doing so erases
+ * the in-progress stroke and looks like a page reload. Visual phase changes
+ * still use setState(); this helper is only for background readiness fields.
+ */
+function setBackgroundState(patch: Partial<Runtime>): void {
+  const preserveActiveChallenge =
+    state.phase === 'challenge' && root.querySelector('.bio-draw') !== null;
+  Object.assign(state, patch);
+  if (!preserveActiveChallenge) render();
+}
+
 async function bootstrap(): Promise<void> {
   if (!sessionId) return;
   sendPhonePerf('bootstrap_start');
@@ -184,13 +197,14 @@ async function bootstrap(): Promise<void> {
     const trustFallback = window.setTimeout(() => {
       if (trustSettled || state.ctl.signal.aborted) return;
       sendPhonePerf('trust_check_timeout');
-      setState({ trustChecked: true });
+      setBackgroundState({ trustChecked: true });
+      maybeStartFastPass();
     }, 1500);
     void trustMod.loadTrustToken().then((trustToken) => {
       trustSettled = true;
       window.clearTimeout(trustFallback);
       if (state.ctl.signal.aborted) return;
-      setState({
+      setBackgroundState({
         hasTrust: Boolean(trustToken),
         trustChecked: true,
       });
@@ -200,22 +214,31 @@ async function bootstrap(): Promise<void> {
 
     const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal, {
       challenge: state.startedInChallenge,
+      onScanStart: () => sendPhonePerf('scan_start', { hasTrust: state.hasTrust }),
+      onScanDone: (result) =>
+        sendPhonePerf('scan_done', {
+          hasTrust: state.hasTrust,
+          attested: Boolean(result.attestation),
+          durationMs: Math.round(result.durationMs),
+        }),
+      onScanError: (error: unknown) =>
+        sendPhonePerf('scan_error', {
+          hasTrust: state.hasTrust,
+          error: error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
+        }),
     });
     if (state.ctl.signal.aborted) return;
-    state.info = instrumentScan(info);
+    state.info = info;
     state.nonce = info.nonce;
     state.desktopReady = true;
     sendPhonePerf('desktop_ready', {
       hasTrust: state.hasTrust,
       startedInChallenge: state.startedInChallenge,
     });
-    if (state.hasTrust) {
-      // Hide the scan latency behind the dialpad as soon as the trusted-device
-      // path is possible. The eventual POST is still device-trust only.
-      void state.info.getScanPromise();
+    if (!state.startedInChallenge) {
+      state.phase = 'ready';
+      render();
     }
-    if (!state.startedInChallenge) state.phase = 'ready';
-    render();
     maybeStartFastPass();
   } catch (e) {
     if (state.ctl.signal.aborted) return;
@@ -254,6 +277,10 @@ function advanceChallenge(): void {
   if (state.verdict === 'paired') {
     // The DONE tap — the desktop has been holding the verdict for this.
     signalChallengeComplete();
+    // iOS may refuse window.close() for a tab opened by its QR scanner.
+    // Render the successful terminal state first so a refused close cannot
+    // leave a verified user staring at what looks like a stuck challenge.
+    setState({ phase: 'paired', status: 'done' });
     try {
       window.close();
     } catch {
@@ -261,7 +288,7 @@ function advanceChallenge(): void {
     }
     return;
   }
-  if (state.inflight && state.hasTrust) {
+  if (state.inflight) {
     setState({ challengeIndex: state.challengeIndex + 1 });
     return;
   }
@@ -274,8 +301,10 @@ function advanceChallenge(): void {
     return;
   }
   if (!state.info.proofRequired) {
-    setState({ phase: 'pairing' });
-    void pair('integrity');
+    // Keep the challenge moving while the already-running scan is submitted.
+    // The button becomes DONE only after the paired verdict arrives.
+    setState({ challengeIndex: state.challengeIndex + 1 });
+    void pair('integrity', { keepDialpad: true });
     return;
   }
   if (state.info.freshProofRequired) {
@@ -431,44 +460,6 @@ function reportFirstRender(): void {
   if (firstRenderReported) return;
   firstRenderReported = true;
   queueMicrotask(() => sendPhonePerf('first_render', { initialPhase: state.phase }));
-}
-
-function instrumentScan(info: PhoneSessionInfo): PhoneSessionInfo {
-  let scanStarted = false;
-  let scanSettled = false;
-  return {
-    ...info,
-    getScanPromise: () => {
-      if (!scanStarted) {
-        scanStarted = true;
-        sendPhonePerf('scan_start', { hasTrust: state.hasTrust });
-      }
-      return info.getScanPromise().then(
-        (result) => {
-          if (!scanSettled) {
-            scanSettled = true;
-            sendPhonePerf('scan_done', {
-              hasTrust: state.hasTrust,
-              attested: Boolean(result.attestation),
-              durationMs: Math.round(result.durationMs),
-            });
-          }
-          return result;
-        },
-        (error: unknown) => {
-          if (!scanSettled) {
-            scanSettled = true;
-            sendPhonePerf('scan_error', {
-              hasTrust: state.hasTrust,
-              error:
-                error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
-            });
-          }
-          throw error;
-        }
-      );
-    },
-  };
 }
 
 function sendPhonePerf(event: string, extra: Record<string, unknown> = {}): void {

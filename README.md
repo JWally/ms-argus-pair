@@ -18,7 +18,6 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
   src="https://static-captcha-dev-jw.argus.pw/captcha.js"
   data-cpi="argus_cpi_live_..."
   data-challenge-id="checkout_1234567890abcdef"
-  data-sso-return-url="https://merchant.example/captcha/sso-return"
   data-onresult="onPair"
 ></script>
 <div class="argus-captcha"></div>
@@ -38,6 +37,20 @@ fraud scoring lives in `ms-argus-api` (consumed here as the "merchant API").
 
 Or programmatically:
 `window.argusCaptcha.render(el, { cpi, challengeId, onResult, onEvent })`.
+
+Mobile SSO is a separate merchant-owned action, not part of the QR widget. Wire
+your own button to the loader API:
+
+```js
+window.argusCaptcha.startMobileSso({
+  cpi: 'argus_cpi_live_....fastpass',
+  challengeId: 'checkout_1234567890abcdef',
+  returnUrl: 'https://merchant.example/captcha/sso-return',
+});
+```
+
+The loader navigates to the canonical Argus mobile flow. The merchant controls
+whether, where, and how the SSO action is presented.
 
 The merchant backend must generate a fresh, unpredictable URL-safe
 `challengeId` (16-128 characters) for each protected checkout or action and

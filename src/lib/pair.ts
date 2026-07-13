@@ -76,6 +76,7 @@ interface ArgusGlobal {
 declare global {
   interface Window {
     argus?: ArgusGlobal;
+    argusBootstrapReady?: Promise<void>;
   }
 }
 
@@ -84,6 +85,15 @@ function getArgus(): ArgusGlobal {
     throw new Error('argus SDK not loaded (argus-loader.iife.js missing or blocked)');
   }
   return window.argus;
+}
+
+async function waitForArgus(): Promise<ArgusGlobal> {
+  // The stable bootstrap verifies a signed manifest before installing the SDK.
+  // Phone code can execute while that async chain is still in flight. Await the
+  // bootstrap's canonical readiness promise so eager scanning starts at the
+  // earliest safe moment without racing window.argus initialization.
+  await window.argusBootstrapReady;
+  return getArgus();
 }
 
 /** Carries the HTTP status so callers can branch on specific codes. */
@@ -780,12 +790,10 @@ export interface PhoneSessionInfo {
   /** Live WS connection the phone opened to receive `desktop-ready`. */
   conn: WsConnection;
   /**
-   * Lazily starts the phone integrity scan after the cheap dialpad has
-   * loaded and the user advances. Memoized so silent trust fallback and
-   * proof-of-life paths share the same scan. Signed payload only binds
-   * {sessionId, nonce, role: phone}; desktopArgusSessionId/desktopKeyId
-   * travel as unsigned top-level body fields and are validated
-   * server-side against storage.
+   * Returns the phone integrity scan started as soon as the QR bootstrap is
+   * parsed. Silent trust and proof-of-life paths share the same scan. The
+   * signed payload only binds {sessionId, nonce, role: phone}; desktop
+   * bindings travel as top-level fields and are validated server-side.
    */
   getScanPromise: () => Promise<ArgusRunResult>;
 }
@@ -822,8 +830,8 @@ function parsePairHash(): PairHashParams {
   };
 }
 
-function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
-  const argus = getArgus();
+async function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
+  const argus = await waitForArgus();
   const scanPromise = argus.run({
     cpi: ARGUS_CPI,
     timeoutMs: 30_000,
@@ -869,11 +877,25 @@ export async function awaitDesktopReady(
      * `paired` verdict until `phone-done` (see signalChallengeDone).
      */
     challenge?: boolean;
+    onScanStart?: () => void;
+    onScanDone?: (result: ArgusRunResult) => void;
+    onScanError?: (error: unknown) => void;
   } = {}
 ): Promise<PhoneSessionInfo> {
   if (signal?.aborted) throw new Error('aborted');
   const { wsUrl, desktopEnvelope, phoneToken, nonce, proofRequired, freshProofRequired } =
     parsePairHash();
+
+  // LATENCY CONTRACT: DO NOT move this scan behind desktop-ready or a user tap.
+  // The nonce arrives in the QR, so no later desktop field is needed to start.
+  // A previous lazy-on-tap change exposed 3.3-5.5 seconds of scan latency after
+  // SEND. Starting here hides that work behind the connection handshake and
+  // challenge UI; the server still withholds the verdict until every binding
+  // and assurance requirement is verified.
+  opts.onScanStart?.();
+  const scanPromise = startPhoneIntegrityScan(sessionId, nonce);
+  void scanPromise.then(opts.onScanDone, opts.onScanError);
+  const getScanPromise = () => scanPromise;
 
   const conn = await connectAndWhoami({
     url: wsUrl,
@@ -887,12 +909,6 @@ export async function awaitDesktopReady(
   }
   const onAbort = () => conn.close();
   signal?.addEventListener('abort', onAbort);
-  let scanPromise: Promise<ArgusRunResult> | null = null;
-  const getScanPromise = () => {
-    scanPromise ??= startPhoneIntegrityScan(sessionId, nonce);
-    return scanPromise;
-  };
-
   try {
     // Tell the desktop we're here. Server auto-includes our envelope on
     // the relayed message so the desktop can address us back.
@@ -1249,9 +1265,9 @@ export async function submitPhoneAttestation(
         ? authenticateExistingPasskey(info.nonce)
         : createNewPasskey(info.nonce);
 
-  // Start the expensive Argus scan only after the cheap dialpad has
-  // loaded and the user advances. For WebAuthn, it still runs in
-  // parallel with proof-of-life so the user does not pay the full sum.
+  // The Argus scan started during QR bootstrap and has been running behind
+  // the challenge UI. WebAuthn still runs in parallel when interactive proof
+  // is required.
   const [webauthnSettled, runSettled] = await Promise.allSettled([
     webauthnPromise,
     info.getScanPromise(),
