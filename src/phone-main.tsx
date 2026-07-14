@@ -1,6 +1,7 @@
 import './index.css';
 import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
 import { startBioDotPlate } from './lib/bio-dot-plate';
+import { isPairSessionTimeout } from './lib/pair-timeout';
 import { createPhonePerfReporter, type PhonePerfBatch } from './lib/phone-perf';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
@@ -254,7 +255,7 @@ async function bootstrap(): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
     recordPhonePerf('bootstrap_error', { error: msg.slice(0, 80) });
     flushPhonePerf('bootstrap_error');
-    if (msg.includes("didn't finish scanning") || msg.includes('session expired')) {
+    if (isPairSessionTimeout(e)) {
       setState({ phase: 'timeout' });
     } else {
       setState({ phase: 'error', errorMsg: msg });

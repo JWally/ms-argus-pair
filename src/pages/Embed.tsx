@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { startDesktopSession, type DesktopSession } from '../lib/pair';
+import { isPairSessionTimeout } from '../lib/pair-timeout';
 import './embed.css';
 
 /**
@@ -36,12 +37,13 @@ type UpMsg =
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.(?:fastpass|stepup|forceauth))?$/;
 const CHALLENGE_FORMAT = /^[A-Za-z0-9_-]{16,128}$/;
 
-type Phase = 'scanning' | 'pairing' | 'verified' | 'failed';
+type Phase = 'scanning' | 'pairing' | 'verified' | 'timeout' | 'failed';
 
 const COPY: Record<Phase, { title: string; sub: string }> = {
   scanning: { title: 'Scan with your phone', sub: 'Not scanning? Move closer or farther away' },
   pairing: { title: 'Phone connected — verifying…', sub: 'Checking this is a real device' },
   verified: { title: 'Verified', sub: "You're all set" },
+  timeout: { title: "Didn't connect in time", sub: 'Refresh to try again' },
   failed: { title: "Couldn't verify", sub: 'Try again on a trusted network' },
 };
 
@@ -85,6 +87,13 @@ const SealCross = () => (
     <path d="M19 19l10 10M29 19l-10 10" strokeWidth={3.2} strokeLinecap="round" />
   </svg>
 );
+const SealTimeout = () => (
+  <svg className="ax-ring" viewBox="0 0 48 48" strokeWidth={2.4} {...svg}>
+    <circle cx="24" cy="24" r="21" opacity="0.28" />
+    <circle cx="24" cy="24" r="14" />
+    <path d="M24 16.5v8l5 3" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 /** Read the loader-provided config from the iframe URL (host origin + merchant CPI). */
 function useEmbedConfig(): {
@@ -109,7 +118,7 @@ export function Embed() {
   const [qrReady, setQrReady] = useState(false);
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
-  const [done, setDone] = useState<null | 'paired' | 'failed'>(null);
+  const [done, setDone] = useState<null | 'paired' | 'timeout' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
   const moduleRef = useRef<HTMLDivElement | null>(null);
   const qrImageUrlsRef = useRef<string[]>([]);
@@ -217,7 +226,7 @@ export function Embed() {
         setDone(verdict.verdict === 'paired' ? 'paired' : 'failed');
       } catch (e) {
         if (cancelled) return;
-        setDone('failed');
+        setDone(isPairSessionTimeout(e) ? 'timeout' : 'failed');
         postUp({ event: 'error', message: String(e) });
       }
     })();
@@ -234,11 +243,13 @@ export function Embed() {
   const phase: Phase =
     done === 'paired'
       ? 'verified'
-      : done === 'failed'
-        ? 'failed'
-        : connected
-          ? 'pairing'
-          : 'scanning';
+      : done === 'timeout'
+        ? 'timeout'
+        : done === 'failed'
+          ? 'failed'
+          : connected
+            ? 'pairing'
+            : 'scanning';
   // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
   const copy = COPY[phase];
 
@@ -269,7 +280,13 @@ export function Embed() {
             {!qrReady && <span className="ax-tile-load" />}
           </div>
           <div className="ax-seal">
-            {phase === 'verified' ? <SealCheck /> : phase === 'failed' ? <SealCross /> : null}
+            {phase === 'verified' ? (
+              <SealCheck />
+            ) : phase === 'timeout' ? (
+              <SealTimeout />
+            ) : phase === 'failed' ? (
+              <SealCross />
+            ) : null}
           </div>
           <span className="ax-tick tl" />
           <span className="ax-tick tr" />
@@ -294,7 +311,7 @@ export function Embed() {
             <span className="ax-live" />
             <span className="ax-pulse" />
           </div>
-          <div className={`ax-node ${phase === 'scanning' ? '' : 'here'}`}>
+          <div className={`ax-node ${connected ? 'here' : ''}`}>
             <span className="ax-chip">
               <PhoneIcon />
             </span>
