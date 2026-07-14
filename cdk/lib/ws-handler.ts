@@ -52,6 +52,7 @@ import {
   GetCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { markPhoneChallenge, markPhoneDone } from './pair-api/verdict-reveal-store';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -178,6 +179,25 @@ async function loadSecretMaterial(): Promise<{
     hkdfSync('sha256', cachedRoot, Buffer.alloc(0), Buffer.from('ws-envelope-aes-v1', 'utf-8'), 32)
   );
   return { hmacKey: cachedHmacKey, aesKey: cachedAesKey };
+}
+
+export function deriveVerdictRevealKeyFromRoot(root: Buffer, sessionId: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      'sha256',
+      root,
+      Buffer.from(sessionId, 'utf-8'),
+      Buffer.from('pair-verdict-reveal-v1', 'utf-8'),
+      32
+    )
+  );
+}
+
+/** Session-specific key withheld until an authenticated phone sends DONE. */
+export async function deriveVerdictRevealKey(sessionId: string): Promise<Buffer> {
+  await loadSecretMaterial();
+  if (!cachedRoot) throw new Error('WS root secret unavailable');
+  return deriveVerdictRevealKeyFromRoot(cachedRoot, sessionId);
 }
 
 // ── Bootstrap token (HMAC-signed JSON, base64url) ──────────────────────
@@ -405,10 +425,52 @@ async function handleWhoami(
   return ok();
 }
 
+async function recordVerdictRevealSignal(
+  me: Envelope,
+  dataKind: unknown,
+  data: unknown,
+  now: number
+): Promise<boolean> {
+  if (!TABLE || me.role !== 'phone') return false;
+  const markerExpiresAt = now + TOKEN_TTL_SECONDS + 60;
+  if (dataKind === 'phone-here') {
+    const challenge = (data as { challenge?: unknown }).challenge === true;
+    // Persist before relaying phone-here: desktop-ready and phone-attest can
+    // only follow after this write, so verdict calculation cannot race past the gate.
+    await markPhoneChallenge(ddb, TABLE, me.sessionId, challenge, markerExpiresAt);
+    return false;
+  }
+  if (dataKind !== 'phone-done') return false;
+  await markPhoneDone(ddb, TABLE, me.sessionId, markerExpiresAt);
+  return true;
+}
+
+async function sendVerdictRelease(
+  event: WsEvent,
+  phone: Envelope,
+  desktop: Envelope
+): Promise<void> {
+  const revealKey = b64urlBytes(await deriveVerdictRevealKey(phone.sessionId));
+  const release = {
+    action: 'message',
+    from: 'server',
+    sessionId: phone.sessionId,
+    data: { kind: 'verdict-release', revealKey },
+  };
+  // Desktop unlocks the merchant verdict; phone unlocks only its private
+  // continuation state (device trust/passkey hint). Same fixed key, separate
+  // AES-GCM IVs and payloads.
+  await Promise.all([
+    sendToConnection(event, desktop.connectionId, release),
+    sendToConnection(event, phone.connectionId, release),
+  ]);
+}
+
 async function handleMessage(
   event: WsEvent,
   body: { me?: unknown; peer?: unknown; data?: unknown }
 ): Promise<WsResp> {
+  if (!TABLE) throw new Error('TABLE_NAME not configured');
   if (typeof body.me !== 'string' || typeof body.peer !== 'string') return bad('missing_envelopes');
   const me = await openEnvelope(body.me);
   const peer = await openEnvelope(body.peer);
@@ -438,6 +500,7 @@ async function handleMessage(
     body.data && typeof body.data === 'object' && 'kind' in (body.data as object)
       ? (body.data as { kind?: unknown }).kind
       : null;
+  const shouldSendVerdictRelease = await recordVerdictRevealSignal(me, dataKind, body.data, now);
   console.log(
     `[ws] relay from=${me.role} to=${peer.role} session=${me.sessionId} kind=${String(dataKind)} peerCid=${peer.connectionId}`
   );
@@ -452,6 +515,7 @@ async function handleMessage(
     sessionId: me.sessionId,
     data: body.data ?? null,
   });
+  if (shouldSendVerdictRelease) await sendVerdictRelease(event, me, peer);
   return ok();
 }
 

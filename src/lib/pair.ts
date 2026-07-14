@@ -7,7 +7,8 @@
  *      ◄────────────────  {sessionId, nonce, expiresAt}
  *   ─── QR rendered immediately ───
  *
- *   (background) argus.run({attest}) → POST /desktop-attest
+ *   (background) Promise.all([iframe scan, merchant scan])
+ *                → POST /desktop-attest
  *
  *   ─── poll /api/session/{id}/result ───
  *
@@ -41,6 +42,12 @@ import {
   createdCredentialIdFromProof,
 } from './phone-attestation-body';
 import type { SecureQrImage } from './qr-keyholder';
+import {
+  decodeVerdictRevealKey,
+  openFixedVerdictEnvelope,
+  type PhoneStatePayload,
+  type SealedVerdictEnvelope,
+} from './verdict-envelope';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -54,6 +61,11 @@ interface ArgusAttestation {
   signature: string;
   publicKey: string;
   keyId: string;
+}
+
+export interface HostPreflightScan {
+  argusSessionId: string;
+  attestation: ArgusAttestation;
 }
 
 interface ArgusRunResult {
@@ -242,6 +254,12 @@ interface VerdictShape {
   annotations?: Record<string, unknown>;
 }
 
+interface SealedResultShape {
+  status: 'sealed';
+  envelope: SealedVerdictEnvelope;
+  revealKey?: string;
+}
+
 export interface StartDesktopOptions {
   /**
    * Merchant CPI to attribute this pairing's attestation + usage to. Defaults
@@ -251,6 +269,12 @@ export interface StartDesktopOptions {
   cpi?: string;
   /** Fresh opaque identifier for the merchant action this verdict may authorize. */
   challengeId?: string;
+  /** Cross-origin embeds require merchant evidence before desktop-ready may be sent. */
+  hostPreflightRequired?: boolean;
+  /** Starts the merchant scan after a Pair session ID exists, without blocking the QR. */
+  requestHostPreflight?: (binding: { pairSessionId: string }) => Promise<HostPreflightScan>;
+  /** Exact merchant origin signed by the host scan and snapshotted at session start. */
+  hostOrigin?: string;
 }
 
 /** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
@@ -288,7 +312,13 @@ export async function startDesktopSession(
   const [session, eagerWs] = await Promise.all([
     jsonFetch<SessionStartResp>(`${API}/session/start`, {
       method: 'POST',
-      body: JSON.stringify({ challengeId, ...(opts.cpi ? { cpi: opts.cpi } : {}) }),
+      body: JSON.stringify({
+        challengeId,
+        ...(opts.cpi ? { cpi: opts.cpi } : {}),
+        ...(opts.hostPreflightRequired
+          ? { hostPreflightRequired: true, hostOrigin: opts.hostOrigin }
+          : {}),
+      }),
     }),
     eagerWsPromise,
   ]);
@@ -296,6 +326,34 @@ export async function startDesktopSession(
     if (eagerWs) eagerWs.close();
     throw new Error('session/start did not return WebSocket bootstrap material');
   }
+
+  // Evidence starts as soon as the server-issued session binding exists. The
+  // settled wrapper prevents an early rejection from becoming unhandled while
+  // WS identity and sealed QR minting continue independently.
+  const desktopEvidencePromise = Promise.all([
+    waitForArgus().then((argus) =>
+      argus.run({
+        cpi: integrityCpi(opts.cpi || ARGUS_CPI),
+        timeoutMs: 30_000,
+        attest: {
+          purpose: ATTEST_PURPOSE,
+          ttlSeconds: ATTEST_TTL_SECONDS,
+          payload: {
+            sessionId: session.sessionId,
+            nonce: session.nonce,
+            role: 'desktop',
+          },
+        },
+      })
+    ),
+    opts.hostPreflightRequired
+      ? (opts.requestHostPreflight?.({ pairSessionId: session.sessionId }) ??
+        Promise.reject(new Error('host preflight callback missing')))
+      : Promise.resolve(null),
+  ]).then(
+    ([run, hostScan]) => ({ ok: true as const, run, hostScan }),
+    (error: unknown) => ({ ok: false as const, error })
+  );
 
   // The WS URL in session.ws.url is what the server says. If our eager
   // socket is on a DIFFERENT URL (stale build env), discard the eager
@@ -396,20 +454,23 @@ export async function startDesktopSession(
   // calls and the expiry timer become no-ops.
   //
   // Reveal gate: when the phone announced it is showing the drawing
-  // challenge (phone-here carries challenge:true), a `paired` verdict is
-  // HELD — verification already finished in the background — until the
-  // phone relays `phone-done` (user tapped DONE / left the challenge).
-  // Otherwise the desktop flips to Verified while the user is mid-letter.
-  // Failures reveal immediately, and a cap + the session-expiry timer
-  // release the hold so a vanished phone can't wedge the desktop.
+  // challenge (phone-here carries challenge:true), every verdict is HELD —
+  // verification already finished in the background — until the phone relays
+  // `phone-done` (user tapped DONE / left the challenge). Gating both outcomes
+  // keeps the drawing challenge from becoming a pass/fail timing oracle. A cap
+  // plus the session-expiry timer release the hold so a vanished phone cannot
+  // wedge the desktop.
   let settled = false;
   let phoneInChallenge = false;
   let phoneDone = false;
   let heldVerdict: VerdictShape | null = null;
   let holdCapTimer: number | null = null;
+  let sealedVerdict: SealedVerdictEnvelope | null = null;
+  let verdictRevealKey: string | null = null;
+  let isOpeningSealedVerdict = false;
   const settle = (v: VerdictShape) => {
     if (settled) return;
-    if (v.verdict === 'paired' && phoneInChallenge && !phoneDone) {
+    if (phoneInChallenge && !phoneDone) {
       if (!heldVerdict) {
         heldVerdict = v;
         holdCapTimer = window.setTimeout(releaseHeldVerdict, 90_000);
@@ -418,6 +479,29 @@ export async function startDesktopSession(
     }
     settled = true;
     resolveResult(v);
+  };
+  const openSealedVerdictIfReady = async () => {
+    if (settled || isOpeningSealedVerdict || !sealedVerdict || !verdictRevealKey) {
+      return;
+    }
+    isOpeningSealedVerdict = true;
+    try {
+      const payload = await openFixedVerdictEnvelope(
+        decodeVerdictRevealKey(verdictRevealKey),
+        session.sessionId,
+        sealedVerdict
+      );
+      if (payload.kind !== 'desktop-verdict') throw new Error('unexpected verdict payload kind');
+      settle({
+        verdict: payload.verdict,
+        reason: payload.reason,
+        annotations: payload.annotations,
+      });
+    } catch (error) {
+      fail(error);
+    } finally {
+      isOpeningSealedVerdict = false;
+    }
   };
   const releaseHeldVerdict = () => {
     phoneDone = true;
@@ -455,7 +539,21 @@ export async function startDesktopSession(
             { headers: { accept: 'application/json' } }
           );
           if (res.status === 200) {
-            settle((await res.json()) as VerdictShape);
+            const response = (await res.json()) as VerdictShape | SealedResultShape;
+            if ('status' in response && response.status === 'sealed') {
+              sealedVerdict = response.envelope;
+              if (response.revealKey) verdictRevealKey = response.revealKey;
+              await openSealedVerdictIfReady();
+              if (settled || heldVerdict) return;
+              // Once ciphertext exists, only DONE/release is outstanding.
+              // Poll tightly enough that a disconnected desktop does not add
+              // the old multi-second backoff after the user's final tap.
+              stepMs = 500;
+              continue;
+            }
+            // Compatibility for sessions decided by a pre-sealing Lambda
+            // during a rolling deployment.
+            settle(response as VerdictShape);
             return;
           }
           // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
@@ -478,6 +576,7 @@ export async function startDesktopSession(
     const data = msg.data as { kind?: string } | null;
     if (!data || typeof data.kind !== 'string') return;
     if (data.kind === 'phone-here') {
+      if (!msg.fromEnvelope) return;
       phoneEnvelope = msg.fromEnvelope;
       if ((data as { challenge?: boolean }).challenge === true) phoneInChallenge = true;
       if (!notifiedPhoneConnected) {
@@ -510,6 +609,14 @@ export async function startDesktopSession(
         reason: (data as { reason: string | null }).reason ?? null,
         annotations: (data as { annotations?: Record<string, unknown> }).annotations,
       });
+    } else if (data.kind === 'verdict-sealed') {
+      if (msg.from !== 'server') return;
+      sealedVerdict = (data as { envelope: SealedVerdictEnvelope }).envelope;
+      void openSealedVerdictIfReady();
+    } else if (data.kind === 'verdict-release') {
+      if (msg.from !== 'server') return;
+      verdictRevealKey = (data as { revealKey: string }).revealKey;
+      void openSealedVerdictIfReady();
     }
   });
 
@@ -537,20 +644,9 @@ export async function startDesktopSession(
   // ready peer message (or send immediately if the phone is already up).
   (async () => {
     try {
-      const argus = getArgus();
-      const run = await argus.run({
-        cpi: integrityCpi(opts.cpi || ARGUS_CPI),
-        timeoutMs: 30_000,
-        attest: {
-          purpose: ATTEST_PURPOSE,
-          ttlSeconds: ATTEST_TTL_SECONDS,
-          payload: {
-            sessionId: session.sessionId,
-            nonce: session.nonce,
-            role: 'desktop',
-          },
-        },
-      });
+      const evidence = await desktopEvidencePromise;
+      if (!evidence.ok) throw evidence.error;
+      const { run, hostScan } = evidence;
       if (!run.attestation) {
         throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
       }
@@ -564,6 +660,7 @@ export async function startDesktopSession(
         body: JSON.stringify({
           argusSessionId: run.argusSessionId,
           attestation: run.attestation,
+          ...(hostScan ? { hostPreflight: hostScan } : {}),
         }),
       });
       events.onDesktopAttested?.({
@@ -789,6 +886,8 @@ export interface PhoneSessionInfo {
   phoneToken: string;
   /** Live WS connection the phone opened to receive `desktop-ready`. */
   conn: WsConnection;
+  /** Resolves only after the server authenticates this phone's DONE message. */
+  getVerdictRevealKey: () => Promise<string>;
   /**
    * Returns the phone integrity scan started as soon as the QR bootstrap is
    * parsed. Silent trust and proof-of-life paths share the same scan. The
@@ -903,6 +1002,20 @@ export async function awaitDesktopReady(
     origin: window.location.origin,
   });
 
+  const verdictRevealKey = new Promise<string>((resolve) => {
+    const unsubscribe = conn.onMessage((message) => {
+      const data = message.data as { kind?: unknown; revealKey?: unknown } | null;
+      if (
+        message.from === 'server' &&
+        data?.kind === 'verdict-release' &&
+        typeof data.revealKey === 'string'
+      ) {
+        unsubscribe();
+        resolve(data.revealKey);
+      }
+    });
+  });
+
   if (signal?.aborted) {
     conn.close();
     throw new Error('aborted');
@@ -935,6 +1048,7 @@ export async function awaitDesktopReady(
       desktopEnvelope,
       phoneToken,
       conn,
+      getVerdictRevealKey: () => verdictRevealKey,
       getScanPromise,
     };
   } finally {
@@ -1139,6 +1253,43 @@ interface AttestResponse {
   reason: string | null;
   annotations?: Record<string, unknown>;
   nextDeviceTrust?: string | null;
+  phoneState?: SealedVerdictEnvelope;
+  revealKey?: string;
+  /** Persist released phone-only state after DONE without exposing it earlier. */
+  finalizeAfterDone?: () => Promise<'paired' | 'failed' | null>;
+}
+
+function attachPhoneStateFinalizer(
+  response: AttestResponse,
+  info: PhoneSessionInfo,
+  createdCredentialId: string | null = null
+): AttestResponse {
+  if (response.verdict !== 'complete' || !response.phoneState) return response;
+  let finalization: Promise<'paired' | 'failed' | null> | null = null;
+  return {
+    ...response,
+    finalizeAfterDone: () => {
+      finalization ??= (async () => {
+        const revealKey = response.revealKey ?? (await info.getVerdictRevealKey());
+        const payload = await openFixedVerdictEnvelope(
+          decodeVerdictRevealKey(revealKey),
+          info.conn.sessionId,
+          response.phoneState!
+        );
+        if (payload.kind !== 'phone-state') throw new Error('unexpected phone state payload kind');
+        const phoneState = payload as PhoneStatePayload;
+        if (phoneState.nextDeviceTrust) {
+          const { saveTrustToken } = await import('./device-trust');
+          await saveTrustToken(phoneState.nextDeviceTrust);
+        }
+        if (phoneState.verdict === 'paired' && createdCredentialId) {
+          writePasskeyHint(createdCredentialId);
+        }
+        return phoneState.verdict;
+      })();
+      return finalization;
+    },
+  };
 }
 
 /**
@@ -1204,21 +1355,17 @@ export async function submitPhoneAttestation(
             ),
           });
           if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-          return r;
+          return attachPhoneStateFinalizer(r, info);
         } catch (postErr) {
           if (postErr instanceof HttpError) {
             // 409 already_attested: this device already paired in this
             // session (likely a retried request whose first response was
             // lost). Treat as success — fetch the existing verdict.
             if (postErr.status === 409 && postErr.bodyJson?.error === 'already_attested') {
-              // /result requires the bootstrap token — without ?t= the server
-              // 401s and this recovery path used to defeat itself (cleared the
-              // trust token and forced WebAuthn on an already-paired session).
-              const fallback = await jsonFetch<AttestResponse>(
-                `${API}/session/${sessionId}/result?t=${encodeURIComponent(info.phoneToken)}`,
-                { method: 'GET' }
-              );
-              return fallback;
+              // The winner already delivered the sealed desktop verdict. Do
+              // not fetch /result here: it is desktop-only ciphertext and the
+              // phone must remain decision-blind.
+              return { verdict: 'complete', reason: null, annotations: {} };
             }
             if (postErr.status === 401) {
               await clearTrustToken();
@@ -1315,9 +1462,10 @@ export async function submitPhoneAttestation(
       ),
     });
     if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-    // Server confirmed registration AND the pair succeeded.
+    // Legacy plaintext responses are finalized immediately. Sealed responses
+    // defer trust persistence and the passkey hint until authenticated DONE.
     rememberPasskey(r.verdict);
-    return r;
+    return attachPhoneStateFinalizer(r, info, createdCredentialId);
   } catch (e) {
     // Session is already paired (a prior request from this device succeeded
     // server-side even if the response was lost or retried). Treat as
@@ -1326,14 +1474,9 @@ export async function submitPhoneAttestation(
     // touch events on mobile make the phone show "Something went wrong"
     // even though the desktop sees the pairing succeed.
     if (e instanceof HttpError && e.status === 409 && e.bodyJson?.error === 'already_attested') {
-      const fallback = await jsonFetch<AttestResponse>(
-        `${API}/session/${sessionId}/result?t=${encodeURIComponent(info.phoneToken)}`,
-        { method: 'GET' }
-      );
-      // This double-submit is exactly the case that used to drop the hint
-      // and force a re-mint next visit. Record it off the fallback verdict.
-      rememberPasskey(fallback.verdict);
-      return fallback;
+      // The first request already pushed the sealed result. Returning a
+      // neutral completion keeps retries from becoming a plaintext oracle.
+      return { verdict: 'complete', reason: null, annotations: {} };
     }
     throw e;
   }

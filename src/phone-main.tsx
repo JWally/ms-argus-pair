@@ -36,6 +36,7 @@ interface Runtime {
   inflight: boolean;
   fastPassAttempted: boolean;
   startedInChallenge: boolean;
+  finalizeAfterDone?: () => Promise<'paired' | 'failed' | null>;
   ctl: AbortController;
 }
 
@@ -274,18 +275,15 @@ function maybeStartFastPass(): void {
 }
 
 function advanceChallenge(): void {
-  if (state.verdict === 'paired') {
-    // The DONE tap — the desktop has been holding the verdict for this.
+  if (state.verdict) {
+    // The DONE tap ends the phone interaction without exposing the decision.
+    // The desktop still receives and enforces the server's actual verdict.
     signalChallengeComplete();
     // iOS may refuse window.close() for a tab opened by its QR scanner.
-    // Render the successful terminal state first so a refused close cannot
-    // leave a verified user staring at what looks like a stuck challenge.
+    // Render the normal terminal state first so a refused close cannot leave
+    // the user staring at what looks like a stuck challenge.
     setState({ phase: 'paired', status: 'done' });
-    try {
-      window.close();
-    } catch {
-      /* noop */
-    }
+    void finalizePhoneStateAndClose();
     return;
   }
   if (state.inflight) {
@@ -317,6 +315,26 @@ function advanceChallenge(): void {
     return;
   }
   setState({ phase: 'ready' });
+}
+
+async function finalizePhoneStateAndClose(): Promise<void> {
+  if (state.finalizeAfterDone) {
+    try {
+      await Promise.race([
+        state.finalizeAfterDone(),
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 1_000)),
+      ]);
+    } catch (error) {
+      sendPhonePerf('phone_state_release_error', {
+        error: error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
+      });
+    }
+  }
+  try {
+    window.close();
+  } catch {
+    /* noop */
+  }
 }
 
 async function pair(
@@ -368,6 +386,7 @@ async function pair(
       trustOnly: opts.trustOnly,
     });
     sendPhonePerf('attest_done', { verdict: result.verdict, trustOnly: opts.trustOnly === true });
+    state.finalizeAfterDone = result.finalizeAfterDone;
     if (
       proofMode !== 'integrity' &&
       passkeyMode === 'passkey-auth' &&
@@ -375,7 +394,10 @@ async function pair(
     ) {
       state.pairMod.clearPasskeyHint();
     }
-    if (opts.keepDialpad && result.verdict === 'paired') {
+    if (opts.keepDialpad) {
+      // Background verdict calculation must not interrupt the drawing challenge or
+      // disclose its result on the phone. Store it only to unlock DONE; the
+      // desktop receives and enforces the unmodified server verdict.
       state.verdict = result.verdict;
       state.status = 'done';
       state.phase = 'challenge';
@@ -383,21 +405,12 @@ async function pair(
     } else {
       setState({
         verdict: result.verdict,
-        status: result.verdict === 'paired' ? 'done' : state.status,
-        phase: result.verdict === 'paired' ? 'paired' : 'failed',
+        status: 'done',
+        phase: 'paired',
       });
     }
-    if (!opts.keepDialpad && (result.verdict === 'paired' || result.verdict === 'failed')) {
-      window.setTimeout(
-        () => {
-          try {
-            window.close();
-          } catch {
-            /* noop */
-          }
-        },
-        result.verdict === 'paired' ? 1500 : 3500
-      );
+    if (!opts.keepDialpad) {
+      window.setTimeout(() => void finalizePhoneStateAndClose(), 1500);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -632,7 +645,7 @@ function drawLetterFromNonce(nonce: string, challengeIndex: number): string {
 function updateBioDrawActionLabel(): void {
   const send = root.querySelector<HTMLButtonElement>('.bio-draw-send');
   if (!send) return;
-  send.textContent = state.verdict === 'paired' ? 'DONE' : 'Next';
+  send.textContent = state.verdict ? 'DONE' : 'Next';
 }
 
 function setDisabled(

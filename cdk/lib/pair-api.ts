@@ -16,9 +16,10 @@
  *     Used by the phone after QR scan to discover the nonce + check
  *     whether the desktop side already submitted.
  *
- *   POST /api/session/{id}/desktop-attest   body: { argusSessionId, attestation }
+ *   POST /api/session/{id}/desktop-attest
+ *     body: { argusSessionId, attestation, hostPreflight? }
  *     → 200 ok
- *     Verifies the envelope signature, binds the desktop scan to this session.
+ *     Verifies the iframe scan and any required merchant scan, then binds both.
  *
  *   POST /api/session/{id}/phone-attest     body: { argusSessionId, attestation }
  *     → { verdict, reason }
@@ -51,7 +52,6 @@ import { mintBootstrapToken, openEnvelope, verifyBootstrapToken } from './ws-han
 import {
   isValkeySessionsEnabled,
   mgetSession,
-  startSessionValkey,
   recordDesktopAttestationValkey,
   recordPhoneAttestationValkey,
   claimArgusValkey,
@@ -63,8 +63,6 @@ import {
   validatePairAttestationBody,
   validateSsoAttestation,
   verifyPairAttestationPayload,
-  type AttestationInput,
-  type EnvelopeDecoded,
 } from './pair-api/attestation/envelope';
 import {
   getTrustSecret,
@@ -90,14 +88,19 @@ import {
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
-import { getVerdictSecret, signVerdict } from './pair-api/verdict-token';
+import { getVerdictSecret } from './pair-api/verdict-token';
+import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
 import { parseMerchantChallenge } from './pair-api/merchant-challenge';
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
 import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
 import { evaluateSsoProofPolicy } from './pair-api/sso-assurance';
-import { pushVerdictToDesktop } from './pair-api/verdict-push';
+import {
+  buildSealedResult,
+  deliverSealedVerdict,
+  isVerdictReleased,
+} from './pair-api/verdict-disclosure';
 import { fetchProjection } from './pair-api/projection-client';
 import {
   hashApprovalToken,
@@ -112,6 +115,14 @@ import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit'
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
+import type { StoredHostPreflight } from './pair-api/host-preflight';
+import { collectHostPreflightEvidence } from './pair-api/host-preflight-evidence';
+import { prepareAndStoreStartedSession } from './pair-api/session-start-store';
+import {
+  prepareDesktopAttestation,
+  type StoredDesktopAttestation,
+  type StoredPairAttestation,
+} from './pair-api/desktop-attest';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
 // crypto.subtle code both sides so the contract can't drift.
 import { getValkey } from './valkey-client';
@@ -160,7 +171,7 @@ const ARGUS_SID_LEDGER_TTL_SECONDS = 24 * 3600;
 export async function claimArgusSessionId(
   argusSessionId: string,
   pairSessionId: string,
-  role: 'desktop' | 'phone'
+  role: 'host' | 'desktop' | 'phone'
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (isValkeySessionsEnabled()) {
     return claimArgusValkey(argusSessionId, pairSessionId, role);
@@ -278,12 +289,6 @@ async function checkSessionStartRateLimit(ip: string): Promise<boolean> {
 
 type Verdict = 'pending' | 'paired' | 'failed';
 
-interface StoredAttestation extends AttestationInput {
-  argusSessionId: string;
-  receivedAt: number;
-  envelopeDecoded: EnvelopeDecoded;
-}
-
 interface SessionItem {
   PK: string;
   SK: string;
@@ -293,8 +298,11 @@ interface SessionItem {
   challengeId?: string;
   proofRequired?: boolean;
   freshProofRequired?: boolean;
-  desktopAttestation?: StoredAttestation;
-  phoneAttestation?: StoredAttestation;
+  hostPreflightRequired?: boolean;
+  hostOrigin?: string;
+  hostAttestation?: StoredHostPreflight;
+  desktopAttestation?: StoredDesktopAttestation;
+  phoneAttestation?: StoredPairAttestation;
   verdict: Verdict;
   verdictReason?: string;
 }
@@ -371,10 +379,15 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
       challengeId: meta.challengeId,
       proofRequired: meta.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
       freshProofRequired: meta.freshProofRequired ?? false,
+      hostPreflightRequired: meta.hostPreflightRequired ?? false,
+      hostOrigin: meta.hostOrigin,
+      hostAttestation:
+        (desktop as unknown as StoredDesktopAttestation | null)?.hostAttestation ??
+        (meta.hostAttestation as unknown as StoredHostPreflight | undefined),
       verdict: phone?.verdict ?? 'pending',
       verdictReason: phone?.reason ?? undefined,
-      desktopAttestation: desktop as unknown as StoredAttestation | undefined,
-      phoneAttestation: phone?.att as unknown as StoredAttestation | undefined,
+      desktopAttestation: desktop as unknown as StoredDesktopAttestation | undefined,
+      phoneAttestation: phone?.att as unknown as StoredPairAttestation | undefined,
       // annotations live on the row in the DDB shape too.
       ...(phone?.annotations ? { annotations: phone.annotations } : {}),
     } as unknown as SessionItem;
@@ -382,7 +395,11 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   const res = await ddb.send(
     new GetCommand({ TableName: TABLE, Key: { PK: `SESSION#${sessionId}`, SK: 'META' } })
   );
-  return (res.Item as SessionItem) ?? null;
+  const item = (res.Item as SessionItem | undefined) ?? null;
+  if (item && !item.hostAttestation) {
+    item.hostAttestation = item.desktopAttestation?.hostAttestation;
+  }
+  return item;
 }
 
 async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null> {
@@ -403,6 +420,13 @@ const exchangeSsoMerchantApproval = createSsoMerchantApprovalHandler({
   loadSession: loadSsoSession,
 });
 const verifyVerdictRequest = createVerdictVerificationHandler({ getSecret: getVerdictSecret });
+const mintVerdictTokenRequest = createVerdictTokenMintHandler({
+  loadSession,
+  verifyParticipant: verifyBootstrapToken,
+  isReleased: (sessionId, decidedAt, now) =>
+    isVerdictReleased({ ddb, tableName: TABLE }, sessionId, decidedAt, now),
+  getSecret: getVerdictSecret,
+});
 
 const lambdaHandler = async (event: {
   routeKey: string;
@@ -484,40 +508,21 @@ const lambdaHandler = async (event: {
       const cpi = scopedCpi?.cpi ?? null;
       const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
       const freshProofRequired = scopedCpi?.freshProofRequired ?? false;
-      if (isValkeySessionsEnabled()) {
-        const created = await startSessionValkey(id, {
+      const started = await prepareAndStoreStartedSession(
+        {
+          id,
           nonce,
           expiresAt,
           challengeId: merchantChallenge,
           cpi,
           proofRequired,
           freshProofRequired,
-        });
-        if (!created) {
-          // UUIDv4 collision — vanishingly rare, but mirrors the
-          // DDB ConditionExpression rejection so the caller can retry.
-          return jsonResp(409, { error: 'session_id_collision' });
-        }
-      } else {
-        const item: SessionItem = {
-          PK: `SESSION#${id}`,
-          SK: 'META',
-          nonce,
-          expiresAt,
-          challengeId: merchantChallenge,
-          cpi,
-          proofRequired,
-          freshProofRequired,
-          verdict: 'pending',
-        };
-        await ddb.send(
-          new PutCommand({
-            TableName: TABLE,
-            Item: item,
-            ConditionExpression: 'attribute_not_exists(PK)',
-          })
-        );
-      }
+          hostPreflightRequired: body.hostPreflightRequired === true,
+          hostOrigin: typeof body.hostOrigin === 'string' ? body.hostOrigin : undefined,
+        },
+        { ddb, tableName: TABLE }
+      );
+      if (!started.ok) return jsonResp(started.status, started.body);
       // Bootstrap WebSocket tokens — one per role. Client opens WSS,
       // sends whoami with the matching token, server returns an AES-
       // sealed connection-identity envelope. See cdk/lib/ws-handler.ts.
@@ -807,32 +812,24 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/session/{id}/desktop-attest': {
-      const pairBody = validatePairAttestationBody(body);
-      if (!pairBody.ok) return jsonResp(pairBody.status, pairBody.body);
-      const { argusSessionId, attestation: att } = pairBody;
       const s = await loadSession(sessionId!);
       if (!s) return jsonResp(404, { error: 'session_not_found' });
       if (s.desktopAttestation) return jsonResp(409, { error: 'already_attested' });
-      const verified = verifyPairAttestationPayload(att, {
-        role: 'desktop',
-        sessionId: sessionId!,
-        nonce: s.nonce,
-      });
-      if (!verified.ok) return jsonResp(verified.status, verified.body);
-      // Claim the argusSessionId before storing — closes Tier-1 recycling.
-      const desktopClaim = await claimArgusSessionId(argusSessionId, sessionId!, 'desktop');
-      if (!desktopClaim.ok) {
-        return jsonResp(409, {
-          error: 'argus_session_already_claimed',
-          reason: desktopClaim.reason,
-        });
-      }
-      const stored: StoredAttestation = {
-        ...att,
-        argusSessionId,
-        receivedAt: Math.floor(Date.now() / 1000),
-        envelopeDecoded: verified.decoded,
-      };
+      const prepared = await prepareDesktopAttestation(
+        body,
+        {
+          pairSessionId: sessionId!,
+          nonce: s.nonce,
+          challengeId: s.challengeId,
+          cpi: s.cpi,
+          hostPreflightRequired: s.hostPreflightRequired,
+          hostOrigin: s.hostOrigin,
+        },
+        claimArgusSessionId
+      );
+      if (!prepared.ok) return jsonResp(prepared.status, prepared.body);
+      const stored = prepared.stored;
+      const argusSessionId = stored.argusSessionId;
       if (isValkeySessionsEnabled()) {
         const claimed = await recordDesktopAttestationValkey(
           sessionId!,
@@ -925,6 +922,7 @@ const lambdaHandler = async (event: {
         role: 'phone',
         sessionId: sessionId!,
         nonce: s.nonce,
+        argusSessionId,
       });
       if (!verified.ok) return jsonResp(verified.status, verified.body);
       // SECURITY (#8) — cross-sign / authenticate the desktop binding.
@@ -980,7 +978,7 @@ const lambdaHandler = async (event: {
           reason: phoneClaim.reason,
         });
       }
-      const stored: StoredAttestation = {
+      const stored: StoredPairAttestation = {
         ...att,
         argusSessionId,
         receivedAt: Math.floor(Date.now() / 1000),
@@ -1027,12 +1025,17 @@ const lambdaHandler = async (event: {
         deviceTrustFormat: 'device_trust_redeem',
       });
 
-      const [desktopProj, phoneProj, webauthnResult] = await Promise.all([
-        fetchProjection(s.desktopAttestation.argusSessionId),
+      const [hostEvidence, phoneProj, webauthnResult] = await Promise.all([
+        collectHostPreflightEvidence({
+          hostArgusSessionId: s.hostAttestation?.argusSessionId ?? null,
+          iframeArgusSessionId: s.desktopAttestation.argusSessionId,
+          pairSessionId: sessionId!,
+        }),
         fetchProjection(argusSessionId),
         proofPath,
       ]);
-      const desktopClass = classifyScan(desktopProj, 'desktop');
+      const desktopProj = hostEvidence.iframeProjection;
+      const desktopClass = hostEvidence.iframeScan;
       const phoneClass = classifyScan(phoneProj, 'phone');
 
       // Proof of life: the phone side must have EITHER passed a fresh
@@ -1094,6 +1097,11 @@ const lambdaHandler = async (event: {
         reason = computed.reason;
         annotations = { ...computed.annotations, ...webauthnResult, proof_of_life: proofOfLife };
       }
+
+      // Preserve the raw host/iframe comparison and the narrow Brave policy
+      // annotations. hostEvidence.iframeScan already carries the effective
+      // score used above; every unqualified shape retains the raw API score.
+      annotations = { ...annotations, ...hostEvidence.annotations };
 
       // Always log the verdict reason + the proof-of-life sub-error so
       // a fail-pattern is debuggable from CloudWatch without reading
@@ -1180,10 +1188,9 @@ const lambdaHandler = async (event: {
           const sameDevice = winningAttPub === att.publicKey;
           if (r.existing && sameDevice && r.existing.verdict && r.existing.verdict !== 'pending') {
             return jsonResp(200, {
-              verdict: r.existing.verdict,
-              reason: r.existing.reason ?? null,
-              annotations: r.existing.annotations ?? {},
-              nextDeviceTrust: null,
+              verdict: 'complete',
+              reason: null,
+              annotations: {},
               concurrent_loser: true,
             });
           }
@@ -1232,12 +1239,9 @@ const lambdaHandler = async (event: {
           const sameDevice = existing?.phoneAttestation?.publicKey === att.publicKey;
           if (existing && sameDevice && existing.verdict && existing.verdict !== 'pending') {
             return jsonResp(200, {
-              verdict: existing.verdict,
-              reason: existing.verdictReason ?? null,
-              annotations:
-                (existing as unknown as { annotations?: Record<string, unknown> }).annotations ??
-                {},
-              nextDeviceTrust: null,
+              verdict: 'complete',
+              reason: null,
+              annotations: {},
               concurrent_loser: true,
             });
           }
@@ -1250,22 +1254,25 @@ const lambdaHandler = async (event: {
           return jsonResp(409, { error: 'write_conflict' });
         }
       }
-      // WS push: when the phone arrived via the QR'd hash fragment it
-      // also carries the desktop's sealed connection envelope. Decrypt,
-      // validate it's bound to THIS session + the desktop role, then
-      // PostToConnection the verdict straight into the desktop's open
-      // socket. Replaces the desktop's /result polling on the happy
-      // path; fire-and-forget — push failure does not fail the response.
-      // Reuse the desktopEnv we already authenticated above (#8) — same sealed
-      // envelope, already verified session/role-bound, so no need to re-open.
-      await pushVerdictToDesktop({
-        desktopEnv,
-        sessionId: sessionId!,
-        verdict,
-        reason,
-        annotations,
-      });
-      return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust });
+      // The verdict is ready, but neither browser receives plaintext yet.
+      // Push a fixed-size AES-GCM envelope to the desktop and return a separate
+      // sealed continuation state to the phone. The authenticated phone-done
+      // WS message releases their shared session key. This removes pass/fail
+      // timing and response-shape oracles while preserving pre-DONE latency.
+      const phoneCompletion = await deliverSealedVerdict(
+        { ddb, tableName: TABLE },
+        {
+          desktopEnv,
+          sessionId: sessionId!,
+          verdict,
+          reason,
+          annotations,
+          nextDeviceTrust,
+          decidedAt: stored.receivedAt,
+          now: Math.floor(Date.now() / 1000),
+        }
+      );
+      return jsonResp(200, phoneCompletion);
     }
 
     case 'GET /api/session/{id}/result': {
@@ -1280,7 +1287,7 @@ const lambdaHandler = async (event: {
         return jsonResp(401, { error: 'result_unauthorized' });
       }
       const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(200, { verdict: 'failed', reason: 'expired_or_missing' });
+      if (!s) return jsonResp(410, { error: 'session_expired' });
       // 204 No Content while still pending — saves polling clients a few
       // bytes per tick and is semantically correct. Real verdicts return
       // 200 + JSON. Client checks status === 204 to decide whether to
@@ -1292,11 +1299,24 @@ const lambdaHandler = async (event: {
           body: '',
         };
       }
-      return jsonResp(200, {
-        verdict: s.verdict,
-        reason: s.verdictReason ?? null,
-        annotations: (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {},
-      });
+      const annotations =
+        (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {};
+      const decidedAt = s.phoneAttestation?.receivedAt ?? Math.floor(Date.now() / 1000);
+      return jsonResp(
+        200,
+        await buildSealedResult(
+          { ddb, tableName: TABLE },
+          {
+            sessionId: sessionId!,
+            verdict: s.verdict,
+            reason: s.verdictReason ?? null,
+            annotations,
+            nextDeviceTrust: null,
+            decidedAt,
+            now: Math.floor(Date.now() / 1000),
+          }
+        )
+      );
     }
 
     // ── Short pairing token: the sparse QR carries /p/<token>, phone redeems ─
@@ -1365,30 +1385,7 @@ const lambdaHandler = async (event: {
     // postMessages the token to the host page. Auth is the same bootstrap
     // wsToken as /result — only a session participant can mint.
     case 'GET /api/session/{id}/verdict-token': {
-      const vtToken =
-        event.queryStringParameters?.t ||
-        (event.headers?.authorization || event.headers?.Authorization || '').replace(
-          /^Bearer\s+/i,
-          ''
-        );
-      const vtClaims = vtToken ? await verifyBootstrapToken(vtToken) : null;
-      if (!vtClaims || vtClaims.sessionId !== sessionId) {
-        return jsonResp(401, { error: 'verdict_token_unauthorized' });
-      }
-      const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(404, { error: 'session_not_found' });
-      if (s.verdict === 'pending') return jsonResp(409, { error: 'verdict_pending' });
-      if (!s.challengeId) return jsonResp(409, { error: 'challenge_binding_missing' });
-      const secret = await getVerdictSecret();
-      if (!secret) return jsonResp(503, { error: 'verdict_signing_unconfigured' });
-      const token = signVerdict(secret, {
-        cpi: s.cpi ?? null,
-        challengeId: s.challengeId,
-        sessionId: sessionId!,
-        verdict: s.verdict,
-        reason: s.verdictReason ?? null,
-      });
-      return jsonResp(200, { token });
+      return mintVerdictTokenRequest(event, sessionId!);
     }
 
     // ── Server-to-server token verification (the host's backend calls this) ─

@@ -181,8 +181,11 @@ export function Pair() {
       ) {
         clearPasskeyHint();
       }
+      await r.finalizeAfterDone?.();
       setVerdict(r.verdict);
-      setPhase(r.verdict === 'paired' ? 'paired' : 'failed');
+      // The phone is presentation-neutral; the desktop enforces the released
+      // server verdict. Operational errors still use the error screens below.
+      setPhase('paired');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Server distinguishes "QR is already paired with a different

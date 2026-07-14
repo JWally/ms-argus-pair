@@ -86,6 +86,14 @@ The loader (`loader/loader.ts`) injects a cross-origin iframe at
 message is a **notification**; the HMAC-signed `token` verified via
 `POST /api/verify` is the proof. The loader carries no secrets.
 
+For the iframe widget, QR minting does not wait for integrity collection. Once
+`/session/start` returns, the merchant-realm and iframe scans run concurrently
+with WS setup and QR minting. The merchant scan signs the Pair session ID; both
+scans are verified and stored by the existing `desktop-attest` write. The phone
+does not receive `desktop-ready`, and no verdict can pass, until that write
+completes. A missing required merchant scan therefore fails closed without
+delaying initial QR display.
+
 ## How a pairing works
 
 ```
@@ -96,14 +104,17 @@ WS whoami (bootstrap token) ──────► sealed AES-GCM envelope back
 POST …/{id}/pair-token ───────────► 128-bit single-use token, TTL 300s
                                     render + seal poisoned PNG frame bundle
 display sealed QR animation ◄───── worker decrypts display bytes
+merchant + iframe scans ──────────► desktop-attest (single atomic desktop slot)
 scan QR  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
                                     POST /api/pair-token/redeem (GETDEL) ◄── redeem
                                     → /pair/{id}#{wsUrl,e,pt,n,pr} (hash never hits the server)
 ◄──────────── WS relay: phone-here / desktop-ready (sealed envelopes) ─────► WS whoami
-argus.run(desktop) ───────────────► desktop-attest                           argus.run(phone)
+desktop-ready only after both ────►                                           argus.run(phone)
                                                                              + proof-of-life
                                     verdict computed on ◄─────────────────── phone-attest
-◄── verdict pushed over WS (or /result poll fallback)
+◄── fixed-size encrypted verdict              neutral decision-complete ──►
+                                    phone-done ◄──────────────────────────── DONE
+◄── reveal key over WS (or gated /result fallback)
 ```
 
 Key mechanics:
@@ -134,6 +145,13 @@ Key mechanics:
 - **Desktop trusts only the server.** The verdict must arrive `from:'server'`
   (WS push or authenticated `/result` poll) — a phone-side forgery via the
   relay is ignored.
+- **Deferred verdict disclosure.** The verdict is calculated behind the drawing
+  challenge, but pass and fail travel as the same fixed-size AES-GCM envelope.
+  `/phone-attest` returns only neutral completion. The authenticated phone role
+  writes `phone-done`; only then does the WS relay send the session-specific
+  reveal key. `/result` and verdict-token minting enforce the same gate for
+  reconnects and hostile embed code. A 90-second cap preserves the existing
+  abandoned-phone recovery behavior.
 
 ## Mobile SSO continuity
 
@@ -189,6 +207,9 @@ Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection
 slots and SSO sessions (and is the session fallback).
 Secrets Manager holds the device-trust, verdict-signing, and WS-envelope keys.
+The verdict reveal key is derived per session from the WS root secret and is
+never stored; DynamoDB records only challenge/Done state for reconnect-safe
+release.
 
 ## Local development
 

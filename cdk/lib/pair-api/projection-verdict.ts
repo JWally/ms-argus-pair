@@ -23,6 +23,13 @@ export interface MerchantProjection {
   };
   tags?: string[];
   pat_attested?: boolean;
+  worker_scope_evidence?: {
+    all_scopes_consistent: boolean;
+    main_web_consensus_id: string | null;
+    shared_partition_candidate: boolean;
+    brave_detected: boolean;
+    device_tampering_without_worker: number;
+  } | null;
 }
 
 export interface ClassifiedScan {

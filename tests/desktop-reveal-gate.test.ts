@@ -2,17 +2,18 @@
  * Desktop verdict-reveal gate (startDesktopSession).
  *
  * When the phone announces it is showing the drawing challenge
- * (`phone-here {challenge:true}`), a server-pushed `paired` verdict must be
- * HELD — verification already happened — until the phone relays `phone-done`
- * (the user tapped DONE / dismissed the challenge). Failures and
- * non-challenge phones settle immediately, and the hold cap releases a
- * wedged gate. The WS layer and QR mint are mocked; the gate logic under
- * test is the real startDesktopSession closure.
+ * (`phone-here {challenge:true}`), every server verdict must be HELD —
+ * verification already happened — until the phone relays `phone-done` (the
+ * user tapped DONE / dismissed the challenge). Non-challenge phones settle
+ * immediately, and the hold cap releases a wedged gate. The WS layer and QR
+ * mint are mocked; the gate logic under test is the real startDesktopSession
+ * closure.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startDesktopSession } from '../src/lib/pair';
 import { connectAndWhoami } from '../src/lib/ws';
 import type { PeerMessage, WsConnection } from '../src/lib/ws';
+import { encodeVerdictRevealKey, sealFixedVerdictEnvelope } from '../src/lib/verdict-envelope';
 
 // vi.mock calls are hoisted above the imports by vitest.
 vi.mock('../src/lib/ws', () => ({
@@ -64,6 +65,7 @@ function settledState(p: Promise<unknown>): Promise<string> {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const revealKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 
 async function startSession() {
   const session = await startDesktopSession();
@@ -141,12 +143,75 @@ describe('desktop verdict-reveal gate', () => {
     await expect(session.result).resolves.toMatchObject({ verdict: 'paired' });
   });
 
-  it('reveals a failed verdict immediately even mid-challenge', async () => {
+  it('holds a failed verdict until phone-done when the phone is in the challenge', async () => {
     const session = await startSession();
     fake.emit({
       from: 'phone',
       fromEnvelope: 'ph-env',
       data: { kind: 'phone-here', challenge: true },
+    });
+    fake.emit({ from: 'server', data: { kind: 'verdict', verdict: 'failed', reason: 'nope' } });
+    expect(await settledState(session.result)).toBe('pending');
+
+    fake.emit({ from: 'phone', fromEnvelope: 'ph-env', data: { kind: 'phone-done' } });
+    await expect(session.result).resolves.toMatchObject({ verdict: 'failed' });
+  });
+
+  it('cannot open an early sealed failure until the server releases its key after Done', async () => {
+    const session = await startSession();
+    fake.emit({
+      from: 'phone',
+      fromEnvelope: 'ph-env',
+      data: { kind: 'phone-here', challenge: true },
+    });
+    const envelope = await sealFixedVerdictEnvelope(revealKey, 'sess-1', {
+      kind: 'desktop-verdict',
+      verdict: 'failed',
+      reason: 'nope',
+      annotations: {},
+    });
+    fake.emit({ from: 'server', data: { kind: 'verdict-sealed', envelope } });
+    expect(await settledState(session.result)).toBe('pending');
+
+    fake.emit({
+      from: 'server',
+      data: { kind: 'verdict-release', revealKey: encodeVerdictRevealKey(revealKey) },
+    });
+    expect(await settledState(session.result)).toBe('pending');
+
+    fake.emit({ from: 'phone', fromEnvelope: 'ph-env', data: { kind: 'phone-done' } });
+    await expect(session.result).resolves.toMatchObject({ verdict: 'failed' });
+  });
+
+  it('handles Done and release arriving before the sealed verdict', async () => {
+    const session = await startSession();
+    fake.emit({
+      from: 'phone',
+      fromEnvelope: 'ph-env',
+      data: { kind: 'phone-here', challenge: true },
+    });
+    fake.emit({ from: 'phone', fromEnvelope: 'ph-env', data: { kind: 'phone-done' } });
+    fake.emit({
+      from: 'server',
+      data: { kind: 'verdict-release', revealKey: encodeVerdictRevealKey(revealKey) },
+    });
+    const envelope = await sealFixedVerdictEnvelope(revealKey, 'sess-1', {
+      kind: 'desktop-verdict',
+      verdict: 'paired',
+      reason: null,
+      annotations: { clean: true },
+    });
+    fake.emit({ from: 'server', data: { kind: 'verdict-sealed', envelope } });
+
+    await expect(session.result).resolves.toMatchObject({ verdict: 'paired' });
+  });
+
+  it('reveals a failed verdict immediately when the phone did not announce a challenge', async () => {
+    const session = await startSession();
+    fake.emit({
+      from: 'phone',
+      fromEnvelope: 'ph-env',
+      data: { kind: 'phone-here', challenge: false },
     });
     fake.emit({ from: 'server', data: { kind: 'verdict', verdict: 'failed', reason: 'nope' } });
     await expect(session.result).resolves.toMatchObject({ verdict: 'failed' });

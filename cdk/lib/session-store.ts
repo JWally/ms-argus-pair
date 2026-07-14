@@ -5,8 +5,8 @@
  * native Redis commands (no Lua) by splitting the single session row
  * into per-field keys:
  *
- *   session:{id}:meta     {nonce, expiresAt}                       — 5min TTL
- *   session:{id}:desktop  {att: StoredAttestation}                 — 5min TTL
+ *   session:{id}:meta     {nonce, expiresAt, host requirement}     — 5min TTL
+ *   session:{id}:desktop  {StoredDesktopAttestation}               — 5min TTL
  *   session:{id}:phone    {att, verdict, reason, annotations}      — 5min TTL
  *   claim:{argusSid}      {sessionId, role}                        — 24h TTL
  *
@@ -70,6 +70,12 @@ export interface SessionMeta {
   proofRequired?: boolean;
   /** Cached device trust is insufficient; require a fresh passkey/OAuth ceremony. */
   freshProofRequired?: boolean;
+  /** Cross-origin embeds must attach a bound merchant-realm scan with desktop-attest. */
+  hostPreflightRequired?: boolean;
+  /** Exact merchant origin the required host scan must sign. */
+  hostOrigin?: string;
+  /** Legacy sessions stored host evidence in meta before async attachment shipped. */
+  hostAttestation?: SessionFieldBlob;
 }
 
 export interface PhoneBundle {
@@ -169,7 +175,7 @@ export async function recordPhoneAttestationValkey(
 export async function claimArgusValkey(
   argusSid: string,
   pairSessionId: string,
-  role: 'desktop' | 'phone'
+  role: 'host' | 'desktop' | 'phone'
 ): Promise<{ ok: true } | { ok: false; reason: 'already_claimed' }> {
   const valkey = getValkey();
   const r = await valkey.set(
