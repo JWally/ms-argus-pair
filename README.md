@@ -152,6 +152,12 @@ Key mechanics:
   reveal key. `/result` and verdict-token minting enforce the same gate for
   reconnects and hostile embed code. A 90-second cap preserves the existing
   abandoned-phone recovery behavior.
+- **Batched phone diagnostics.** Phone lifecycle timings stay in memory and are
+  sent as one bounded, best-effort `/api/phone-perf` batch on completion,
+  terminal bootstrap failure, or page exit. A same-origin `sessionStorage`
+  handoff carries the initial short-token timings across the `/p/*` to
+  `/pair/*` redirect. Do not turn individual lifecycle events back into API
+  calls; one pairing should produce at most one diagnostics request.
 
 ## Mobile SSO continuity
 

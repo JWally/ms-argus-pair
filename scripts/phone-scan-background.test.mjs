@@ -39,9 +39,9 @@ assert(
   'all proof paths should share the eager scan promise'
 );
 assert(
-  phoneMain.includes("onScanStart: () => sendPhonePerf('scan_start'") &&
-    phoneMain.includes("sendPhonePerf('scan_done'"),
-  'phone timing must report the real background scan window'
+  phoneMain.includes("onScanStart: () => recordPhonePerf('scan_start'") &&
+    phoneMain.includes("recordPhonePerf('scan_done'"),
+  'phone timing must record the real background scan window in the batched timeline'
 );
 assert(
   phoneMain.includes("void pair('integrity', { keepDialpad: true })"),
