@@ -87,12 +87,11 @@ message is a **notification**; the HMAC-signed `token` verified via
 `POST /api/verify` is the proof. The loader carries no secrets.
 
 For the iframe widget, QR minting does not wait for integrity collection. Once
-`/session/start` returns, the merchant-realm and iframe scans run concurrently
-with WS setup and QR minting. The merchant scan signs the Pair session ID; both
-scans are verified and stored by the existing `desktop-attest` write. The phone
-does not receive `desktop-ready`, and no verdict can pass, until that write
-completes. A missing required merchant scan therefore fails closed without
-delaying initial QR display.
+`/session/start` returns, the isolated iframe scan runs concurrently with WS
+setup and QR minting. The phone does not receive `desktop-ready`, and no verdict
+can pass, until that scan is verified and stored by `desktop-attest`. The
+merchant-realm preflight protocol remains available server-side for future
+work, but the shipped loader does not launch a second browser scan.
 
 ## How a pairing works
 
@@ -104,12 +103,12 @@ WS whoami (bootstrap token) ──────► sealed AES-GCM envelope back
 POST …/{id}/pair-token ───────────► 128-bit single-use token, TTL 300s
                                     render + seal poisoned PNG frame bundle
 display sealed QR animation ◄───── worker decrypts display bytes
-merchant + iframe scans ──────────► desktop-attest (single atomic desktop slot)
+isolated desktop scan ────────────► desktop-attest (single atomic desktop slot)
 scan QR  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ camera ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─►  scan
                                     POST /api/pair-token/redeem (GETDEL) ◄── redeem
                                     → /pair/{id}#{wsUrl,e,pt,n,pr} (hash never hits the server)
 ◄──────────── WS relay: phone-here / desktop-ready (sealed envelopes) ─────► WS whoami
-desktop-ready only after both ────►                                           argus.run(phone)
+desktop-ready after scan ─────────►                                           argus.run(phone)
                                                                              + proof-of-life
                                     verdict computed on ◄─────────────────── phone-attest
 ◄── fixed-size encrypted verdict              neutral decision-complete ──►
