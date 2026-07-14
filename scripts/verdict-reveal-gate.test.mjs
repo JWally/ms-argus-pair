@@ -2,15 +2,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// The desktop must not flip to Verified while the phone user is still mid-
+// The desktop must not reveal pass or fail while the phone user is still mid-
 // drawing-challenge. Verification runs in the background as before; only the
-// REVEAL is gated: phone-here announces challenge:true, the desktop holds a
-// `paired` verdict, and the phone's `phone-done` message releases it. These
-// two sides live in different files and silently break apart — keep the
-// message kinds and the release paths coupled.
+// REVEAL is gated: phone-here announces challenge:true, the desktop holds the
+// verdict, and the phone's `phone-done` message releases it. These two sides
+// live in different files and silently break apart — keep the message kinds
+// and the release paths coupled.
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
+const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
+const verdictPush = fs.readFileSync(path.join(root, 'cdk/lib/pair-api/verdict-push.ts'), 'utf8');
+const verdictDisclosure = fs.readFileSync(
+  path.join(root, 'cdk/lib/pair-api/verdict-disclosure.ts'),
+  'utf8'
+);
+const wsHandler = fs.readFileSync(path.join(root, 'cdk/lib/ws-handler.ts'), 'utf8');
 
 function assert(condition, message) {
   if (!condition) {
@@ -30,8 +37,9 @@ assert(
 );
 
 assert(
-  pairLib.includes("v.verdict === 'paired' && phoneInChallenge && !phoneDone"),
-  'desktop should hold only paired verdicts, and only while the challenge is unfinished'
+  pairLib.includes('if (phoneInChallenge && !phoneDone)') &&
+    !pairLib.includes("v.verdict === 'paired' && phoneInChallenge"),
+  'desktop should hold every verdict while the challenge is unfinished'
 );
 
 assert(
@@ -55,6 +63,30 @@ const signalCallCount = phoneEntry.split('signalChallengeComplete()').length - 1
 assert(
   signalCallCount >= 3,
   'phone entry should signal completion on DONE tap, challenge dismissal, and pagehide'
+);
+
+assert(
+  verdictPush.includes("kind: 'verdict-sealed'") &&
+    verdictPush.includes("kind: 'verdict-release'") &&
+    !verdictPush.includes('verdict: args.verdict'),
+  'the server push must deliver fixed ciphertext first and the reveal key separately'
+);
+
+assert(
+  pairApi.includes("verdict: 'complete'") &&
+    verdictDisclosure.includes('phoneState: sealed.phoneEnvelope') &&
+    verdictDisclosure.includes("status: 'sealed'") &&
+    verdictDisclosure.includes('shouldReleaseVerdict(sealed.revealState') &&
+    !pairApi.includes('return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust })'),
+  'phone-attest, result, and verdict-token endpoints must not expose plaintext before release'
+);
+
+assert(
+  wsHandler.includes("me.role !== 'phone'") &&
+    wsHandler.includes("dataKind !== 'phone-done'") &&
+    wsHandler.includes('await markPhoneDone') &&
+    wsHandler.includes("kind: 'verdict-release'"),
+  'only the authenticated phone-done relay should trigger the live reveal-key message'
 );
 
 if (process.exitCode) process.exit(process.exitCode);

@@ -37,6 +37,8 @@ export interface EnvelopeDecoded {
   iat: number;
   exp: number;
   keyId: string;
+  /** Exact Argus integrity row created by the run that signed this envelope. */
+  scanSessionId?: string;
 }
 
 export interface VerifyResult {
@@ -212,11 +214,19 @@ function invalidAttestationResult(reason: string | undefined) {
 
 export function verifyPairAttestationPayload(
   attestation: AttestationInput,
-  expected: { role: PairAttestationRole; sessionId: string; nonce: string }
+  expected: {
+    role: PairAttestationRole;
+    sessionId: string;
+    nonce: string;
+    argusSessionId: string;
+  }
 ): PairAttestationPayloadResult {
   const verified = verifyAttestation(attestation);
   if (!verified.ok || !verified.decoded) {
     return invalidAttestationResult(verified.reason);
+  }
+  if (verified.decoded.scanSessionId !== expected.argusSessionId) {
+    return { ok: false, status: 400, body: { error: 'attestation_scan_mismatch' } };
   }
   const payload = verified.decoded.payload as {
     sessionId?: string;
@@ -244,6 +254,9 @@ export function validateSsoAttestation(
   const verified = verifyAttestation(pairBody.attestation);
   if (!verified.ok || !verified.decoded) {
     return invalidAttestationResult(verified.reason);
+  }
+  if (verified.decoded.scanSessionId !== pairBody.argusSessionId) {
+    return { ok: false, status: 400, body: { error: 'attestation_scan_mismatch' } };
   }
   const payload = verified.decoded.payload as {
     role?: string;

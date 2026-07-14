@@ -10,14 +10,44 @@
  * (the origin is baked at build time — see __EMBED_ORIGIN__ — because this
  * loader is served from a separate CDN, so we can't infer the app origin from
  * the script URL). All sensitive work (session, ECDH, attestation, QR pixels)
- * runs in the Argus origin, isolated from the host page. The loader only relays
- * the result message up to the host's callback. The host MUST verify the
+ * runs in the Argus origin, isolated from the host page. Once the iframe has a
+ * Pair session ID, the loader collects a signed merchant-realm reading while
+ * the iframe independently mints the QR and runs its scan. Both readings are
+ * attached atomically before `desktop-ready`; merchant evidence never replaces
+ * the isolated scan.
+ * The host MUST verify the
  * returned token server-to-server (POST /api/verify) — the browser message is a
  * notification, not proof.
  */
 
 // Replaced at build time by esbuild `define`.
 declare const __EMBED_ORIGIN__: string;
+declare const __ARGUS_BOOTSTRAP_URL__: string;
+declare const __ARGUS_BOOTSTRAP_SRI__: string;
+
+type ArgusAttestation = {
+  envelope: string;
+  signature: string;
+  publicKey: string;
+  keyId: string;
+};
+
+type HostPreflightScan = {
+  argusSessionId: string;
+  attestation: ArgusAttestation;
+};
+
+type ArgusGlobal = {
+  run(opts: {
+    cpi: string;
+    timeoutMs: number;
+    attest: { purpose: string; ttlSeconds: number; payload: Record<string, unknown> };
+  }): Promise<{
+    argusSessionId: string;
+    attestation?: ArgusAttestation | null;
+    attestError?: string | null;
+  }>;
+};
 
 type CaptchaResult = {
   sessionId: string;
@@ -58,6 +88,71 @@ interface CaptchaHandle {
   // Matches Tailwind's max-w-md: roomy enough for the widget while still
   // yielding to narrower merchant containers and mobile viewports.
   const DEFAULT_WIDGET_MAX_WIDTH = '28rem';
+  let hostArgusPromise: Promise<ArgusGlobal> | null = null;
+
+  const integrityCpi = (cpi: string) => cpi.replace(/\.(?:fastpass|stepup|forceauth)$/, '');
+
+  async function loadHostArgus(): Promise<ArgusGlobal> {
+    const hostWindow = window as Window & {
+      argus?: ArgusGlobal;
+      argusBootstrapReady?: Promise<void>;
+    };
+    if (!hostWindow.argus && !hostWindow.argusBootstrapReady) {
+      const script = document.createElement('script');
+      script.src = __ARGUS_BOOTSTRAP_URL__;
+      script.integrity = __ARGUS_BOOTSTRAP_SRI__;
+      script.crossOrigin = 'anonymous';
+      const loaded = new Promise<void>((resolve, reject) => {
+        script.addEventListener('load', () => resolve(), { once: true });
+        script.addEventListener('error', () => reject(new Error('host integrity SDK blocked')), {
+          once: true,
+        });
+      });
+      document.head.appendChild(script);
+      await loaded;
+    }
+    await hostWindow.argusBootstrapReady;
+    if (!hostWindow.argus) throw new Error('host integrity SDK unavailable');
+    return hostWindow.argus;
+  }
+
+  function getHostArgus(): Promise<ArgusGlobal> {
+    if (!hostArgusPromise) {
+      hostArgusPromise = loadHostArgus().catch((error: unknown) => {
+        hostArgusPromise = null;
+        throw error;
+      });
+    }
+    return hostArgusPromise;
+  }
+
+  async function runHostPreflight(
+    cpi: string,
+    challengeId: string,
+    pairSessionId: string
+  ): Promise<HostPreflightScan> {
+    const argus = await getHostArgus();
+    const run = await argus.run({
+      cpi: integrityCpi(cpi),
+      timeoutMs: 15_000,
+      attest: {
+        purpose: 'argus-pair-v1',
+        ttlSeconds: 120,
+        payload: {
+          role: 'host',
+          pairSessionId,
+          challengeId,
+          cpi,
+          origin: hostOrigin,
+          nonce: crypto.randomUUID(),
+        },
+      },
+    });
+    if (!run.attestation) {
+      throw new Error(`host attestation failed: ${run.attestError ?? 'no attestation'}`);
+    }
+    return { argusSessionId: run.argusSessionId, attestation: run.attestation };
+  }
 
   const resolveCb = (name: string, optsCb?: RenderOpts['onResult']) => {
     if (typeof optsCb === 'function') return optsCb;
@@ -74,6 +169,7 @@ interface CaptchaHandle {
     const challengeId = opts.challengeId || defaultChallengeId;
     const origin = opts.embedOrigin || BAKED_ORIGIN;
     const onResult = resolveCb(defaultCbName, opts.onResult);
+    let hostScanPromise: Promise<HostPreflightScan | null> | null = null;
 
     const iframe = document.createElement('iframe');
     iframe.src =
@@ -83,7 +179,8 @@ interface CaptchaHandle {
       '&challengeId=' +
       encodeURIComponent(challengeId) +
       '&origin=' +
-      encodeURIComponent(hostOrigin);
+      encodeURIComponent(hostOrigin) +
+      (cpi && challengeId ? '&hostPreflight=1' : '');
     iframe.title = 'Argus device pairing';
     iframe.setAttribute('referrerpolicy', 'origin');
     // color-scheme:normal keeps the iframe transparent — a light-host/dark-embed
@@ -109,6 +206,35 @@ interface CaptchaHandle {
       if (e.source !== iframe.contentWindow) return;
       const d = e.data as (Record<string, unknown> & { source?: string; event?: string }) | null;
       if (!d || d.source !== 'argus-captcha') return;
+      if (d.event === 'host-scan-request') {
+        const pairSessionId =
+          typeof d.pairSessionId === 'string' &&
+          /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(d.pairSessionId)
+            ? d.pairSessionId
+            : null;
+        if (!hostScanPromise && cpi && challengeId && pairSessionId) {
+          // The Pair session now exists, so the merchant scan can sign its ID
+          // while running concurrently with QR minting and the iframe scan.
+          hostScanPromise = runHostPreflight(cpi, challengeId, pairSessionId).catch(
+            (error: unknown) => {
+              opts.onEvent?.({
+                source: 'argus-captcha-host',
+                event: 'host-scan-unavailable',
+                message: error instanceof Error ? error.message : String(error),
+              });
+              return null;
+            }
+          );
+        }
+        const pendingHostScan = hostScanPromise ?? Promise.resolve(null);
+        void pendingHostScan.then((hostScan) => {
+          iframe.contentWindow?.postMessage(
+            { source: 'argus-captcha-host', event: 'host-scan', hostScan },
+            origin
+          );
+        });
+        return;
+      }
       if (d.event === 'size' && typeof d.height === 'number') {
         // Follow the widget's reported height (clamped — a compromised embed
         // shouldn't be able to blow the iframe up over the host page).

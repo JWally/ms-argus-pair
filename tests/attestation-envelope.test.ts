@@ -9,7 +9,10 @@ import {
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-function signedAttestation(payload: Record<string, unknown>): AttestationInput {
+function signedAttestation(
+  payload: Record<string, unknown>,
+  scanSessionId = 'argus-1'
+): AttestationInput {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const publicKeyDer = publicKey.export({ format: 'der', type: 'spki' });
   const keyId = createHash('sha256').update(publicKeyDer).digest('hex').slice(0, 16);
@@ -18,6 +21,7 @@ function signedAttestation(payload: Record<string, unknown>): AttestationInput {
       v: 1,
       purpose: 'argus-pair-v1',
       payload,
+      scanSessionId,
       iat: nowSeconds() - 1,
       exp: nowSeconds() + 60,
       keyId,
@@ -48,7 +52,7 @@ describe('verifyPairAttestationPayload', () => {
   it('accepts a valid signed pair payload', () => {
     const result = verifyPairAttestationPayload(
       signedAttestation({ sessionId: 'session-1', nonce: 'nonce-1', role: 'phone' }),
-      { sessionId: 'session-1', nonce: 'nonce-1', role: 'phone' }
+      { sessionId: 'session-1', nonce: 'nonce-1', role: 'phone', argusSessionId: 'argus-1' }
     );
 
     expect(result.ok).toBe(true);
@@ -66,6 +70,7 @@ describe('verifyPairAttestationPayload', () => {
         sessionId: 'other-session',
         nonce: 'nonce-1',
         role: 'phone',
+        argusSessionId: 'argus-1',
       })
     ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_session_mismatch' } });
     expect(
@@ -73,6 +78,7 @@ describe('verifyPairAttestationPayload', () => {
         sessionId: 'session-1',
         nonce: 'other-nonce',
         role: 'phone',
+        argusSessionId: 'argus-1',
       })
     ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_nonce_mismatch' } });
     expect(
@@ -80,8 +86,29 @@ describe('verifyPairAttestationPayload', () => {
         sessionId: 'session-1',
         nonce: 'nonce-1',
         role: 'desktop',
+        argusSessionId: 'argus-1',
       })
     ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_role_mismatch' } });
+  });
+
+  it('rejects substitution of a different Argus scan id', () => {
+    const attestation = signedAttestation(
+      { sessionId: 'session-1', nonce: 'nonce-1', role: 'desktop' },
+      'argus-scan-signed'
+    );
+
+    expect(
+      verifyPairAttestationPayload(attestation, {
+        sessionId: 'session-1',
+        nonce: 'nonce-1',
+        role: 'desktop',
+        argusSessionId: 'argus-scan-substituted',
+      })
+    ).toMatchObject({
+      ok: false,
+      status: 400,
+      body: { error: 'attestation_scan_mismatch' },
+    });
   });
 
   it('validates SSO attestation payload bindings', () => {
@@ -120,5 +147,30 @@ describe('verifyPairAttestationPayload', () => {
         cpi: 'argus_cpi_live_Example12345.stepup',
       })
     ).toMatchObject({ ok: false, status: 400, body: { error: 'payload_cpi_mismatch' } });
+  });
+
+  it('rejects SSO scan substitution', () => {
+    const attestation = signedAttestation(
+      {
+        ssoSessionId: 'sso-1',
+        role: 'merchant-start',
+        cpi: 'argus_cpi_live_Example12345.forceauth',
+      },
+      'argus-scan-signed'
+    );
+
+    expect(
+      validateSsoAttestation(
+        { argusSessionId: 'argus-scan-substituted', attestation },
+        {
+          role: 'merchant-start',
+          cpi: 'argus_cpi_live_Example12345.forceauth',
+        }
+      )
+    ).toMatchObject({
+      ok: false,
+      status: 400,
+      body: { error: 'attestation_scan_mismatch' },
+    });
   });
 });

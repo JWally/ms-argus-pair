@@ -1,11 +1,11 @@
 import { postToPeer, type Envelope } from '../ws-handler';
+import type { SealedVerdictEnvelope } from '../../../src/lib/verdict-envelope';
 
 export async function pushVerdictToDesktop(args: {
   desktopEnv: Envelope;
   sessionId: string;
-  verdict: string;
-  reason: string;
-  annotations: Record<string, unknown>;
+  envelope: SealedVerdictEnvelope;
+  revealKey?: string;
 }): Promise<void> {
   const mgmtEndpoint = process.env.WS_MGMT_ENDPOINT;
   if (!mgmtEndpoint) {
@@ -13,18 +13,14 @@ export async function pushVerdictToDesktop(args: {
     return;
   }
 
-  console.log(
-    `[pair] verdict-push: posting to cid=${args.desktopEnv.connectionId} verdict=${args.verdict}`
-  );
+  console.log(`[pair] verdict-push: posting sealed envelope cid=${args.desktopEnv.connectionId}`);
   const push = await postToPeer(mgmtEndpoint, args.desktopEnv.connectionId, {
     action: 'message',
     from: 'server',
     sessionId: args.sessionId,
     data: {
-      kind: 'verdict',
-      verdict: args.verdict,
-      reason: args.reason,
-      annotations: args.annotations,
+      kind: 'verdict-sealed',
+      envelope: args.envelope,
     },
   });
 
@@ -33,4 +29,12 @@ export async function pushVerdictToDesktop(args: {
   } else {
     console.warn(`[pair] verdict-push failed: ${push.reason}`);
   }
+  if (!args.revealKey) return;
+  const release = await postToPeer(mgmtEndpoint, args.desktopEnv.connectionId, {
+    action: 'message',
+    from: 'server',
+    sessionId: args.sessionId,
+    data: { kind: 'verdict-release', revealKey: args.revealKey },
+  });
+  if (!release.ok) console.warn(`[pair] verdict-release push failed: ${release.reason}`);
 }

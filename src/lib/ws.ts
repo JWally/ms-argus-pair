@@ -16,11 +16,11 @@
  * message in a session establishes the back-channel both directions.
  */
 
-interface PeerMessage {
+export interface PeerMessage {
   action: 'message';
-  from: 'desktop' | 'phone';
+  from: 'desktop' | 'phone' | 'server';
   /** The sender's sealed envelope — recipient stores it to reply later. */
-  fromEnvelope: string;
+  fromEnvelope?: string;
   sessionId: string;
   /** Arbitrary application payload; sender chooses shape. */
   data: unknown;

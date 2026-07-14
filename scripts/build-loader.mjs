@@ -26,6 +26,12 @@ const loaderDir = path.join(root, 'loader');
 const distDir = path.join(loaderDir, 'dist');
 
 const EMBED_ORIGIN = process.env.EMBED_ORIGIN || 'https://captcha-dev-jw.argus.pw';
+const appHtml = readFileSync(path.join(root, 'index.html'), 'utf8');
+const bootstrapPin = appHtml.match(
+  /src="(https:\/\/static-integrity-dev-jw\.argus\.pw\/argus-bootstrap\.v1\.iife\.js)"[\s\S]*?integrity="([^"]+)"/
+);
+if (!bootstrapPin) throw new Error('index.html is missing the pinned Argus bootstrap URL/SRI');
+const [, ARGUS_BOOTSTRAP_URL, ARGUS_BOOTSTRAP_SRI] = bootstrapPin;
 
 mkdirSync(distDir, { recursive: true });
 
@@ -36,7 +42,11 @@ await esbuild.build({
   minify: true,
   target: ['es2019'],
   outfile: path.join(distDir, 'captcha.js'),
-  define: { __EMBED_ORIGIN__: JSON.stringify(EMBED_ORIGIN) },
+  define: {
+    __EMBED_ORIGIN__: JSON.stringify(EMBED_ORIGIN),
+    __ARGUS_BOOTSTRAP_URL__: JSON.stringify(ARGUS_BOOTSTRAP_URL),
+    __ARGUS_BOOTSTRAP_SRI__: JSON.stringify(ARGUS_BOOTSTRAP_SRI),
+  },
   legalComments: 'none',
 });
 
