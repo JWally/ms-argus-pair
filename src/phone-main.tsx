@@ -1,6 +1,7 @@
 import './index.css';
 import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
 import { startBioDotPlate } from './lib/bio-dot-plate';
+import { createPhonePerfReporter, type PhonePerfBatch } from './lib/phone-perf';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
@@ -45,13 +46,17 @@ const DRAW_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.split('');
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
 const root = rootElement;
-const phonePerfStartedAt = window.performance.now();
 let firstRenderReported = false;
 let bioDrawStarted = false;
 let challengeCompleteSignaled = false;
 let stopBioDotPlate: (() => void) | undefined;
 
 const sessionId = sessionIdFromPath();
+const phonePerf = createPhonePerfReporter({
+  currentSessionId: sessionId,
+  send: postPhonePerfBatch,
+  storage: getPhonePerfStorage(),
+});
 const initialNonce = nonceFromPairHash();
 const state: Runtime = {
   info: null,
@@ -73,7 +78,7 @@ const state: Runtime = {
 // blob, then hand off to the normal /pair flow (below) untouched.
 const pairToken = window.location.pathname.match(/^\/p\/([A-Za-z0-9_-]+)/)?.[1];
 if (pairToken) {
-  sendPhonePerf('token_redeem_start', { entry: 'pair_token' });
+  recordPhonePerf('token_redeem_start', { entry: 'pair_token' });
   void redeemPairTokenAndGo(pairToken);
 } else {
   if (!sessionId) state.phase = 'error';
@@ -84,6 +89,7 @@ if (pairToken) {
 }
 
 window.addEventListener('pagehide', () => {
+  flushPhonePerf('pagehide');
   // Best-effort: a phone closed mid-challenge shouldn't leave the desktop
   // holding a finished verdict until the hold cap expires.
   signalChallengeComplete();
@@ -136,7 +142,8 @@ async function redeemPairTokenAndGo(token: string): Promise<void> {
       proofRequired: boolean;
       freshProofRequired: boolean;
     };
-    sendPhonePerf('token_redeem_done', { entry: 'pair_token', sessionId: b.sessionId });
+    recordPhonePerf('token_redeem_done', { entry: 'pair_token', sessionId: b.sessionId });
+    phonePerf.handoff(b.sessionId);
     const hash = new URLSearchParams({
       wsUrl: b.wsUrl,
       e: b.e,
@@ -149,7 +156,8 @@ async function redeemPairTokenAndGo(token: string): Promise<void> {
       `/pair/${encodeURIComponent(b.sessionId)}${window.location.search}#${hash}`
     );
   } catch {
-    sendPhonePerf('token_redeem_error', { entry: 'pair_token' });
+    recordPhonePerf('token_redeem_error', { entry: 'pair_token' });
+    flushPhonePerf('token_redeem_error');
     state.phase = 'error';
     render();
   }
@@ -184,7 +192,7 @@ function setBackgroundState(patch: Partial<Runtime>): void {
 
 async function bootstrap(): Promise<void> {
   if (!sessionId) return;
-  sendPhonePerf('bootstrap_start');
+  recordPhonePerf('bootstrap_start');
   try {
     const [pairMod, trustMod] = await Promise.all([
       import('./lib/pair'),
@@ -192,12 +200,12 @@ async function bootstrap(): Promise<void> {
     ]);
     if (state.ctl.signal.aborted) return;
     state.pairMod = pairMod;
-    sendPhonePerf('pair_import_done');
+    recordPhonePerf('pair_import_done');
 
     let trustSettled = false;
     const trustFallback = window.setTimeout(() => {
       if (trustSettled || state.ctl.signal.aborted) return;
-      sendPhonePerf('trust_check_timeout');
+      recordPhonePerf('trust_check_timeout');
       setBackgroundState({ trustChecked: true });
       maybeStartFastPass();
     }, 1500);
@@ -209,21 +217,21 @@ async function bootstrap(): Promise<void> {
         hasTrust: Boolean(trustToken),
         trustChecked: true,
       });
-      sendPhonePerf('trust_check_done', { hasTrust: Boolean(trustToken) });
+      recordPhonePerf('trust_check_done', { hasTrust: Boolean(trustToken) });
       maybeStartFastPass();
     });
 
     const info = await pairMod.awaitDesktopReady(sessionId, state.ctl.signal, {
       challenge: state.startedInChallenge,
-      onScanStart: () => sendPhonePerf('scan_start', { hasTrust: state.hasTrust }),
+      onScanStart: () => recordPhonePerf('scan_start', { hasTrust: state.hasTrust }),
       onScanDone: (result) =>
-        sendPhonePerf('scan_done', {
+        recordPhonePerf('scan_done', {
           hasTrust: state.hasTrust,
           attested: Boolean(result.attestation),
           durationMs: Math.round(result.durationMs),
         }),
       onScanError: (error: unknown) =>
-        sendPhonePerf('scan_error', {
+        recordPhonePerf('scan_error', {
           hasTrust: state.hasTrust,
           error: error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
         }),
@@ -232,7 +240,7 @@ async function bootstrap(): Promise<void> {
     state.info = info;
     state.nonce = info.nonce;
     state.desktopReady = true;
-    sendPhonePerf('desktop_ready', {
+    recordPhonePerf('desktop_ready', {
       hasTrust: state.hasTrust,
       startedInChallenge: state.startedInChallenge,
     });
@@ -244,7 +252,8 @@ async function bootstrap(): Promise<void> {
   } catch (e) {
     if (state.ctl.signal.aborted) return;
     const msg = e instanceof Error ? e.message : String(e);
-    sendPhonePerf('bootstrap_error', { error: msg.slice(0, 80) });
+    recordPhonePerf('bootstrap_error', { error: msg.slice(0, 80) });
+    flushPhonePerf('bootstrap_error');
     if (msg.includes("didn't finish scanning") || msg.includes('session expired')) {
       setState({ phase: 'timeout' });
     } else {
@@ -270,7 +279,7 @@ function maybeStartFastPass(): void {
     return;
   }
   state.fastPassAttempted = true;
-  sendPhonePerf('fast_pass_attempt');
+  recordPhonePerf('fast_pass_attempt');
   void pair('passkey', { keepDialpad: true, trustOnly: true });
 }
 
@@ -324,10 +333,8 @@ async function finalizePhoneStateAndClose(): Promise<void> {
         state.finalizeAfterDone(),
         new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 1_000)),
       ]);
-    } catch (error) {
-      sendPhonePerf('phone_state_release_error', {
-        error: error instanceof Error ? error.message.slice(0, 80) : String(error).slice(0, 80),
-      });
+    } catch {
+      /* best-effort release */
     }
   }
   try {
@@ -342,7 +349,7 @@ async function pair(
   opts: { keepDialpad?: boolean; trustOnly?: boolean } = {}
 ): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
-  sendPhonePerf('pair_start', { proofMode, trustOnly: opts.trustOnly === true });
+  recordPhonePerf('pair_start', { proofMode, trustOnly: opts.trustOnly === true });
   state.inflight = true;
   if (opts.keepDialpad) {
     state.status = 'starting';
@@ -385,7 +392,11 @@ async function pair(
       ...options,
       trustOnly: opts.trustOnly,
     });
-    sendPhonePerf('attest_done', { verdict: result.verdict, trustOnly: opts.trustOnly === true });
+    recordPhonePerf('attest_done', {
+      verdict: result.verdict,
+      trustOnly: opts.trustOnly === true,
+    });
+    flushPhonePerf('attest_done');
     state.finalizeAfterDone = result.finalizeAfterDone;
     if (
       proofMode !== 'integrity' &&
@@ -414,7 +425,10 @@ async function pair(
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    sendPhonePerf('pair_error', { trustOnly: opts.trustOnly === true, error: msg.slice(0, 80) });
+    recordPhonePerf('pair_error', {
+      trustOnly: opts.trustOnly === true,
+      error: msg.slice(0, 80),
+    });
     if (opts.keepDialpad) {
       state.hasTrust = false;
       setState({
@@ -472,22 +486,32 @@ function render(): void {
 function reportFirstRender(): void {
   if (firstRenderReported) return;
   firstRenderReported = true;
-  queueMicrotask(() => sendPhonePerf('first_render', { initialPhase: state.phase }));
+  queueMicrotask(() => recordPhonePerf('first_render', { initialPhase: state.phase }));
 }
 
-function sendPhonePerf(event: string, extra: Record<string, unknown> = {}): void {
+function phonePerfFields(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    sessionId,
+    pathKind: pairToken ? 'pair_token' : sessionId ? 'pair' : 'unknown',
+    phase: state.phase,
+    hasTrust: state.hasTrust,
+    trustChecked: state.trustChecked,
+    desktopReady: state.desktopReady,
+    ...extra,
+  };
+}
+
+function recordPhonePerf(event: string, extra: Record<string, unknown> = {}): void {
+  phonePerf.record(event, phonePerfFields(extra));
+}
+
+function flushPhonePerf(reason: string): void {
+  phonePerf.flush(reason, phonePerfFields());
+}
+
+function postPhonePerfBatch(batch: PhonePerfBatch): void {
   try {
-    const payload = JSON.stringify({
-      event,
-      sessionId,
-      elapsedMs: Math.round(window.performance.now() - phonePerfStartedAt),
-      pathKind: pairToken ? 'pair_token' : sessionId ? 'pair' : 'unknown',
-      phase: state.phase,
-      hasTrust: state.hasTrust,
-      trustChecked: state.trustChecked,
-      desktopReady: state.desktopReady,
-      ...extra,
-    });
+    const payload = JSON.stringify(batch);
     if (navigator.sendBeacon?.('/api/phone-perf', payload)) return;
     void fetch('/api/phone-perf', {
       method: 'POST',
@@ -499,6 +523,14 @@ function sendPhonePerf(event: string, extra: Record<string, unknown> = {}): void
     });
   } catch {
     /* best-effort telemetry */
+  }
+}
+
+function getPhonePerfStorage(): Storage | undefined {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return undefined;
   }
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { startDesktopSession, type DesktopSession, type HostPreflightScan } from '../lib/pair';
+import { startDesktopSession, type DesktopSession } from '../lib/pair';
 import './embed.css';
 
 /**
@@ -21,7 +21,6 @@ import './embed.css';
  */
 
 type UpMsg =
-  | { event: 'host-scan-request'; pairSessionId: string }
   | { event: 'ready'; sessionId: string }
   | { event: 'connected' }
   | { event: 'size'; height: number }
@@ -92,7 +91,6 @@ function useEmbedConfig(): {
   hostOrigin: string;
   cpi: string | undefined;
   challengeId: string | undefined;
-  hostPreflight: boolean;
 } {
   const params = new URLSearchParams(window.location.search);
   const hostOrigin = params.get('origin') || '*';
@@ -103,46 +101,11 @@ function useEmbedConfig(): {
     hostOrigin,
     cpi: CPI_FORMAT.test(rawCpi) ? rawCpi : undefined,
     challengeId: CHALLENGE_FORMAT.test(rawChallenge) ? rawChallenge : undefined,
-    hostPreflight: params.get('hostPreflight') === '1',
   };
 }
 
-function requestHostPreflight(
-  hostOrigin: string,
-  pairSessionId: string
-): Promise<HostPreflightScan | null> {
-  if (window.parent === window || hostOrigin === '*') return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const timeout = window.setTimeout(() => finish(null), 17_000);
-    const finish = (scan: HostPreflightScan | null) => {
-      window.clearTimeout(timeout);
-      window.removeEventListener('message', onMessage);
-      resolve(scan);
-    };
-    const onMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent || event.origin !== hostOrigin) return;
-      const data = event.data as {
-        source?: string;
-        event?: string;
-        hostScan?: HostPreflightScan | null;
-      } | null;
-      if (data?.source !== 'argus-captcha-host' || data.event !== 'host-scan') return;
-      finish(data.hostScan ?? null);
-    };
-    window.addEventListener('message', onMessage);
-    window.parent.postMessage(
-      {
-        source: 'argus-captcha',
-        event: 'host-scan-request',
-        pairSessionId,
-      } satisfies UpMsg & { source: string },
-      hostOrigin
-    );
-  });
-}
-
 export function Embed() {
-  const { hostOrigin, cpi, challengeId, hostPreflight } = useEmbedConfig();
+  const { hostOrigin, cpi, challengeId } = useEmbedConfig();
   const [qrReady, setQrReady] = useState(false);
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -210,17 +173,6 @@ export function Embed() {
           {
             cpi,
             challengeId,
-            hostPreflightRequired: hostPreflight,
-            hostOrigin,
-            ...(hostPreflight
-              ? {
-                  requestHostPreflight: ({ pairSessionId }) =>
-                    requestHostPreflight(hostOrigin, pairSessionId).then((hostScan) => {
-                      if (!hostScan) throw new Error('host preflight unavailable');
-                      return hostScan;
-                    }),
-                }
-              : {}),
           }
         );
         if (cancelled) {
@@ -277,7 +229,7 @@ export function Embed() {
       qrImageUrlsRef.current = [];
       sessionRef.current?.stop();
     };
-  }, [hostOrigin, cpi, challengeId, hostPreflight]);
+  }, [hostOrigin, cpi, challengeId]);
 
   const phase: Phase =
     done === 'paired'

@@ -17,54 +17,9 @@ export interface BraveSharedWorkerPolicyResult {
   annotations: Record<string, unknown>;
 }
 
-function sameLabel(left: string | null, right: string | null): boolean {
-  return !!left && !!right && left.toLowerCase() === right.toLowerCase();
-}
-
-function axesBelowLimit(projection: MerchantProjection): boolean {
-  return (
-    (projection.automation ?? 0) < INDIVIDUAL_SCORE_LIMIT &&
-    (projection.device_tampering ?? 0) < INDIVIDUAL_SCORE_LIMIT &&
-    (projection.network_tampering ?? 0) < INDIVIDUAL_SCORE_LIMIT
-  );
-}
-
-function hasNetworkContinuity(hostScan: ClassifiedScan, iframeScan: ClassifiedScan): boolean {
-  return (
-    !!hostScan.ip &&
-    hostScan.ip === iframeScan.ip &&
-    !hostScan.isProxy &&
-    !iframeScan.isProxy &&
-    !hostScan.isDatacenter &&
-    !iframeScan.isDatacenter &&
-    !hostScan.isVpn &&
-    !iframeScan.isVpn
-  );
-}
-
-function hasWorkerEvidenceContinuity(
-  hostProjection: MerchantProjection,
-  iframeProjection: MerchantProjection
-): boolean {
-  const hostEvidence = hostProjection.worker_scope_evidence;
+function hasSafeScores(iframeProjection: MerchantProjection): boolean {
   const iframeEvidence = iframeProjection.worker_scope_evidence;
-  if (!hostEvidence || !iframeEvidence) return false;
-  return (
-    hostEvidence.all_scopes_consistent &&
-    iframeEvidence.shared_partition_candidate &&
-    hostEvidence.brave_detected &&
-    iframeEvidence.brave_detected &&
-    !!hostEvidence.main_web_consensus_id &&
-    hostEvidence.main_web_consensus_id === iframeEvidence.main_web_consensus_id
-  );
-}
-
-function hasSafeScores(
-  hostProjection: MerchantProjection,
-  iframeProjection: MerchantProjection
-): boolean {
-  const iframeEvidence = iframeProjection.worker_scope_evidence;
-  if (!iframeEvidence || !axesBelowLimit(hostProjection)) return false;
+  if (!iframeEvidence) return false;
   return (
     (iframeProjection.device_tampering ?? 0) >= INDIVIDUAL_SCORE_LIMIT &&
     (iframeProjection.automation ?? 0) < INDIVIDUAL_SCORE_LIMIT &&
@@ -73,28 +28,23 @@ function hasSafeScores(
   );
 }
 
-function hasBrowserContinuity(hostScan: ClassifiedScan, iframeScan: ClassifiedScan): boolean {
-  return (
-    hasNetworkContinuity(hostScan, iframeScan) &&
-    sameLabel(hostScan.browserName, iframeScan.browserName) &&
-    sameLabel(hostScan.os, iframeScan.os)
-  );
-}
-
 function qualifies(input: BraveSharedWorkerPolicyInput): boolean {
-  const { hostProjection, hostScan, iframeProjection, iframeScan } = input;
-  if (!hostProjection || !hostScan || !iframeProjection || !iframeScan) return false;
+  const { iframeProjection, iframeScan } = input;
+  const evidence = iframeProjection?.worker_scope_evidence;
+  if (!iframeProjection || !iframeScan || !evidence) return false;
   return (
-    isProjectionFresh(hostProjection) &&
     isProjectionFresh(iframeProjection) &&
-    hasWorkerEvidenceContinuity(hostProjection, iframeProjection) &&
-    hasSafeScores(hostProjection, iframeProjection) &&
-    hasBrowserContinuity(hostScan, iframeScan)
+    evidence.brave_detected &&
+    evidence.shared_partition_candidate &&
+    !!evidence.main_web_consensus_id &&
+    hasSafeScores(iframeProjection)
   );
 }
 
 /**
  * Remove only Brave's demonstrated cross-origin SharedWorker partition artifact.
+ * API evidence must positively identify Brave, restrict every divergence to the
+ * allowlisted SharedWorker fields, and preserve a main/dedicated-worker consensus.
  * Raw API scores remain in annotations; every other Pair verdict rule is unchanged.
  */
 export function applyBraveSharedWorkerPolicy(
@@ -121,6 +71,7 @@ export function applyBraveSharedWorkerPolicy(
     },
     annotations: {
       brave_shared_worker_adjusted: true,
+      brave_shared_worker_basis: 'inner_main_web_consensus',
       iframe_raw_score: input.iframeScan.individualScore,
       iframe_effective_score: effectiveScore,
     },
