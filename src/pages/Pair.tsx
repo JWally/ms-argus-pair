@@ -8,6 +8,7 @@ import {
 } from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
+import { isPairSessionTimeout } from '../lib/pair-timeout';
 import { Dialpad } from '../components/Dialpad';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
 import {
@@ -103,7 +104,7 @@ export function Pair() {
         const msg = e instanceof Error ? e.message : String(e);
         // The desktop took too long to scan, or the session TTL ran
         // out before we got here. Both are routine, not faults.
-        if (msg.includes("didn't finish scanning") || msg.includes('session expired')) {
+        if (isPairSessionTimeout(e)) {
           setPhase('timeout');
         } else {
           setPhase('error');

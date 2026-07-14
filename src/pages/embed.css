@@ -37,6 +37,7 @@ body:has(.aegis-stage) {
   --violet: #8b5cf6;
   --violet-lit: #b7a0ff;
   --mint: #35e0a1;
+  --amber: #f5b942;
   --red: #ff6b6b;
   --fg: #eceaf6;
   --muted: #8288a0;
@@ -78,6 +79,9 @@ body:has(.aegis-stage) {
 }
 .aegis.verified {
   --state: var(--mint);
+}
+.aegis.timeout {
+  --state: var(--amber);
 }
 .aegis.failed {
   --state: var(--red);
@@ -125,6 +129,7 @@ body:has(.aegis-stage) {
 }
 /* Solid status LED once the verdict has settled — no "still working" pulse. */
 .aegis.verified .ax-dot,
+.aegis.timeout .ax-dot,
 .aegis.failed .ax-dot {
   animation: none;
 }
@@ -168,6 +173,7 @@ body:has(.aegis-stage) {
   filter: blur(11px) saturate(0.25) contrast(0.9);
 }
 .aegis.verified .ax-tile,
+.aegis.timeout .ax-tile,
 .aegis.failed .ax-tile {
   opacity: 0;
 }
@@ -186,6 +192,7 @@ body:has(.aegis-stage) {
   );
 }
 .aegis.verified .ax-seal,
+.aegis.timeout .ax-seal,
 .aegis.failed .ax-seal {
   display: grid;
 }
