@@ -36,15 +36,27 @@ type UpMsg =
 
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.(?:fastpass|stepup|forceauth))?$/;
 const CHALLENGE_FORMAT = /^[A-Za-z0-9_-]{16,128}$/;
+const SCAN_HINT_DELAY_MS = 7_000;
 
 type Phase = 'scanning' | 'pairing' | 'verified' | 'timeout' | 'failed';
 
 const COPY: Record<Phase, { title: string; sub: string }> = {
-  scanning: { title: 'Scan with your phone', sub: 'Not scanning? Move closer or farther away' },
-  pairing: { title: 'Phone connected — verifying…', sub: 'Checking this is a real device' },
+  scanning: {
+    title: 'Scan with your phone',
+    sub: "Open your phone's camera and point it at the code.",
+  },
+  pairing: { title: 'Phone connected', sub: 'Finishing check...' },
   verified: { title: 'Verified', sub: "You're all set" },
   timeout: { title: "Didn't connect in time", sub: 'Refresh to try again' },
   failed: { title: "Couldn't verify", sub: 'Try again on a trusted network' },
+};
+
+const TRACK_STATUS: Record<Phase, string> = {
+  scanning: 'WAITING FOR PHONE',
+  pairing: 'PHONE CONNECTED',
+  verified: 'CHECK COMPLETE',
+  timeout: 'CONNECTION TIMED OUT',
+  failed: 'CHECK ENDED',
 };
 
 const svg = { fill: 'none', stroke: 'currentColor' } as const;
@@ -118,6 +130,7 @@ export function Embed() {
   const [qrReady, setQrReady] = useState(false);
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [showScanHint, setShowScanHint] = useState(false);
   const [done, setDone] = useState<null | 'paired' | 'timeout' | 'failed'>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
   const moduleRef = useRef<HTMLDivElement | null>(null);
@@ -160,6 +173,12 @@ export function Embed() {
     report();
     return () => ro.disconnect();
   }, [hostOrigin]);
+
+  useEffect(() => {
+    if (!qrReady || connected || done) return;
+    const timer = window.setTimeout(() => setShowScanHint(true), SCAN_HINT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [connected, done, qrReady]);
 
   useEffect(() => {
     const postUp = (msg: UpMsg) =>
@@ -252,6 +271,12 @@ export function Embed() {
             : 'scanning';
   // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
   const copy = COPY[phase];
+  const instruction =
+    phase === 'scanning' && showScanHint
+      ? 'Having trouble? Move your phone slightly farther away.'
+      : copy.sub;
+  // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
+  const trackStatus = TRACK_STATUS[phase];
 
   return (
     <div className="aegis-stage">
@@ -296,7 +321,7 @@ export function Embed() {
 
         <p className="ax-label" aria-live="polite">
           {copy.title}
-          <span className="ax-sub">{copy.sub}</span>
+          <span className="ax-sub">{instruction}</span>
         </p>
 
         <div className="ax-link">
@@ -307,6 +332,9 @@ export function Embed() {
             <span className="ax-tag">this device</span>
           </div>
           <div className="ax-track">
+            <span className="ax-track-label" aria-hidden="true">
+              {trackStatus}
+            </span>
             <span className="ax-rail" />
             <span className="ax-live" />
             <span className="ax-pulse" />
