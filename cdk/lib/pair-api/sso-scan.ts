@@ -28,7 +28,8 @@ export function ssoProfileFromScan(
 
 export function requirePhoneSsoScan(
   scan: ClassifiedScan | null,
-  leg: SsoScanLeg
+  leg: SsoScanLeg,
+  failureReturnUrl?: string
 ): { ok: true } | { ok: false; response: ReturnType<typeof jsonResp> } {
   if (scan?.isPhone === true) return { ok: true };
   return {
@@ -37,6 +38,7 @@ export function requirePhoneSsoScan(
       error: 'sso_requires_phone',
       leg,
       message: 'SSO is only available from phone-classified Argus scans.',
+      ...(failureReturnUrl ? { failureReturnUrl } : {}),
     }),
   };
 }

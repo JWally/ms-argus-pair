@@ -109,7 +109,9 @@ import {
 } from './pair-api/sso-approval';
 import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
 import { parseSsoMerchantBinding } from './pair-api/sso-merchant-callback';
+import { ssoFailureReturn } from './pair-api/sso-merchant-callback';
 import { createSsoMerchantApprovalHandler } from './pair-api/sso-merchant-approval-route';
+import { ssoChallengeResp, ssoStartResp } from './pair-api/sso-route-response';
 import { ssoValidationResponse } from './pair-api/sso-validation-response';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
@@ -563,11 +565,12 @@ const lambdaHandler = async (event: {
       if (!merchantBinding.ok) {
         return jsonResp(400, { error: 'invalid_sso_merchant_binding' });
       }
+      const failureReturnUrl = ssoFailureReturn(id, scopedCpi.cpi, merchantBinding.value);
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
       const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
       const projection = await fetchProjection(argusSessionId);
       const scan = classifyScan(projection, 'sso_start');
-      const phoneCheck = requirePhoneSsoScan(scan, 'start');
+      const phoneCheck = requirePhoneSsoScan(scan, 'start', failureReturnUrl);
       if (!phoneCheck.ok) return phoneCheck.response;
       const item: SsoSessionItem = {
         PK: `SSO#${id}`,
@@ -589,21 +592,14 @@ const lambdaHandler = async (event: {
           ConditionExpression: 'attribute_not_exists(PK)',
         })
       );
-      return jsonResp(200, {
-        sessionId: id,
-        nonce,
-        expiresAt,
-        cpi: scopedCpi.cpi,
-        proofRequired,
-        freshProofRequired: scopedCpi.freshProofRequired,
-        challengeUrl: `/sso/challenge/${id}`,
-      });
+      return ssoStartResp(id, item, failureReturnUrl);
     }
 
     case 'POST /api/sso/{id}/challenge': {
       const s = await loadSsoSession(sessionId!);
       if (!s) return jsonResp(404, { error: 'sso_session_not_found' });
       if (s.challengeProfile) return jsonResp(409, { error: 'sso_challenge_already_completed' });
+      const failureReturnUrl = ssoFailureReturn(sessionId!, s.cpi, s);
       const checked = validateSsoAttestation(body, {
         role: 'argus-challenge',
         sessionId: sessionId!,
@@ -614,7 +610,7 @@ const lambdaHandler = async (event: {
       const argusSessionId = body.argusSessionId as string;
       const projection = await fetchProjection(argusSessionId);
       const scan = classifyScan(projection, 'sso_challenge');
-      const phoneCheck = requirePhoneSsoScan(scan, 'challenge');
+      const phoneCheck = requirePhoneSsoScan(scan, 'challenge', failureReturnUrl);
       if (!phoneCheck.ok) return phoneCheck.response;
       const challengeProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
       const code = mintReturnCode({ sessionId: sessionId!, ttlSeconds: 90 });
@@ -632,11 +628,7 @@ const lambdaHandler = async (event: {
           },
         })
       );
-      return jsonResp(200, {
-        ok: true,
-        returnCode: code.value,
-        returnUrl: `/merchant/validate?session=${encodeURIComponent(sessionId!)}&code=${encodeURIComponent(code.value)}&cpi=${encodeURIComponent(s.cpi)}${s.merchantCallbackUrl ? '&flow=merchant' : ''}`,
-      });
+      return ssoChallengeResp(sessionId!, code.value, s.cpi, !!s.merchantCallbackUrl);
     }
 
     case 'POST /api/sso/{id}/validate': {
@@ -667,7 +659,11 @@ const lambdaHandler = async (event: {
       const argusSessionId = body.argusSessionId as string;
       const projection = await fetchProjection(argusSessionId);
       const scan = classifyScan(projection, 'sso_validate');
-      const phoneCheck = requirePhoneSsoScan(scan, 'validate');
+      const phoneCheck = requirePhoneSsoScan(
+        scan,
+        'validate',
+        ssoFailureReturn(sessionId!, s.cpi, s)
+      );
       if (!phoneCheck.ok) return phoneCheck.response;
       const validateProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
       const requesterIp = getViewerIp(event);

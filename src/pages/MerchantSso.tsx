@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { MerchantWordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
 import { defaultSsoCpi, redeemSsoApproval, startSsoSession } from '../lib/pair';
+import { failureReturnUrlFrom, rememberSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 const CAPTCHA_DEMO_URL = 'https://www-dev-jw.argus.pw/captcha';
 type MerchantStatus = 'idle' | 'profiling' | 'redeeming' | 'approved' | 'error';
@@ -132,11 +133,17 @@ export function MerchantSso() {
     try {
       const session = await startSsoSession(merchantSessionId, expectedCpi);
       window.sessionStorage.setItem(`argus-demo-sso-nonce:${session.sessionId}`, session.nonce);
+      rememberSsoFailureReturnUrl(session.sessionId, session.failureReturnUrl);
       const challengeParams = new URLSearchParams({ n: session.nonce, cpi: session.cpi });
       navigate(`${session.challengeUrl}?${challengeParams.toString()}`);
     } catch (cause) {
+      const failureReturnUrl = failureReturnUrlFrom(cause);
+      if (failureReturnUrl) {
+        window.location.replace(failureReturnUrl);
+        return;
+      }
       setStatus('error');
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError('Please try again.');
     }
   }
 

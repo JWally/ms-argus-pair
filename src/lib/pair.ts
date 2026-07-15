@@ -217,6 +217,7 @@ export interface SsoStartResult {
   proofRequired: boolean;
   freshProofRequired: boolean;
   challengeUrl: string;
+  failureReturnUrl: string;
 }
 
 export interface SsoChallengeResult {
