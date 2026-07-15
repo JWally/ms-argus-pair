@@ -3,12 +3,13 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Wordmark } from '../components/Brand';
 import { IconShield } from '../components/Icons';
 import { startSsoSession } from '../lib/pair';
+import { failureReturnUrlFrom, rememberSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 export function MobileSso() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const started = useRef(false);
-  const [error, setError] = useState<string | null>(null);
+  const [returnUnavailable, setReturnUnavailable] = useState(false);
 
   useEffect(() => {
     if (started.current) return;
@@ -17,7 +18,7 @@ export function MobileSso() {
     const challengeId = params.get('challengeId');
     const callbackUrl = params.get('returnUrl');
     if (!cpi || !challengeId || !callbackUrl) {
-      queueMicrotask(() => setError('Missing merchant binding'));
+      queueMicrotask(() => setReturnUnavailable(true));
       return;
     }
     let cancelled = false;
@@ -25,11 +26,18 @@ export function MobileSso() {
       .then((session) => {
         if (cancelled) return;
         window.sessionStorage.setItem(`argus-demo-sso-nonce:${session.sessionId}`, session.nonce);
+        rememberSsoFailureReturnUrl(session.sessionId, session.failureReturnUrl);
         const challengeParams = new URLSearchParams({ n: session.nonce, cpi: session.cpi });
         void navigate(`${session.challengeUrl}?${challengeParams.toString()}`, { replace: true });
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        if (cancelled) return;
+        const failureReturnUrl = failureReturnUrlFrom(cause);
+        if (failureReturnUrl) {
+          window.location.replace(failureReturnUrl);
+        } else {
+          setReturnUnavailable(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -50,12 +58,25 @@ export function MobileSso() {
             </div>
             <div className="mt-5 label">Argus</div>
             <h1 className="mt-2 text-2xl font-semibold">
-              {error ? 'Session check failed' : 'Checking this device'}
+              {returnUnavailable ? 'Return to merchant' : 'Checking this device'}
             </h1>
             <div className="mt-2 flex items-center justify-center gap-2 text-sm text-muted">
-              {!error && <span className="spinner" />}
-              <span>{error ?? 'You will return automatically'}</span>
+              {!returnUnavailable && <span className="spinner" />}
+              <span>
+                {returnUnavailable
+                  ? 'The handoff could not finish automatically.'
+                  : 'You will return automatically'}
+              </span>
             </div>
+            {returnUnavailable && (
+              <button
+                className="merchant-done mt-6"
+                type="button"
+                onClick={() => window.history.back()}
+              >
+                RETURN
+              </button>
+            )}
           </section>
         </main>
       </div>

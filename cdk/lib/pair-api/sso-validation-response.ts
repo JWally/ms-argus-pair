@@ -11,19 +11,14 @@ interface SsoValidationResponseInput {
 }
 
 export function ssoValidationResponse(input: SsoValidationResponseInput) {
-  const isMerchantCallback = !!(
-    input.verdict.ok &&
-    input.approvalToken &&
-    input.merchantCallbackUrl &&
-    input.merchantChallengeId
-  );
+  const hasMerchantCallback = !!(input.merchantCallbackUrl && input.merchantChallengeId);
   return {
     statusCode: input.verdict.ok ? 200 : 403,
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     },
-    ...(input.verdict.ok && input.approvalToken && !isMerchantCallback
+    ...(input.verdict.ok && input.approvalToken && !hasMerchantCallback
       ? { cookies: [approvalCookie(input.approvalToken, SSO_APPROVAL_TTL_SECONDS)] }
       : {}),
     body: JSON.stringify({
@@ -32,11 +27,13 @@ export function ssoValidationResponse(input: SsoValidationResponseInput) {
       reasons: input.verdict.reasons,
       merchantSessionId: input.merchantSessionId,
       cpi: input.cpi,
-      ...(isMerchantCallback
+      ...(hasMerchantCallback
         ? {
-            approvalCode: input.approvalToken,
             merchantCallbackUrl: input.merchantCallbackUrl,
             merchantChallengeId: input.merchantChallengeId,
+            ...(input.verdict.ok && input.approvalToken
+              ? { approvalCode: input.approvalToken }
+              : {}),
           }
         : {}),
       nextDeviceTrust: input.nextDeviceTrust,

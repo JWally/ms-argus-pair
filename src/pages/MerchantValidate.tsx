@@ -11,6 +11,7 @@ import {
 } from '../lib/pair';
 import { clearTrustToken, loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
+import { loadSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 export function MerchantValidate() {
   const navigate = useNavigate();
@@ -25,6 +26,7 @@ export function MerchantValidate() {
   const isMerchantCallback = params.get('flow') === 'merchant';
   const approved = result?.verdict === 'approved';
   const failed = !!error || result?.verdict === 'failed';
+  const returningToMerchant = isMerchantCallback && (approved || failed);
 
   useEffect(() => {
     const sessionId = params.get('session');
@@ -94,21 +96,35 @@ export function MerchantValidate() {
   }, [params]);
 
   useEffect(() => {
-    if (!approved || !sessionId || !cpi) return;
-    if (result?.approvalCode && result.merchantCallbackUrl && result.merchantChallengeId) {
-      const callback = new URL(result.merchantCallbackUrl);
-      callback.searchParams.set('session', sessionId);
-      callback.searchParams.set('code', result.approvalCode);
-      callback.searchParams.set('cpi', cpi);
-      callback.searchParams.set('challengeId', result.merchantChallengeId);
-      window.location.replace(callback.toString());
+    if (!sessionId || !cpi) return;
+    if (isMerchantCallback) {
+      if (result?.merchantCallbackUrl && result.merchantChallengeId) {
+        const callback = new URL(result.merchantCallbackUrl);
+        callback.searchParams.set('session', sessionId);
+        callback.searchParams.set('cpi', cpi);
+        callback.searchParams.set('challengeId', result.merchantChallengeId);
+        if (approved && result.approvalCode) {
+          callback.searchParams.set('code', result.approvalCode);
+        } else if (failed) {
+          callback.searchParams.set('status', 'failed');
+        } else {
+          return;
+        }
+        window.location.replace(callback.toString());
+        return;
+      }
+      if (approved || failed) {
+        const failureReturnUrl = loadSsoFailureReturnUrl(sessionId);
+        if (failureReturnUrl) window.location.replace(failureReturnUrl);
+      }
       return;
     }
+    if (!approved) return;
     const merchantParams = new URLSearchParams({ complete: '1', session: sessionId, cpi });
     navigate(`/merchant?${merchantParams.toString()}`, {
       replace: true,
     });
-  }, [approved, cpi, navigate, result, sessionId]);
+  }, [approved, cpi, failed, isMerchantCallback, navigate, result, sessionId]);
 
   async function runProof(mode: 'passkey-create' | 'passkey-auth' | 'google') {
     const sessionId = params.get('session');
@@ -190,9 +206,11 @@ export function MerchantValidate() {
             aria-live="polite"
           >
             <span
-              className={`merchant-result-icon ${approved ? 'is-approved' : failed ? 'is-failed' : ''}`}
+              className={`merchant-result-icon ${approved && !returningToMerchant ? 'is-approved' : failed && !returningToMerchant ? 'is-failed' : ''}`}
             >
-              {approved ? (
+              {returningToMerchant ? (
+                <IconShield className="h-7 w-7" />
+              ) : approved ? (
                 <IconCheck className="h-7 w-7" />
               ) : failed ? (
                 <IconX className="h-7 w-7" />
@@ -204,13 +222,15 @@ export function MerchantValidate() {
               {isMerchantCallback ? 'Argus' : 'Merchant response'}
             </p>
             <h1>
-              {approved
+              {returningToMerchant
                 ? 'Returning to merchant'
-                : failed
-                  ? 'Session is Not Valid'
-                  : needsProof
-                    ? 'Confirm your identity'
-                    : 'Validating session'}
+                : approved
+                  ? 'Returning to merchant'
+                  : failed
+                    ? 'Session could not be confirmed'
+                    : needsProof
+                      ? 'Confirm your identity'
+                      : 'Validating session'}
             </h1>
             <p
               className={
@@ -221,11 +241,13 @@ export function MerchantValidate() {
                     : 'merchant-copy'
               }
             >
-              {approved
-                ? 'redeeming approval'
-                : needsProof
-                  ? 'proof required'
-                  : (result?.reason.replace(/_/g, ' ') ?? error ?? 'checking return')}
+              {returningToMerchant
+                ? 'completing handoff'
+                : approved
+                  ? 'redeeming approval'
+                  : needsProof
+                    ? 'proof required'
+                    : (result?.reason.replace(/_/g, ' ') ?? error ?? 'checking return')}
             </p>
             {validating && <span className="spinner merchant-spinner" />}
           </section>
@@ -266,7 +288,7 @@ export function MerchantValidate() {
             </section>
           )}
 
-          {failed && (
+          {failed && !isMerchantCallback && (
             <Link className="merchant-done" to="/merchant">
               BACK
             </Link>

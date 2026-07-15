@@ -51,8 +51,15 @@ assert(
   'every SSO browser leg should preserve the exact scoped CPI'
 );
 assert(
-  !validate.includes('DONE') && merchant.includes('DONE'),
-  'only the final merchant approval screen should show DONE'
+  !challenge.includes('<Dialpad') &&
+    !challenge.includes('actionLabel="DONE"') &&
+    challenge.includes('You will return to the merchant automatically') &&
+    merchant.includes('DONE'),
+  'the hosted SSO scan should return automatically without a drawing gate'
+);
+assert(
+  !challenge.includes('Session check failed') && !validate.includes('Session is Not Valid'),
+  'Argus-hosted SSO pages should not disclose the merchant verdict'
 );
 assert(
   merchant.includes('merchant-page') && validate.includes('merchant-page'),

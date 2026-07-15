@@ -1,5 +1,34 @@
 import { parseMerchantChallenge } from './merchant-challenge';
 
+interface SsoMerchantReturnBinding {
+  merchantCallbackUrl?: string;
+  merchantChallengeId?: string;
+}
+
+export function ssoFailureReturn(
+  sessionId: string,
+  cpi: string,
+  binding: SsoMerchantReturnBinding = {}
+): string {
+  // This route can only deny. Approval still requires the one-time exchange code.
+  if (binding.merchantCallbackUrl && binding.merchantChallengeId) {
+    const callback = new URL(binding.merchantCallbackUrl);
+    callback.searchParams.set('status', 'failed');
+    callback.searchParams.set('session', sessionId);
+    callback.searchParams.set('cpi', cpi);
+    callback.searchParams.set('challengeId', binding.merchantChallengeId);
+    return callback.toString();
+  }
+
+  const params = new URLSearchParams({
+    complete: '1',
+    session: sessionId,
+    cpi,
+    status: 'failed',
+  });
+  return `/merchant?${params.toString()}`;
+}
+
 export function parseSsoMerchantCallback(
   value: unknown,
   allowedOrigins: readonly string[]

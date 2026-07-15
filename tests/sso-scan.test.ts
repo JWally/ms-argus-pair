@@ -38,7 +38,11 @@ describe('sso scan helpers', () => {
   });
 
   it('rejects non-phone SSO scans with the stable API error', () => {
-    const result = requirePhoneSsoScan(null, 'challenge');
+    const result = requirePhoneSsoScan(
+      null,
+      'challenge',
+      'https://merchant.example/sso-return?status=failed'
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -46,6 +50,7 @@ describe('sso scan helpers', () => {
       expect(JSON.parse(result.response.body)).toMatchObject({
         error: 'sso_requires_phone',
         leg: 'challenge',
+        failureReturnUrl: 'https://merchant.example/sso-return?status=failed',
       });
     }
   });
