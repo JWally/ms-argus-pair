@@ -32,7 +32,7 @@ function MerchantResult({ status, error }: { status: MerchantStatus; error: stri
           <span className="spinner merchant-spinner" />
         )}
       </span>
-      <p className="merchant-eyebrow">Merchant response</p>
+      <p className="merchant-eyebrow">Site response</p>
       <h1>
         {approved
           ? 'Session is Valid'

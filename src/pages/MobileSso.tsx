@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Wordmark } from '../components/Brand';
-import { IconShield } from '../components/Icons';
+import { SsoStatusShell } from '../components/SsoStatusShell';
 import { startSsoSession } from '../lib/pair';
 import { failureReturnUrlFrom, rememberSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
@@ -45,41 +44,18 @@ export function MobileSso() {
   }, [navigate, params]);
 
   return (
-    <div className="argus-page">
-      <div className="argus-layout">
-        <header className="argus-header">
-          <Wordmark />
-          <span className="pill">Mobile check</span>
-        </header>
-        <main className="argus-main">
-          <section className="sso-shell text-center" aria-live="polite">
-            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-accent/50 bg-accent/15 text-accent">
-              <IconShield className="h-8 w-8" />
-            </div>
-            <div className="mt-5 label">Argus</div>
-            <h1 className="mt-2 text-2xl font-semibold">
-              {returnUnavailable ? 'Return to merchant' : 'Checking this device'}
-            </h1>
-            <div className="mt-2 flex items-center justify-center gap-2 text-sm text-muted">
-              {!returnUnavailable && <span className="spinner" />}
-              <span>
-                {returnUnavailable
-                  ? 'The handoff could not finish automatically.'
-                  : 'You will return automatically'}
-              </span>
-            </div>
-            {returnUnavailable && (
-              <button
-                className="merchant-done mt-6"
-                type="button"
-                onClick={() => window.history.back()}
-              >
-                RETURN
-              </button>
-            )}
-          </section>
-        </main>
-      </div>
-    </div>
+    <SsoStatusShell
+      step={1}
+      status={returnUnavailable ? 'Automatic return unavailable' : 'Checking this device'}
+      detail={
+        returnUnavailable
+          ? 'Use the button below to continue back.'
+          : 'This usually takes only a moment.'
+      }
+      isBusy={!returnUnavailable}
+      action={
+        returnUnavailable ? { label: 'RETURN', onClick: () => window.history.back() } : undefined
+      }
+    />
   );
 }
