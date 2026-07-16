@@ -8,6 +8,3 @@ cdk.context.json
 *.tsbuildinfo
 .DS_Store
 .vite
-
-# wasm build
-wasm/qr-enclave/target/

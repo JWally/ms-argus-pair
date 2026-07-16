@@ -3,8 +3,18 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 1441,
+    maxLines: 1387,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
+  },
+  {
+    file: 'cdk/lib/oauth-providers.ts',
+    maxLines: 161,
+    why: 'keep retired OAuth provider scaffolding out of the server trust boundary',
+  },
+  {
+    file: 'src/lib/oauth.ts',
+    maxLines: 172,
+    why: 'keep retired OAuth provider scaffolding out of the browser bundle',
   },
   {
     file: 'cdk/lib/pair-api/sso-approval-route.ts',

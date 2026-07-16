@@ -10,7 +10,7 @@ export interface PhoneAttestationRun {
 }
 
 export interface PhoneOauthProof {
-  provider: 'google' | 'github' | 'facebook';
+  provider: 'google';
   token: string;
 }
 

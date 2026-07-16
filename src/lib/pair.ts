@@ -787,7 +787,7 @@ export async function validateSsoReturn({
   returnCode: string;
   cpi: string;
   mode?: 'integrity-only' | 'passkey-create' | 'passkey-auth' | 'oauth' | 'device-trust';
-  oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
+  oauthResult?: { provider: 'google'; token: string };
   deviceTrustToken?: string;
 }): Promise<SsoValidateResult> {
   const useOAuth = mode === 'oauth';
@@ -1317,8 +1317,8 @@ export interface SubmitPhoneAttestationOptions {
    */
   mode?: 'integrity' | 'passkey-create' | 'passkey-auth' | 'oauth';
   /** When `mode === "oauth"`, the result from one of the
-   *  `runOAuthProofOfLife(...)` calls in `src/lib/oauth.ts`. */
-  oauthResult?: { provider: 'google' | 'github' | 'facebook'; token: string };
+   *  `runGoogleProofOfLife(...)` in `src/lib/oauth.ts`. */
+  oauthResult?: { provider: 'google'; token: string };
   /**
    * Try only the IndexedDB device-trust token path. Used by the phone's
    * background fast-pass flow so an expired token never opens WebAuthn

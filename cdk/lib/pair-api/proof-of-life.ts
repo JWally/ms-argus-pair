@@ -172,7 +172,7 @@ export async function verifyOAuthProofOfLife(
   }
   let result: OAuthVerifyResult;
   try {
-    result = await verifyOAuth(input.provider, {
+    result = await verifyOAuth({
       token: input.token,
       expectedNonce,
     });

@@ -16,7 +16,7 @@ function assert(condition, message) {
 }
 
 assert(
-  pairPage.includes('runOAuthProofOfLife') &&
+  pairPage.includes('runGoogleProofOfLife') &&
     pairPage.includes('PROVIDERS_CONFIGURED') &&
     pairPage.includes('isOAuthError'),
   'Pair page should wire Google OAuth proof-of-life helpers'
@@ -55,7 +55,7 @@ assert(
 );
 
 assert(
-  pairPage.includes("runOAuthProofOfLife('google', info.nonce)"),
+  pairPage.includes('runGoogleProofOfLife(info.nonce)'),
   'Google menu action should bind OAuth proof to the pair nonce'
 );
 

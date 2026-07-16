@@ -1,33 +1,24 @@
 /**
  * Client-side OAuth proof-of-life helpers for the pair demo.
  *
- * Each function drives the provider's standard OAuth dance and
- * returns an opaque token the pair backend can verify (Google ID
- * token, GitHub access token via PKCE, Facebook access token).
+ * Drives Google's standard OAuth dance and returns an ID token the pair
+ * backend can verify.
  *
  * Nonce/state binding: the pair `session.nonce` is passed in as
- * `expectedNonce` and each provider weaves it into the protocol —
- * OIDC `nonce` claim (Google), OAuth2 `state` parameter (GitHub,
- * Facebook). On callback the client checks the round-tripped state
- * before handing the token to the backend; backend re-checks nonce
- * for Google's ID token. Replay of a captured token from a different
- * pair session fails because each session.nonce is unique.
+ * `expectedNonce` and carried in Google's OIDC `nonce` claim. The backend
+ * re-checks that claim, so a captured token from another pair session fails.
  *
- * This module is INTENTIONALLY UI-agnostic. Each provider call
- * pops the appropriate provider UX (Google One Tap sheet, GitHub
- * redirect popup, Facebook Login dialog). The Demo page wires the
- * buttons that invoke these.
+ * This module is intentionally UI-agnostic. The demo chooses when to invoke
+ * the Google One Tap sheet.
  *
  * Build-time env vars:
- *   VITE_OAUTH_GOOGLE_CLIENT_ID   — Google OAuth 2.0 client ID
- *   VITE_OAUTH_GITHUB_CLIENT_ID   — GitHub OAuth App client ID
- *   VITE_OAUTH_FACEBOOK_APP_ID    — Facebook App ID
+ *   VITE_OAUTH_GOOGLE_CLIENT_ID — Google OAuth 2.0 client ID
  *
  * Absent → the corresponding helper returns `{ error: '*_not_configured' }`
  * and the UI hides the button.
  */
 
-export type OAuthProvider = 'google' | 'github' | 'facebook';
+export type OAuthProvider = 'google';
 
 interface OAuthResult {
   provider: OAuthProvider;
@@ -46,13 +37,9 @@ export function isOAuthError(o: OAuthOutcome): o is OAuthError {
 }
 
 const GOOGLE_CLIENT_ID = (import.meta.env.VITE_OAUTH_GOOGLE_CLIENT_ID as string | undefined) ?? '';
-const GITHUB_CLIENT_ID = (import.meta.env.VITE_OAUTH_GITHUB_CLIENT_ID as string | undefined) ?? '';
-const FACEBOOK_APP_ID = (import.meta.env.VITE_OAUTH_FACEBOOK_APP_ID as string | undefined) ?? '';
 
 export const PROVIDERS_CONFIGURED: Record<OAuthProvider, boolean> = {
   google: GOOGLE_CLIENT_ID.length > 0,
-  github: GITHUB_CLIENT_ID.length > 0,
-  facebook: FACEBOOK_APP_ID.length > 0,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -182,109 +169,4 @@ export async function runGoogleProofOfLife(nonce: string): Promise<OAuthOutcome>
       }
     });
   });
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// GitHub — PKCE in a popup. No client secret on the wire.
-// ─────────────────────────────────────────────────────────────────────────
-
-function randomB64Url(bytes: number): string {
-  const buf = new Uint8Array(bytes);
-  crypto.getRandomValues(buf);
-  let s = '';
-  for (const b of buf) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function sha256B64Url(input: string): Promise<string> {
-  const buf = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', buf);
-  const bytes = new Uint8Array(digest);
-  let s = '';
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-/**
- * GitHub OAuth via PKCE. State carries the pair nonce. The popup
- * redirects back to /oauth/github/callback (handled by an inline
- * <script> that postMessages the code back here). We exchange the
- * code for an access_token via GitHub's token endpoint (PKCE — no
- * client secret needed).
- *
- * SCAFFOLD: the popup wiring + callback page are TODO. This stub
- * returns `scaffold_not_wired_yet` so the rest of the pipeline can
- * be exercised with fake providers in tests.
- *
- * @public — intentional provider-API surface, wired via runOAuthProofOfLife
- * dispatch when a future caller switches providers.
- */
-export async function runGithubProofOfLife(nonce: string): Promise<OAuthOutcome> {
-  if (!PROVIDERS_CONFIGURED.github) {
-    return { provider: 'github', error: 'github_not_configured' };
-  }
-  const codeVerifier = randomB64Url(32);
-  const codeChallenge = await sha256B64Url(codeVerifier);
-  void codeVerifier;
-  void codeChallenge;
-  void nonce;
-  // SCAFFOLD: open popup at
-  //   https://github.com/login/oauth/authorize
-  //     ?client_id=${GITHUB_CLIENT_ID}
-  //     &redirect_uri=${callbackOrigin}/oauth/github/callback
-  //     &state=${nonce}
-  //     &code_challenge=${codeChallenge}
-  //     &code_challenge_method=S256
-  //     &scope=read:user
-  //
-  // wait for postMessage from popup with { code, state }, verify
-  // state === nonce, POST to /login/oauth/access_token with
-  // {client_id, code, code_verifier, redirect_uri}, get access_token.
-  return { provider: 'github', error: 'scaffold_not_wired_yet' };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Facebook — JS SDK FB.login() dialog.
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * Facebook Login via the official JS SDK. State binding via the
- * `state` parameter on FB.login(). The dialog returns an access token
- * we hand to the backend; backend verifies via /debug_token.
- *
- * SCAFFOLD: SDK init + FB.login() invocation are TODO.
- *
- * @public — intentional provider-API surface, wired via runOAuthProofOfLife
- * dispatch when a future caller switches providers.
- */
-export async function runFacebookProofOfLife(nonce: string): Promise<OAuthOutcome> {
-  if (!PROVIDERS_CONFIGURED.facebook) {
-    return { provider: 'facebook', error: 'facebook_not_configured' };
-  }
-  void nonce;
-  // SCAFFOLD: load https://connect.facebook.net/en_US/sdk.js,
-  //   FB.init({ appId: FACEBOOK_APP_ID, version: 'v22.0' }),
-  //   FB.login(resp => { if (resp.authResponse) resolve(token) },
-  //     { scope: 'public_profile', auth_nonce: nonce })
-  return { provider: 'facebook', error: 'scaffold_not_wired_yet' };
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Dispatch
-// ─────────────────────────────────────────────────────────────────────────
-
-/**
- * @public — provider-agnostic dispatch entry, used by future callers
- * that want to pick provider at runtime instead of importing one of
- * the run*ProofOfLife functions directly.
- */
-export function runOAuthProofOfLife(provider: OAuthProvider, nonce: string): Promise<OAuthOutcome> {
-  switch (provider) {
-    case 'google':
-      return runGoogleProofOfLife(nonce);
-    case 'github':
-      return runGithubProofOfLife(nonce);
-    case 'facebook':
-      return runFacebookProofOfLife(nonce);
-  }
 }

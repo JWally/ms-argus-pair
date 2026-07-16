@@ -78,7 +78,7 @@ import {
   type WebAuthnAnnotations,
 } from './pair-api/proof-of-life';
 import { logPhonePerfEvent, proofModeForLog } from './pair-api/phone-observability';
-import { diagnoseValkeyConnectivity } from './pair-api/valkey-debug';
+import { claimArgusSessionIdDdb } from './pair-api/argus-session-claim';
 import {
   classifyScan,
   computeVerdict,
@@ -168,9 +168,7 @@ const passkeyStore = createDdbPasskeyStore(ddb, TABLE);
 // id) the first time it shows up. Second time → ConditionalCheckFailed →
 // 409. TTL'd so the ledger self-cleans on the same horizon as a typical
 // argus projection. Per-row writes are independent of the SESSION#… rows.
-const ARGUS_SID_LEDGER_TTL_SECONDS = 24 * 3600;
-
-export async function claimArgusSessionId(
+async function claimArgusSessionId(
   argusSessionId: string,
   pairSessionId: string,
   role: 'host' | 'desktop' | 'phone'
@@ -178,44 +176,7 @@ export async function claimArgusSessionId(
   if (isValkeySessionsEnabled()) {
     return claimArgusValkey(argusSessionId, pairSessionId, role);
   }
-  const now = Math.floor(Date.now() / 1000);
-  try {
-    await ddb.send(
-      new PutCommand({
-        TableName: TABLE,
-        Item: {
-          PK: `ARGUSSID#${argusSessionId}`,
-          SK: 'CLAIM',
-          claimedBy: pairSessionId,
-          role,
-          claimedAt: now,
-          expiresAt: now + ARGUS_SID_LEDGER_TTL_SECONDS,
-        },
-        ConditionExpression: 'attribute_not_exists(PK)',
-      })
-    );
-    return { ok: true };
-  } catch (err: unknown) {
-    const isConflict = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
-    if (!isConflict) throw err;
-    // Idempotent re-claim: a single pair attempt can legitimately submit the
-    // same argusSessionId twice — the silent device-trust redeem claims it,
-    // fails its IP-pinned verify (mobile IP rotated) and 401s WITHOUT storing
-    // an attestation, then the client re-submits the SAME scan on the WebAuthn
-    // fallback. That second claim must NOT 409 the user. Only a DIFFERENT pair
-    // session reusing the id is the recycling attack the ledger defends.
-    // Mirrors the STUN nonce tracker's same-session re-claim acceptance.
-    const existing = await ddb.send(
-      new GetCommand({
-        TableName: TABLE,
-        Key: { PK: `ARGUSSID#${argusSessionId}`, SK: 'CLAIM' },
-      })
-    );
-    if (existing.Item?.claimedBy === pairSessionId && existing.Item?.role === role) {
-      return { ok: true };
-    }
-    return { ok: false, reason: 'already_claimed' };
-  }
+  return claimArgusSessionIdDdb({ argusSessionId, pairSessionId, role }, { ddb, tableName: TABLE });
 }
 
 // ── proof-of-life requirement (toggle) ─────────────────────────────────────
@@ -448,7 +409,6 @@ const lambdaHandler = async (event: {
     'POST /api/sso/start',
     'POST /api/sso/approval/redeem',
     'POST /api/sso/approval/exchange',
-    'GET /api/_valkey-debug',
     'POST /api/verify',
     'POST /api/pair-token/redeem',
     'POST /api/phone-perf',
@@ -473,12 +433,6 @@ const lambdaHandler = async (event: {
       };
     }
 
-    case 'GET /api/_valkey-debug': {
-      // Diagnostic-only endpoint. Tries DNS → raw TCP → TLS → ioredis
-      // and reports where the chain breaks. Safe to expose because it
-      // only reports connectivity outcomes; no Valkey command is run.
-      return jsonResp(200, await diagnoseValkeyConnectivity());
-    }
     case 'POST /api/session/start': {
       // #10: per-IP throttle. Fail OPEN on limiter error — a Valkey/DDB hiccup
       // must not take down all pairing; the cap is abuse-bounding, not a
@@ -878,9 +832,8 @@ const lambdaHandler = async (event: {
       // independently below.
       const webauthnInput = body.webauthn;
       // OAuth proof-of-life. Alternative to WebAuthn: client completed a
-      // Google/GitHub/Facebook flow on the phone and posts the resulting
-      // token here. Verifier binds the token's nonce/state to the pair
-      // session.nonce. See oauth-providers.ts for per-provider details.
+      // Google flow on the phone and posts the resulting token here. The
+      // verifier binds its OIDC nonce to the pair session nonce.
       const oauthInput = body.oauth;
       // Device-trust token. Alternative to a fresh ceremony — proves
       // "this device passed proof-of-life recently from this same IP".
