@@ -129,7 +129,9 @@ Key mechanics:
   when the browser advertises native `DecompressionStream` support, and ECDH/AES
   sealed to the QR worker. The page receives display bytes instead of a
   structured URL/token. This is still a speed-bump against image extraction —
-  the single-use token and server verdict are the lock.
+  the single-use token and server verdict are the lock. See the
+  [QR poisoning research](docs/qr-poisoning-research.md) for the measured
+  attack ladder and limits.
 - **WS relay, not WebRTC.** Both sides authenticate to the WebSocket API with
   HMAC bootstrap tokens (5-min TTL) and receive sealed AES-GCM envelopes; the
   relay verifies envelope auth-tags, one live connection per {session, role},
@@ -255,8 +257,8 @@ Stacks (stage `dev-jw`; no prod stage configured yet):
 
 ## LLM cleanup loop
 
-For repeated LLM-assisted cleanup/hardening passes, use `LLM_DEV_LOOP.md` and
-the helper:
+For repeated LLM-assisted cleanup/hardening passes, use `LLM_DEV_LOOP.md`,
+`ATTACK_TESTING.md`, and the helper:
 
 ```sh
 npm run llm:loop -- start
@@ -267,15 +269,12 @@ npm run llm:loop -- deploy
 npm run llm:loop -- red-team
 ```
 
-The loop keeps a durable `dev-loop` branch, does one scoped branch at a time,
-deploys runtime changes to `dev-jw`, red-teams the changed boundary, then merges
-clean passes back into `dev-loop`.
+The loop branches from current `main`, does one scoped change at a time, deploys
+runtime changes to `dev-jw`, red-teams the changed boundary, then merges clean
+passes through pull requests.
 
 ## Known gaps
 
-- OAuth: only Google is wired end-to-end on the client; GitHub/Facebook have
-  server-side verifiers but stub clients (`src/lib/oauth.ts`).
 - `originAllowlist` is stored per-CPI but not yet enforced (domain-locking).
 - The poisoned 33×33 QR has not been verified with a real phone scan
   end-to-end since the short-token change.
-- `GET /api/_valkey-debug` is a temporary unauthenticated connectivity probe.

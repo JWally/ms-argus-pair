@@ -371,7 +371,7 @@ async function pair(
     };
     if (proofMode === 'google') {
       const oauthMod = await loadOAuthModule();
-      const oauthResult = await oauthMod.runOAuthProofOfLife('google', state.info.nonce);
+      const oauthResult = await oauthMod.runGoogleProofOfLife(state.info.nonce);
       if (oauthMod.isOAuthError(oauthResult)) {
         setState({ phase: 'ready', errorMsg: oauthResult.error });
         return;

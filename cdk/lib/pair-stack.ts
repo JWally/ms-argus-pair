@@ -65,20 +65,8 @@ interface PairStackProps extends cdk.StackProps {
   /** HTTPS merchant origins allowed to receive one-time mobile SSO callbacks. */
   ssoCallbackOrigins?: string[];
 
-  /**
-   * OAuth provider configuration. Optional — when absent, the matching
-   * verifier in oauth-providers.ts returns `*_not_configured` and the
-   * client UI hides the corresponding button.
-   *
-   * client IDs / app IDs are non-secret; they're baked into the Lambda
-   * env vars. App secrets (Facebook only) live in Secrets Manager so
-   * they don't show up in CloudFormation diffs or process listings.
-   */
+  /** Google OAuth client ID. Optional; when absent the client hides the button. */
   oauthGoogleClientId?: string;
-  oauthGithubClientId?: string;
-  oauthGithubClientSecretArn?: string;
-  oauthFacebookAppId?: string;
-  oauthFacebookAppSecretArn?: string;
 }
 
 export class PairStack extends cdk.Stack {
@@ -94,10 +82,6 @@ export class PairStack extends cdk.Stack {
       merchantCpi,
       ssoCallbackOrigins = [],
       oauthGoogleClientId,
-      oauthGithubClientId,
-      oauthGithubClientSecretArn,
-      oauthFacebookAppId,
-      oauthFacebookAppSecretArn,
     } = props;
 
     // Pair fundamentally can't run without the merchant API — every
@@ -236,11 +220,9 @@ export class PairStack extends cdk.Stack {
         ...(merchantApiUrl ? { MERCHANT_API_URL: merchantApiUrl } : {}),
         ...(merchantApiCredential ? { MERCHANT_API_CREDENTIAL: merchantApiCredential } : {}),
         ...(merchantCpi ? { MERCHANT_CPI: merchantCpi } : {}),
-        // OAuth client IDs / app IDs are non-secret. Absent → verifier
-        // returns *_not_configured, client hides the button.
+        // The OAuth client ID is non-secret. Absent means the verifier returns
+        // google_not_configured and the client hides the button.
         ...(oauthGoogleClientId ? { OAUTH_GOOGLE_CLIENT_ID: oauthGoogleClientId } : {}),
-        ...(oauthGithubClientId ? { OAUTH_GITHUB_CLIENT_ID: oauthGithubClientId } : {}),
-        ...(oauthFacebookAppId ? { OAUTH_FACEBOOK_APP_ID: oauthFacebookAppId } : {}),
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
       bundling: {
@@ -253,31 +235,6 @@ export class PairStack extends cdk.Stack {
     table.grantReadWriteData(pairFn);
     deviceTrustSecret.grantRead(pairFn);
     verdictSigningSecret.grantRead(pairFn);
-
-    // ── OAuth provider secrets ────────────────────────────────────────
-    // Each provider's app secret lives in Secrets Manager so it stays
-    // out of CFN templates. The Lambda gets read access + the secret
-    // value materialised into the named env var at cold start (CDK's
-    // built-in fromSecretCompleteArn + addEnvironment pattern would
-    // also work; this form keeps the lookup explicit).
-    if (oauthGithubClientSecretArn) {
-      const ghSecret = secretsmanager.Secret.fromSecretCompleteArn(
-        this,
-        'OAuthGithubClientSecret',
-        oauthGithubClientSecretArn
-      );
-      ghSecret.grantRead(pairFn);
-      pairFn.addEnvironment('OAUTH_GITHUB_CLIENT_SECRET_ARN', ghSecret.secretArn);
-    }
-    if (oauthFacebookAppSecretArn) {
-      const fbSecret = secretsmanager.Secret.fromSecretCompleteArn(
-        this,
-        'OAuthFacebookAppSecret',
-        oauthFacebookAppSecretArn
-      );
-      fbSecret.grantRead(pairFn);
-      pairFn.addEnvironment('OAUTH_FACEBOOK_APP_SECRET_ARN', fbSecret.secretArn);
-    }
 
     // Route through an alias so CFN can cut over to a new version atomically.
     // Keep this alias warm with cheap synthetic invokes instead of always-on
@@ -322,13 +279,6 @@ export class PairStack extends cdk.Stack {
     api.addRoutes({
       path: '/api/sso/approval/exchange',
       methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      // Temporary diagnostic — DNS+TCP+TLS reachability check against
-      // the Valkey endpoint, for debugging the post-migration timeouts.
-      path: '/api/_valkey-debug',
-      methods: [apigatewayv2.HttpMethod.GET],
       integration,
     });
     api.addRoutes({

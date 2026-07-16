@@ -26,7 +26,7 @@ function requireArg(name, value) {
 
 function usage() {
   print(`
-LLM dev-loop helper
+LLM development helper
 
 Usage:
   npm run llm:loop -- start
@@ -35,7 +35,7 @@ Usage:
   npm run llm:loop -- verify
   npm run llm:loop -- deploy
   npm run llm:loop -- red-team
-  npm run llm:loop -- merge-dev-loop
+  npm run llm:loop -- merge-main
 
 See LLM_DEV_LOOP.md for the full workflow and merge rules.
 `);
@@ -45,12 +45,10 @@ switch (command) {
   case 'start': {
     run('git', ['switch', 'main']);
     run('git', ['pull', '--ff-only']);
-    run('git', ['switch', '-C', 'dev-loop']);
     print(`
-Created or reset local dev-loop from main.
+Local main is synchronized.
 
 Next:
-  git push -u origin dev-loop
   npm run llm:loop -- baseline
 `);
     break;
@@ -64,7 +62,7 @@ Next:
   case 'branch': {
     const branchName = args[0];
     requireArg('branch-name', branchName);
-    run('git', ['switch', 'dev-loop']);
+    run('git', ['switch', 'main']);
     run('git', ['pull', '--ff-only']);
     run('git', ['switch', '-c', branchName]);
     break;
@@ -89,7 +87,7 @@ Next:
     print(`
 Red-team checkpoint
 
-Read _DELETE_DELETE_DELETE_ATTACKING.md, then run the bots that match the branch.
+Read ATTACK_TESTING.md, then run the bots that match the branch.
 
 Required classification:
   blocked
@@ -105,7 +103,7 @@ Common external harness commands live in ms-argus-attack-bots. Use the target:
 `);
     break;
   }
-  case 'merge-dev-loop': {
+  case 'merge-main': {
     run('git', ['status', '--short', '--branch']);
     print(`
 Before merging, confirm:
@@ -115,10 +113,11 @@ Before merging, confirm:
   - the branch has been committed
 
 Then run:
-  git switch dev-loop
+  git push -u origin <your-branch>
+  gh pr create --base main --fill
+  gh pr merge --merge --delete-branch
+  git switch main
   git pull --ff-only
-  git merge --ff-only <your-branch>
-  git push origin dev-loop
 `);
     break;
   }

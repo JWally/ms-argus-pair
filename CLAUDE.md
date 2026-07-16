@@ -154,13 +154,9 @@ invocation. Then update the env var list in this file.
 See `cdk/PROVIDERS.md` for the per-provider registration walkthrough. Brief
 mapping `.env` → CDK context for each:
 
-| `.env` var                       | CDK context flag             |
-| -------------------------------- | ---------------------------- |
-| `OAUTH_GOOGLE_CLIENT_ID`         | `oauthGoogleClientId`        |
-| `OAUTH_GITHUB_CLIENT_ID`         | `oauthGithubClientId`        |
-| `OAUTH_GITHUB_CLIENT_SECRET_ARN` | `oauthGithubClientSecretArn` |
-| `OAUTH_FACEBOOK_APP_ID`          | `oauthFacebookAppId`         |
-| `OAUTH_FACEBOOK_APP_SECRET_ARN`  | `oauthFacebookAppSecretArn`  |
+| `.env` var               | CDK context flag      |
+| ------------------------ | --------------------- |
+| `OAUTH_GOOGLE_CLIENT_ID` | `oauthGoogleClientId` |
 
 Build-time `VITE_*` mirrors live in the same `.env` for the client bundle.
 

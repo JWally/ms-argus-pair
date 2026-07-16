@@ -15,14 +15,6 @@ const merchantApiUrl = app.node.tryGetContext('merchantApiUrl') as string | unde
 const merchantApiCredential = app.node.tryGetContext('merchantApiCredential') as string | undefined;
 const merchantCpi = app.node.tryGetContext('merchantCpi') as string | undefined;
 const oauthGoogleClientId = app.node.tryGetContext('oauthGoogleClientId') as string | undefined;
-const oauthGithubClientId = app.node.tryGetContext('oauthGithubClientId') as string | undefined;
-const oauthGithubClientSecretArn = app.node.tryGetContext('oauthGithubClientSecretArn') as
-  | string
-  | undefined;
-const oauthFacebookAppId = app.node.tryGetContext('oauthFacebookAppId') as string | undefined;
-const oauthFacebookAppSecretArn = app.node.tryGetContext('oauthFacebookAppSecretArn') as
-  | string
-  | undefined;
 const ssoCallbackOrigins = String(app.node.tryGetContext('ssoCallbackOrigins') ?? '')
   .split(',')
   .map((origin) => origin.trim())
@@ -39,10 +31,6 @@ new PairStack(app, 'ms-argus-pair-dev-jw', {
   merchantCpi,
   ssoCallbackOrigins,
   oauthGoogleClientId,
-  oauthGithubClientId,
-  oauthGithubClientSecretArn,
-  oauthFacebookAppId,
-  oauthFacebookAppSecretArn,
   synthesizer: new CliCredentialsStackSynthesizer(),
 });
 

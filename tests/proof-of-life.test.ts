@@ -103,6 +103,17 @@ describe('verifyProofOfLife', () => {
     expect(isProofOfLifeSatisfied(proof)).toBe(false);
   });
 
+  it('rejects retired OAuth providers before provider verification', async () => {
+    const proof = await verifySelectedProof({
+      oauth: { provider: 'github', token: 'unused-access-token' },
+    });
+
+    expect(proof).toEqual({
+      phone_webauthn_attested: false,
+      phone_oauth_error: 'missing_or_malformed',
+    });
+  });
+
   it('falls back to WebAuthn when no OAuth or device-trust proof is present', async () => {
     const proof = await verifySelectedProof({ webauthn: null });
 

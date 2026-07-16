@@ -10,7 +10,7 @@
  * non-extractable), so obtaining the ciphertext is useless without breaking
  * into the worker. Speed-bump under phone-attest, not the lock — but it forces
  * every bot onto the optical-decode path the poison QR already defends. See the
- * pair README + ms-argus-captcha/BLOG_1.md.
+ * pair README + docs/qr-poisoning-research.md.
  *
  * Ephemeral-ephemeral (ECIES): each mint the worker sends its ephemeral public
  * key, the server generates its own ephemeral pair, both derive the same

@@ -4,24 +4,24 @@ Use this loop when an LLM is doing repeated cleanup or hardening work in
 `ms-argus-pair`. The goal is to keep momentum without letting branches collect
 unverified changes.
 
-The durable integration branch is `dev-loop`. Individual cleanup or security
-passes branch from `dev-loop`, deploy and red-team their own work, then merge
-back into `dev-loop` only when evidence is clean.
+Individual cleanup or security passes branch from current `main`, deploy and
+red-team their own work, then merge back through a pull request only when the
+evidence is clean.
 
 ## Loop Contract
 
-0. Create or update `dev-loop`.
+0. Synchronize local `main` with `origin/main`.
 1. Run hygiene metrics and read the pressure points.
 2. Pick one narrow target.
-3. Branch from `dev-loop`.
+3. Branch from `main`.
 4. Do the work with focused tests.
 5. Deploy to `dev-jw` if runtime behavior can change.
 6. Red-team or regression-test the changed trust boundary.
-7. Merge into `dev-loop` only when checks, deploy, and attack evidence are clean.
+7. Merge into `main` only when checks, deploy, and attack evidence are clean.
 8. Repeat from step 1.
 
-Do not merge speculative work into `dev-loop`. If the branch changes behavior,
-`dev-loop` should mean "tested on dev-jw and not known broken."
+Do not merge speculative work into `main`. A runtime branch should be deployed
+to `dev-jw` and have no known regressions before its pull request is merged.
 
 ## Commands
 
@@ -34,35 +34,23 @@ npm run llm:loop -- branch cleanup/<short-target>
 npm run llm:loop -- verify
 npm run llm:loop -- deploy
 npm run llm:loop -- red-team
-npm run llm:loop -- merge-dev-loop
+npm run llm:loop -- merge-main
 ```
 
 `baseline`, `verify`, and `deploy` run real commands. `red-team` prints the
 expected attack-regression checklist because the attack bots live outside this
 repo.
 
-## Step 0: Create Dev-Loop
+## Step 0: Synchronize Main
 
 Start from current `main`:
 
 ```sh
 git switch main
 git pull --ff-only
-git switch -C dev-loop
-git push -u origin dev-loop
 ```
 
-If `dev-loop` already exists, update it intentionally:
-
-```sh
-git fetch origin
-git switch dev-loop
-git merge --ff-only origin/main
-git push origin dev-loop
-```
-
-Use fast-forward merges when possible. If `dev-loop` diverged, stop and inspect
-why before continuing.
+If local `main` cannot fast-forward, stop and inspect why before continuing.
 
 ## Step 1: Baseline Hygiene
 
@@ -106,10 +94,10 @@ Bad targets:
 
 Write the chosen target in the branch name and final summary.
 
-## Step 3: Branch From Dev-Loop
+## Step 3: Branch From Main
 
 ```sh
-git switch dev-loop
+git switch main
 git pull --ff-only
 git switch -c cleanup/<short-target>
 ```
@@ -179,8 +167,8 @@ final summary.
 
 ## Step 7: Red-Team
 
-Use `_DELETE_DELETE_DELETE_ATTACKING.md` as the attack taxonomy. Pick checks that
-match what changed.
+Use `ATTACK_TESTING.md` as the attack taxonomy. Pick checks that match what
+changed.
 
 Run attack/regression bots when the branch touches:
 
@@ -202,7 +190,7 @@ Classify results precisely:
 Do not merge a `server_gate_bypass` until there is a failing regression test and
 a fix.
 
-## Step 8: Merge Back To Dev-Loop
+## Step 8: Merge To Main
 
 Only merge when:
 
@@ -211,29 +199,14 @@ Only merge when:
 - Relevant red-team checks are clean or explicitly classified.
 - The branch summary names any residual risk.
 
-Then:
-
-```sh
-git switch dev-loop
-git pull --ff-only
-git merge --ff-only <branch>
-git push origin dev-loop
-```
-
-If fast-forward fails, stop and inspect. Do not bury conflicts in an automatic
-merge commit unless the user explicitly asks for that.
-
-## When Dev-Loop Goes To Main
-
-Promote `dev-loop` to `main` after one or more complete passes:
+Push the feature branch, open a pull request to `main`, and merge only after the
+checks and live evidence are recorded. Then synchronize the local checkout:
 
 ```sh
 git switch main
 git pull --ff-only
-git merge --ff-only dev-loop
-git push origin main
 ```
 
-After pushing `main`, keep `dev-jw` aligned with `main`. A deployed but
-unmerged experiment is acceptable briefly during investigation; it should not be
-the resting state.
+After merging to `main`, keep `dev-jw` aligned with it. A deployed but unmerged
+experiment is acceptable briefly during investigation; it should not be the
+resting state.

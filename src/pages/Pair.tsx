@@ -7,7 +7,7 @@ import {
   type PhoneSessionInfo,
 } from '../lib/pair';
 import { loadTrustToken } from '../lib/device-trust';
-import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
+import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
 import { isPairSessionTimeout } from '../lib/pair-timeout';
 import { Dialpad } from '../components/Dialpad';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
@@ -152,8 +152,7 @@ export function Pair() {
     setErrorMsg(null);
     try {
       const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
-      const oauthResult =
-        proofMode === 'google' ? await runOAuthProofOfLife('google', info.nonce) : null;
+      const oauthResult = proofMode === 'google' ? await runGoogleProofOfLife(info.nonce) : null;
       if (oauthResult && isOAuthError(oauthResult)) {
         setPhase('ready');
         setErrorMsg(oauthResult.error);

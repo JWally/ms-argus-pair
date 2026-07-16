@@ -14,7 +14,7 @@
  *
  * Run: `npm run test:e2e` (PAIR_HOST overrides the target; default dev-jw).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
@@ -131,7 +131,7 @@ async function startSession(): Promise<SessionStart> {
   const res = await fetch(`${HOST}/api/session/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify({ challengeId: randomUUID() }),
   });
   expect(res.status).toBe(200);
   return res.json() as Promise<SessionStart>;

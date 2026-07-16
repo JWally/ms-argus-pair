@@ -10,7 +10,7 @@ import {
   type SsoValidateResult,
 } from '../lib/pair';
 import { clearTrustToken, loadTrustToken } from '../lib/device-trust';
-import { isOAuthError, PROVIDERS_CONFIGURED, runOAuthProofOfLife } from '../lib/oauth';
+import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
 import { loadSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 export function MerchantValidate() {
@@ -140,7 +140,7 @@ export function MerchantValidate() {
     setError(null);
     try {
       if (mode === 'google') {
-        const oauthResult = await runOAuthProofOfLife('google', nonce);
+        const oauthResult = await runGoogleProofOfLife(nonce);
         if (isOAuthError(oauthResult)) {
           setError(oauthResult.error);
           return;

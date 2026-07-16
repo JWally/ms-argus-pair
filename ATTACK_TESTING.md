@@ -133,4 +133,6 @@ An attack regression pass is done when:
 - Real server bypasses have a failing regression test before the fix.
 - The final result is summarized in plain language with artifact paths.
 
-This file is temporary working guidance. Delete it once the attack-bot workflow is captured in durable project docs and enforced by normal regression jobs.
+This is the durable attack-regression contract for Pair. Keep it aligned with
+the executable bots in `ms-argus-attack-bots` and the server-side invariants in
+this repository.
