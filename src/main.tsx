@@ -5,22 +5,12 @@ import { Splash } from './components/Splash';
 import './fonts.css';
 import './index.css';
 
-// Route-split: each page lands in its own Vite chunk. Phone users
-// hitting /pair/:id download only the Pair chunk + entry. Saves ~150KB
-// minified on the phone-side cold load.
+// Pair and Embed remain route-split. The SSO pages intentionally share one
+// chunk so moving between its stages cannot flash the Suspense fallback.
 //
 // Named exports → default-export shape that React.lazy expects.
 const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));
-const MerchantSso = lazy(() =>
-  import('./pages/MerchantSso').then((m) => ({ default: m.MerchantSso }))
-);
-const SsoChallenge = lazy(() =>
-  import('./pages/SsoChallenge').then((m) => ({ default: m.SsoChallenge }))
-);
-const MerchantValidate = lazy(() =>
-  import('./pages/MerchantValidate').then((m) => ({ default: m.MerchantValidate }))
-);
-const MobileSso = lazy(() => import('./pages/MobileSso').then((m) => ({ default: m.MobileSso })));
+const SsoRoute = lazy(() => import('./pages/SsoRoutes').then((m) => ({ default: m.SsoRoute })));
 const Embed = lazy(() => import('./pages/Embed').then((m) => ({ default: m.Embed })));
 
 const rootElement = document.getElementById('root');
@@ -33,10 +23,10 @@ createRoot(rootElement).render(
         <Routes>
           {/* Marketing moved to ms-argus-www (/captcha). This is the app
               subdomain — no landing at `/`; entry points are the routes below. */}
-          <Route path="/merchant" element={<MerchantSso />} />
-          <Route path="/sso/challenge/:sessionId" element={<SsoChallenge />} />
-          <Route path="/merchant/validate" element={<MerchantValidate />} />
-          <Route path="/sso/mobile" element={<MobileSso />} />
+          <Route path="/merchant" element={<SsoRoute page="merchant" />} />
+          <Route path="/sso/challenge/:sessionId" element={<SsoRoute page="challenge" />} />
+          <Route path="/merchant/validate" element={<SsoRoute page="validate" />} />
+          <Route path="/sso/mobile" element={<SsoRoute page="mobile" />} />
           <Route path="/pair/:roomId" element={<Pair />} />
           <Route path="/embed" element={<Embed />} />
         </Routes>

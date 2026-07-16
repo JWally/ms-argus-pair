@@ -39,7 +39,7 @@ export function MerchantWordmark({ className = '' }: { className?: string }) {
       <span className="merchant-mark" aria-hidden>
         M
       </span>
-      <span>Merchant SSO</span>
+      <span>Demo Site</span>
       <span className="merchant-demo-badge">DEMO</span>
     </div>
   );
