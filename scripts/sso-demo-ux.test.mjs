@@ -16,9 +16,11 @@ const merchant = read('src/pages/MerchantSso.tsx');
 const challenge = read('src/pages/SsoChallenge.tsx');
 const validate = read('src/pages/MerchantValidate.tsx');
 const mobile = read('src/pages/MobileSso.tsx');
+const pairLib = read('src/lib/pair.ts');
 const main = read('src/main.tsx');
 const shell = read('src/components/SsoStatusShell.tsx');
 const brand = read('src/components/Brand.tsx');
+const ssoLegBody = pairLib.match(/async function runSsoLeg[\s\S]*?\n}\n\nexport async function/)?.[0];
 
 assert(
   !validate.includes('nameInput') && !validate.includes('submitSsoClaim'),
@@ -140,6 +142,10 @@ assert(
 assert(
   !shell.includes('setInterval') && !shell.includes('setTimeout'),
   'SSO progress should follow completed stages instead of a fake timed countdown'
+);
+assert(
+  ssoLegBody?.includes('await waitForArgus()') && !ssoLegBody.includes('await getArgus().run'),
+  'SSO scan legs must wait for the signed Argus SDK bootstrap before reading window.argus'
 );
 
 if (process.exitCode) process.exit(process.exitCode);
