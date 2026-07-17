@@ -724,7 +724,8 @@ async function runSsoLeg(
   argusSessionId: string;
   attestation: ArgusAttestation;
 }> {
-  const run = await getArgus().run({
+  const argus = await waitForArgus();
+  const run = await argus.run({
     cpi: integrityCpi(cpi),
     timeoutMs: 30_000,
     attest: {
