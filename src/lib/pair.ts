@@ -48,10 +48,14 @@ import {
   type PhoneStatePayload,
   type SealedVerdictEnvelope,
 } from './verdict-envelope';
+import { awaitWithDeadline } from './client-deadline';
+import { HttpError, jsonFetch } from './json-http';
+import { withSsoClientStage } from './sso-observability';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
 const ATTEST_TTL_SECONDS = 120;
+const ARGUS_BOOTSTRAP_TIMEOUT_MS = 15_000;
 const ARGUS_CPI =
   (import.meta.env.VITE_MERCHANT_CPI as string | undefined) ??
   'argus_cpi_test_UEeqk7Bk7uetxKKDxNmIdB';
@@ -104,59 +108,12 @@ async function waitForArgus(): Promise<ArgusGlobal> {
   // Phone code can execute while that async chain is still in flight. Await the
   // bootstrap's canonical readiness promise so eager scanning starts at the
   // earliest safe moment without racing window.argus initialization.
-  await window.argusBootstrapReady;
+  await awaitWithDeadline(
+    window.argusBootstrapReady ?? Promise.resolve(),
+    ARGUS_BOOTSTRAP_TIMEOUT_MS,
+    'argus_bootstrap'
+  );
   return getArgus();
-}
-
-/** Carries the HTTP status so callers can branch on specific codes. */
-class HttpError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly bodyText: string,
-    public readonly bodyJson: Record<string, unknown> | null,
-    message: string
-  ) {
-    super(message);
-  }
-}
-
-async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
-  const url = `${input}${input.includes('?') ? '&' : '?'}_=${Date.now()}`;
-  const res = await fetch(url, {
-    ...init,
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
-  const ct = res.headers.get('content-type') || '';
-  if (!ct.includes('application/json')) {
-    const snip = (await res.text()).slice(0, 80).replace(/\s+/g, ' ');
-    throw new HttpError(
-      res.status,
-      snip,
-      null,
-      `${init?.method || 'GET'} ${input} → ${res.status} non-JSON: ${snip}`
-    );
-  }
-  if (!res.ok) {
-    const body = await res.text();
-    let parsed: Record<string, unknown> | null = null;
-    try {
-      parsed = JSON.parse(body) as Record<string, unknown>;
-    } catch {
-      /* not JSON despite content-type — leave parsed null */
-    }
-    throw new HttpError(
-      res.status,
-      body,
-      parsed,
-      `${init?.method || 'GET'} ${input} → ${res.status} ${body.slice(0, 200)}`
-    );
-  }
-  return res.json() as Promise<T>;
 }
 
 export interface DesktopAttestedSummary {
@@ -724,20 +681,24 @@ async function runSsoLeg(
   argusSessionId: string;
   attestation: ArgusAttestation;
 }> {
-  const argus = await waitForArgus();
-  const run = await argus.run({
-    cpi: integrityCpi(cpi),
-    timeoutMs: 30_000,
-    attest: {
-      purpose: ATTEST_PURPOSE,
-      ttlSeconds: ATTEST_TTL_SECONDS,
-      payload: { ...payload, cpi },
-    },
+  const stage = typeof payload.role === 'string' ? payload.role : 'unknown';
+  const sessionId = typeof payload.ssoSessionId === 'string' ? payload.ssoSessionId : null;
+  return withSsoClientStage(stage, 'argus_leg', sessionId, async () => {
+    const argus = await waitForArgus();
+    const run = await argus.run({
+      cpi: integrityCpi(cpi),
+      timeoutMs: 30_000,
+      attest: {
+        purpose: ATTEST_PURPOSE,
+        ttlSeconds: ATTEST_TTL_SECONDS,
+        payload: { ...payload, cpi },
+      },
+    });
+    if (!run.attestation) {
+      throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
+    }
+    return { argusSessionId: run.argusSessionId, attestation: run.attestation };
   });
-  if (!run.attestation) {
-    throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
-  }
-  return { argusSessionId: run.argusSessionId, attestation: run.attestation };
 }
 
 export async function startSsoSession(
@@ -746,20 +707,22 @@ export async function startSsoSession(
   merchantBinding?: { challengeId: string; callbackUrl: string }
 ): Promise<SsoStartResult> {
   const leg = await runSsoLeg(cpi, { role: 'merchant-start', merchantSessionId });
-  return jsonFetch<SsoStartResult>(`${API}/sso/start`, {
-    method: 'POST',
-    body: JSON.stringify({
-      merchantSessionId,
-      cpi,
-      ...(merchantBinding
-        ? {
-            merchantChallengeId: merchantBinding.challengeId,
-            merchantCallbackUrl: merchantBinding.callbackUrl,
-          }
-        : {}),
-      ...leg,
-    }),
-  });
+  return withSsoClientStage('merchant-start', 'http_request', null, () =>
+    jsonFetch<SsoStartResult>(`${API}/sso/start`, {
+      method: 'POST',
+      body: JSON.stringify({
+        merchantSessionId,
+        cpi,
+        ...(merchantBinding
+          ? {
+              merchantChallengeId: merchantBinding.challengeId,
+              merchantCallbackUrl: merchantBinding.callbackUrl,
+            }
+          : {}),
+        ...leg,
+      }),
+    })
+  );
 }
 
 export async function submitSsoChallenge(
@@ -768,10 +731,12 @@ export async function submitSsoChallenge(
   cpi: string
 ): Promise<SsoChallengeResult> {
   const leg = await runSsoLeg(cpi, { role: 'argus-challenge', ssoSessionId: sessionId, nonce });
-  return jsonFetch<SsoChallengeResult>(`${API}/sso/${encodeURIComponent(sessionId)}/challenge`, {
-    method: 'POST',
-    body: JSON.stringify(leg),
-  });
+  return withSsoClientStage('argus-challenge', 'http_request', sessionId, () =>
+    jsonFetch<SsoChallengeResult>(`${API}/sso/${encodeURIComponent(sessionId)}/challenge`, {
+      method: 'POST',
+      body: JSON.stringify(leg),
+    })
+  );
 }
 
 export async function validateSsoReturn({
@@ -822,9 +787,8 @@ export async function validateSsoReturn({
       ? (webauthnSettled.value as { id: string }).id
       : null;
 
-  const result = await jsonFetch<SsoValidateResult>(
-    `${API}/sso/${encodeURIComponent(sessionId)}/validate`,
-    {
+  const result = await withSsoClientStage('merchant-validate', 'http_request', sessionId, () =>
+    jsonFetch<SsoValidateResult>(`${API}/sso/${encodeURIComponent(sessionId)}/validate`, {
       method: 'POST',
       body: JSON.stringify({
         returnCode,
@@ -833,7 +797,7 @@ export async function validateSsoReturn({
         ...(!useDeviceTrust && !useOAuth && !useIntegrityOnly ? { webauthn } : {}),
         ...(useOAuth && oauthResult ? { oauth: oauthResult } : {}),
       }),
-    }
+    })
   ).catch((e) => {
     if (e instanceof HttpError && e.status === 403 && e.bodyJson?.verdict === 'failed') {
       return e.bodyJson as unknown as SsoValidateResult;
