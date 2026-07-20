@@ -1,0 +1,48 @@
+name: Live Pair E2E (dev-jw)
+
+on:
+  schedule:
+    - cron: '17 12 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: live-pair-e2e-dev-jw
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  PAIR_HOST: https://captcha-dev-jw.argus.pw
+  PAIR_STACK_NAME: ms-argus-pair-dev-jw
+  PAIR_TABLE_NAME: ${{ vars.PAIR_TABLE_NAME }}
+
+jobs:
+  deployed-infrastructure:
+    name: API Gateway / Lambda / DynamoDB contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Require the Pair E2E AWS role
+        run: |
+          if [ -z "$AWS_ROLE_ARN" ]; then
+            echo '::error::Set the repository Actions variable AWS_ROLE_ARN to a GitHub OIDC role that can access the dev-jw PairSessions table.'
+            exit 1
+          fi
+      - name: Assume the Pair E2E role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Run E2E against dev-jw
+        run: npm run test:e2e

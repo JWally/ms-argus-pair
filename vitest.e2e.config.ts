@@ -10,5 +10,8 @@ export default defineConfig({
     include: ['tests/e2e/**/*.e2e.ts'],
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // Retry at the individual case boundary for transient API/AWS reads. A
+    // deterministic trust-boundary regression still fails all three attempts.
+    retry: 2,
   },
 });
