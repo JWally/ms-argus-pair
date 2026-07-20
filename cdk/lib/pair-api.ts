@@ -57,7 +57,13 @@ import {
   claimArgusValkey,
   type PhoneBundle,
 } from './session-store';
-import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
+import {
+  getViewerIp,
+  jsonResp,
+  noContentResp,
+  originAllowed,
+  parseBody,
+} from './pair-api/shared/http';
 import {
   validateAttestInput,
   validatePairAttestationBody,
@@ -77,7 +83,8 @@ import {
   type OAuthAnnotations,
   type WebAuthnAnnotations,
 } from './pair-api/proof-of-life';
-import { logPhonePerfEvent, proofModeForLog } from './pair-api/phone-observability';
+import { proofModeForLog } from './pair-api/phone-observability';
+import { handleTelemetryRoute } from './pair-api/telemetry-routes';
 import { claimArgusSessionIdDdb } from './pair-api/argus-session-claim';
 import {
   classifyScan,
@@ -412,27 +419,17 @@ const lambdaHandler = async (event: {
     'POST /api/verify',
     'POST /api/pair-token/redeem',
     'POST /api/phone-perf',
+    'POST /api/sso/telemetry',
   ]);
   if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
     return jsonResp(400, { error: 'invalid_session_id' });
   }
   const body = parseBody(event.body);
   if (body === null) return jsonResp(400, { error: 'invalid_body' });
+  const telemetryResponse = handleTelemetryRoute(routeKey, body, event);
+  if (telemetryResponse) return telemetryResponse;
 
   switch (routeKey) {
-    case 'POST /api/phone-perf': {
-      logPhonePerfEvent({
-        body,
-        ip: getViewerIp(event),
-        userAgent: event.headers?.['user-agent'] ?? event.headers?.['User-Agent'],
-      });
-      return {
-        statusCode: 204,
-        headers: { 'Cache-Control': 'no-store' },
-        body: '',
-      };
-    }
-
     case 'POST /api/session/start': {
       // #10: per-IP throttle. Fail OPEN on limiter error — a Valkey/DDB hiccup
       // must not take down all pairing; the cap is abuse-bounding, not a
@@ -1242,11 +1239,7 @@ const lambdaHandler = async (event: {
       // 200 + JSON. Client checks status === 204 to decide whether to
       // keep polling.
       if (s.verdict === 'pending') {
-        return {
-          statusCode: 204,
-          headers: { 'Cache-Control': 'no-store' },
-          body: '',
-        };
+        return noContentResp();
       }
       const annotations =
         (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {};

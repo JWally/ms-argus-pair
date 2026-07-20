@@ -30,7 +30,8 @@ assert(
   'the eager-scan latency contract should remain documented at its call site'
 );
 assert(
-  waitForArgusBody.includes('await window.argusBootstrapReady') &&
+  waitForArgusBody.includes('await awaitWithDeadline(') &&
+    waitForArgusBody.includes('window.argusBootstrapReady') &&
     startPhoneScanBody.includes('await waitForArgus()'),
   'eager scanning must wait for the signed SDK bootstrap instead of racing window.argus'
 );

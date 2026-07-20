@@ -179,6 +179,20 @@ trust or fresh proof, and `.forceauth` requires a fresh passkey/OAuth ceremony.
 The separate `/merchant` route remains the presentation demo and uses the
 HttpOnly approval-cookie redemption endpoint.
 
+Client SSO legs have explicit deadlines: 15 seconds for the Argus bootstrap and
+20 seconds for Pair HTTP requests. Failures are shown as generic retryable
+messages; response bodies remain available only to application code for
+structured handling. Each SSO leg also emits a bounded, best-effort event to
+`POST /api/sso/telemetry`. Search the Pair API log group for
+`[pair] sso_client` and correlate on `session=` when a flow stalls. The HTTP API
+access log records request id, route, status, integration status/error, and
+response length without request bodies or credentials.
+
+An otherwise-clean scan whose only risk is the 35-point isolated-location
+mismatch is allowed through the per-side limit. The combined score must still
+remain below 50, so two such mismatches fail closed; any automation/network
+score or unrecognized reason tag also keeps the original 30-point limit.
+
 ## Repo layout
 
 ```
@@ -248,7 +262,7 @@ built asset, loader SRI, no dev proof-skip leaked into prod bundles, SPA-router
 and phone-entry invariants, QR poison geometry, pair-token semantics, WS
 single-connection, SSO routes/continuity. `test:cdk-hardening` asserts the
 synthesized CloudFront template (frame-deny, HSTS, no error-response SPA
-fallback, exactly one CFF).
+fallback, exactly one CFF) and the bounded HTTP API access-log configuration.
 
 Stacks (stage `dev-jw`; no prod stage configured yet):
 

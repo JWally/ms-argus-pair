@@ -21,6 +21,15 @@ export function jsonResp(statusCode: number, body: unknown) {
   };
 }
 
+/** Build an empty successful response for best-effort telemetry and polling. */
+export function noContentResp() {
+  return {
+    statusCode: 204,
+    headers: { 'Cache-Control': 'no-store' },
+    body: '',
+  };
+}
+
 /**
  * Origin check. Allow when no allowlist is configured (dev) OR when
  * the request Origin matches. Same-origin GET requests in some

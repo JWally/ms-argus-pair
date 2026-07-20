@@ -26,6 +26,7 @@ function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
     country: 'US',
     isMobileNetwork: false,
     isVpn: false,
+    isIsolatedLocationMismatch: false,
     ...overrides,
   };
 }
@@ -77,6 +78,54 @@ describe('projection verdict', () => {
       scan({ individualScore: 0, isPhone: true })
     );
     expect(result).toMatchObject({ verdict: 'failed', reason: 'desktop_score_high' });
+  });
+
+  it('allows the isolated score-35 location mismatch observed on travel networks', () => {
+    const projection: MerchantProjection = {
+      verdict: 'suspect',
+      automation: 0,
+      device_tampering: 35,
+      network_tampering: 0,
+      tags: ['location_mismatch', 'apple_attestation_missing'],
+    };
+    const desktop = classifyScan(projection, 'desktop');
+
+    expect(desktop).toMatchObject({
+      individualScore: 35,
+      isIsolatedLocationMismatch: true,
+    });
+    expect(computeVerdict(desktop!, scan({ isPhone: true }))).toMatchObject({
+      verdict: 'paired',
+      reason: 'paired_desktop_and_phone',
+    });
+  });
+
+  it('keeps score-35 projections fail-closed when another signal is present', () => {
+    const projection: MerchantProjection = {
+      verdict: 'suspect',
+      automation: 0,
+      device_tampering: 35,
+      network_tampering: 0,
+      tags: ['location_mismatch', 'unrecognized_signal'],
+    };
+    const desktop = classifyScan(projection, 'desktop');
+
+    expect(desktop?.isIsolatedLocationMismatch).toBe(false);
+    expect(computeVerdict(desktop!, scan({ isPhone: true }))).toMatchObject({
+      verdict: 'failed',
+      reason: 'desktop_score_high',
+    });
+  });
+
+  it('still rejects two isolated score-35 sides at the total-score boundary', () => {
+    const locationMismatch = scan({
+      individualScore: 35,
+      isIsolatedLocationMismatch: true,
+    });
+    expect(computeVerdict(locationMismatch, { ...locationMismatch, isPhone: true })).toMatchObject({
+      verdict: 'failed',
+      reason: 'total_score_high',
+    });
   });
 
   it('requires fresh created_at timestamps', () => {

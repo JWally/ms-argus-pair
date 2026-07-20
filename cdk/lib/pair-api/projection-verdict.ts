@@ -2,7 +2,19 @@
 // network_tampering) for one side. Total = sum of the two sides' individual
 // scores.
 export const INDIVIDUAL_SCORE_LIMIT = 30;
+const LOCATION_MISMATCH_SCORE = 35;
+const LOCATION_MISMATCH_SCORE_LIMIT = 40;
 const TOTAL_SCORE_LIMIT = 50;
+
+// These tags are diagnostic companions, not independent risk signals. Any
+// unknown or security-bearing tag keeps the ordinary fail-closed threshold.
+const ISOLATED_LOCATION_MISMATCH_TAGS = new Set([
+  'apple_attestation_missing',
+  'apple_attested',
+  'cellular',
+  'incognito',
+  'location_mismatch',
+]);
 
 export const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
 
@@ -49,6 +61,7 @@ export interface ClassifiedScan {
   country: string | null;
   isMobileNetwork: boolean;
   isVpn: boolean;
+  isIsolatedLocationMismatch: boolean;
 }
 
 export interface VerdictResult {
@@ -156,6 +169,24 @@ function networkSignals(p: MerchantProjection): NetworkSignals {
   };
 }
 
+function isIsolatedLocationMismatch(p: MerchantProjection): boolean {
+  const tags = (p.tags ?? []).map((tag) => String(tag).toLowerCase());
+  return (
+    (p.automation ?? 0) === 0 &&
+    (p.device_tampering ?? 0) === LOCATION_MISMATCH_SCORE &&
+    (p.network_tampering ?? 0) === 0 &&
+    tags.includes('location_mismatch') &&
+    tags.every((tag) => ISOLATED_LOCATION_MISMATCH_TAGS.has(tag))
+  );
+}
+
+function isIndividualScoreAllowed(scan: ClassifiedScan): boolean {
+  const limit = scan.isIsolatedLocationMismatch
+    ? LOCATION_MISMATCH_SCORE_LIMIT
+    : INDIVIDUAL_SCORE_LIMIT;
+  return scan.individualScore < limit;
+}
+
 export function classifyScan(p: MerchantProjection | null, side: string): ClassifiedScan | null {
   if (!p) return null;
   const individualScore = Math.max(
@@ -169,6 +200,7 @@ export function classifyScan(p: MerchantProjection | null, side: string): Classi
   const network = networkSignals(p);
   const isPhone = hasPhoneSignals(browser);
   const patAttested = p.pat_attested === true || hasTagLike(p.tags, 'apple_attested');
+  const isolatedLocationMismatch = isIsolatedLocationMismatch(p);
   const ok = (p.verdict ?? 'PASS').toUpperCase() === 'PASS';
 
   const browserName = (browser.details?.browserName as string | null | undefined) ?? null;
@@ -204,6 +236,7 @@ export function classifyScan(p: MerchantProjection | null, side: string): Classi
     country: network.country,
     isMobileNetwork: network.isMobileNetwork,
     isVpn: network.isVpn,
+    isIsolatedLocationMismatch: isolatedLocationMismatch,
   };
 }
 
@@ -211,10 +244,7 @@ export function summarizeDesktopScan(scan: ClassifiedScan | null): DesktopScanSu
   if (!scan) return { clean: false, summary: null };
   return {
     clean:
-      scan.patAttested &&
-      !scan.isProxy &&
-      !scan.isDatacenter &&
-      scan.individualScore < INDIVIDUAL_SCORE_LIMIT,
+      scan.patAttested && !scan.isProxy && !scan.isDatacenter && isIndividualScoreAllowed(scan),
     summary: {
       score: scan.individualScore,
       pat_attested: scan.patAttested,
@@ -267,16 +297,17 @@ export function computeVerdict(desktop: ClassifiedScan, phone: ClassifiedScan): 
     phone_is_mobile_network: phone.isMobileNetwork,
     phone_is_proxy: phone.isProxy,
     phone_is_vpn: phone.isVpn,
+    desktop_isolated_location_mismatch: desktop.isIsolatedLocationMismatch,
+    phone_isolated_location_mismatch: phone.isIsolatedLocationMismatch,
   };
 
   if (desktop.isProxy) return { verdict: 'failed', reason: 'desktop_on_proxy', annotations };
   if (phone.isProxy) return { verdict: 'failed', reason: 'phone_on_proxy', annotations };
 
-  const scoreOk = (s: ClassifiedScan) => s.individualScore < INDIVIDUAL_SCORE_LIMIT;
-  if (!scoreOk(desktop)) {
+  if (!isIndividualScoreAllowed(desktop)) {
     return { verdict: 'failed', reason: 'desktop_score_high', annotations };
   }
-  if (!scoreOk(phone)) {
+  if (!isIndividualScoreAllowed(phone)) {
     return { verdict: 'failed', reason: 'phone_score_high', annotations };
   }
   if (desktop.individualScore + phone.individualScore >= TOTAL_SCORE_LIMIT) {

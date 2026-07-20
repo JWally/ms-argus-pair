@@ -315,6 +315,11 @@ export class PairStack extends cdk.Stack {
       integration,
     });
     api.addRoutes({
+      path: '/api/sso/telemetry',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration,
+    });
+    api.addRoutes({
       path: '/api/session/{id}/desktop-attest',
       methods: [apigatewayv2.HttpMethod.POST],
       integration,
@@ -337,11 +342,26 @@ export class PairStack extends cdk.Stack {
       integration,
     });
 
+    const pairApiAccessLogs = new logs.LogGroup(this, 'PairApiAccessLogs', {
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
     const defaultStage = api.defaultStage?.node.defaultChild as apigatewayv2.CfnStage | undefined;
     if (defaultStage) {
       defaultStage.defaultRouteSettings = {
         throttlingBurstLimit: 50,
         throttlingRateLimit: 20,
+      };
+      defaultStage.accessLogSettings = {
+        destinationArn: pairApiAccessLogs.logGroupArn,
+        format: JSON.stringify({
+          requestId: '$context.requestId',
+          routeKey: '$context.routeKey',
+          status: '$context.status',
+          integrationStatus: '$context.integrationStatus',
+          integrationError: '$context.integrationErrorMessage',
+          responseLength: '$context.responseLength',
+        }),
       };
     }
 

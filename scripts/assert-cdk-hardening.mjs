@@ -113,6 +113,19 @@ try {
   );
   if (diagnosticRoutes.length > 0) fail('temporary Valkey diagnostic route is present');
 
+  const pairAccessLogs = entries.find(
+    ([logicalId, resource]) =>
+      logicalId.startsWith('PairApiAccessLogs') && resource.Type === 'AWS::Logs::LogGroup'
+  );
+  if (!pairAccessLogs) fail('Pair HTTP API access log group is missing');
+  const httpStage = entries.find(([, resource]) => resource.Type === 'AWS::ApiGatewayV2::Stage');
+  const accessLogSettings = httpStage?.[1].Properties?.AccessLogSettings;
+  if (!accessLogSettings?.DestinationArn) fail('Pair HTTP API stage has no access-log destination');
+  const accessLogFormat = String(accessLogSettings?.Format ?? '');
+  for (const field of ['$context.requestId', '$context.routeKey', '$context.status']) {
+    if (!accessLogFormat.includes(field)) fail(`Pair HTTP API access log omits ${field}`);
+  }
+
   if (process.exitCode) process.exit(process.exitCode);
   console.log('[cdk-hardening] ok');
 } finally {
