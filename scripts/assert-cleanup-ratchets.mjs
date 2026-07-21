@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 1262,
+    maxLines: 1146,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
   },
   {
@@ -60,6 +60,21 @@ const ratchets = [
     file: 'cdk/lib/pair-api/sso-challenge-store.ts',
     maxLines: 22,
     why: 'keep SSO challenge persistence as a narrow DynamoDB adapter',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-validation.ts',
+    maxLines: 168,
+    why: 'keep SSO validation orchestration independent from AWS and API Gateway responses',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-validation-proof.ts',
+    maxLines: 102,
+    why: 'keep SSO proof policy isolated from continuity and persistence',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-validation-store.ts',
+    maxLines: 36,
+    why: 'keep SSO validation persistence as a narrow DynamoDB adapter',
   },
   {
     file: 'cdk/lib/pair-api/sso-session.ts',

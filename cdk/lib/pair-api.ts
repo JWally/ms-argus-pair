@@ -93,36 +93,32 @@ import {
   PROJECTION_FRESHNESS_WINDOW_SECONDS,
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
-import { evaluateSsoContinuity, mintReturnCode } from './sso-continuity';
+import { mintReturnCode } from './sso-continuity';
 import { getVerdictSecret } from './pair-api/verdict-token';
 import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
-import { evaluateSsoProofPolicy } from './pair-api/sso-assurance';
 import {
   buildSealedResult,
   deliverSealedVerdict,
   isVerdictReleased,
 } from './pair-api/verdict-disclosure';
 import { fetchProjection, projectionValue } from './pair-api/projection-client';
-import {
-  hashApprovalToken,
-  mintApprovalToken,
-  SSO_APPROVAL_TTL_SECONDS,
-} from './pair-api/sso-approval';
+import { mintApprovalToken, SSO_APPROVAL_TTL_SECONDS } from './pair-api/sso-approval';
 import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
 import { challengeSsoSession } from './pair-api/sso-challenge';
 import { storeSsoChallenge } from './pair-api/sso-challenge-store';
-import { ssoFailureReturn } from './pair-api/sso-merchant-callback';
 import { createSsoMerchantApprovalHandler } from './pair-api/sso-merchant-approval-route';
 import { ssoChallengeResp, ssoStartResp } from './pair-api/sso-route-response';
+import { validateSsoSession } from './pair-api/sso-validation';
+import { verifySsoValidationProof } from './pair-api/sso-validation-proof';
 import { ssoValidationResponse } from './pair-api/sso-validation-response';
+import { storeSsoValidation } from './pair-api/sso-validation-store';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
 import { createServerQrRendererPrimer } from './pair-api/qr-renderer-primer';
 import { createPairApiWarmupMiddleware } from './pair-api/warmup';
-import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 import type { StoredHostPreflight } from './pair-api/host-preflight';
 import { collectHostPreflightEvidence } from './pair-api/host-preflight-evidence';
@@ -410,6 +406,37 @@ function challengeSsoSessionRequest(sessionId: string, body: Record<string, unkn
   });
 }
 
+function validateSsoSessionRequest(
+  sessionId: string,
+  body: Record<string, unknown>,
+  requesterIp: string
+) {
+  return validateSsoSession(sessionId, body, requesterIp, {
+    loadSession: loadSsoSession,
+    validateAttestation: validateSsoAttestation,
+    fetchProjection: async (argusSessionId) =>
+      projectionValue(await fetchProjection(argusSessionId)),
+    verifyProof: (input) =>
+      verifySsoValidationProof(input, {
+        verifyDeviceTrust,
+        verifyProofOfLife: (proof) =>
+          verifyProofOfLife({
+            ...proof,
+            rpId: WEBAUTHN_RP_ID,
+            expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+            allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
+            passkeyStore,
+            deviceTrustFormat: 'device_trust',
+          }),
+      }),
+    mintApprovalToken,
+    mintDeviceTrust,
+    storeValidation: (validation) => storeSsoValidation(validation, { ddb, tableName: TABLE }),
+    nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+    approvalTtlSeconds: SSO_APPROVAL_TTL_SECONDS,
+  });
+}
+
 const redeemSsoApprovalRequest = createSsoApprovalRedemptionHandler({
   ddb,
   tableName: TABLE,
@@ -484,152 +511,9 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/sso/{id}/validate': {
-      const s = await loadSsoSession(sessionId!);
-      if (!s) return jsonResp(404, { error: 'sso_session_not_found' });
-      if (!s.challengeProfile || !s.returnCodeHash || !s.returnCodeExpiresAt) {
-        return jsonResp(409, { error: 'sso_challenge_not_completed' });
-      }
-      if (s.returnCodeConsumedAt) {
-        return jsonResp(409, { error: 'sso_return_code_consumed' });
-      }
-      const returnCode = typeof body.returnCode === 'string' ? body.returnCode : '';
-      if (!returnCode || hashSsoReturnCode(returnCode) !== s.returnCodeHash) {
-        return jsonResp(401, { error: 'sso_return_code_invalid' });
-      }
-      const now = Math.floor(Date.now() / 1000);
-      if (now > s.returnCodeExpiresAt) {
-        return jsonResp(401, { error: 'sso_return_code_expired' });
-      }
-      const checked = validateSsoAttestation(body, {
-        role: 'merchant-validate',
-        sessionId: sessionId!,
-        nonce: s.nonce,
-        returnCode,
-        cpi: s.cpi,
-      });
-      if (!checked.ok) return jsonResp(checked.status, checked.body);
-      const argusSessionId = body.argusSessionId as string;
-      const projection = projectionValue(await fetchProjection(argusSessionId));
-      const scan = classifyScan(projection, 'sso_validate');
-      const phoneCheck = requirePhoneSsoScan(
-        scan,
-        'validate',
-        ssoFailureReturn(sessionId!, s.cpi, s)
-      );
-      if (!phoneCheck.ok) return jsonResp(phoneCheck.status, phoneCheck.body);
-      const validateProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
-      const requesterIp = getViewerIp(event);
-      const deviceTrustToken =
-        typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
-      const oauthInput = body.oauth;
-      const webauthnInput = body.webauthn;
-      let trustResult: DeviceTrustVerifyResult | null = null;
-      let proofOfLife = false;
-      let proofAnnotations: Record<string, unknown> = {};
-
-      if (s.freshProofRequired && deviceTrustToken) {
-        return jsonResp(401, { error: 'fresh_proof_required' });
-      }
-      if (deviceTrustToken) {
-        trustResult = await verifyDeviceTrust(
-          deviceTrustToken,
-          requesterIp,
-          checked.attestation.publicKey
-        );
-        if (!trustResult.ok) {
-          return jsonResp(401, {
-            error: 'device_trust_rejected',
-            reason: trustResult.reason,
-            clearDeviceTrust: true,
-          });
-        }
-      }
-      const proof = await verifyProofOfLife({
-        webauthn: webauthnInput,
-        oauth: oauthInput,
-        expectedNonce: s.nonce,
-        argusPubkey: checked.attestation.publicKey,
-        rpId: WEBAUTHN_RP_ID,
-        expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
-        allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
-        passkeyStore,
-        trustRedeemed: trustResult?.ok === true,
-        deviceTrustFormat: 'device_trust',
-      });
-      proofOfLife = isProofOfLifeSatisfied(proof);
-      proofAnnotations = {
-        ...(proof as unknown as Record<string, unknown>),
-        ...(trustResult?.ok ? { phone_device_trust_redeemed: true } : {}),
-        ...(trustResult?.ipChanged ? { phone_device_trust_ip_changed: true } : {}),
-      };
-
-      const proofDecision = evaluateSsoProofPolicy(
-        {
-          proofRequired: s.proofRequired,
-          freshProofRequired: s.freshProofRequired,
-        },
-        {
-          proofSatisfied: proofOfLife,
-          usedDeviceTrust: trustResult?.ok === true,
-        }
-      );
-      if (!proofDecision.ok) {
-        return jsonResp(401, {
-          error: proofDecision.reason,
-          annotations: proofAnnotations,
-        });
-      }
-      const verdict = evaluateSsoContinuity({
-        start: s.startProfile,
-        challenge: s.challengeProfile,
-        validate: validateProfile,
-      });
-      const approvedAt = verdict.ok ? now : undefined;
-      const approvalToken = verdict.ok ? mintApprovalToken() : null;
-      let nextDeviceTrust: string | null = null;
-      if (verdict.ok && !trustResult?.ok && proofAnnotations.phone_webauthn_attested === true) {
-        nextDeviceTrust = await mintDeviceTrust(
-          checked.attestation.publicKey,
-          checked.attestation.keyId,
-          requesterIp
-        );
-      }
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `SSO#${sessionId}`, SK: 'META' },
-          UpdateExpression:
-            'SET validateProfile = :v, verdict = :verdict, verdictReason = :reason, returnCodeConsumedAt = :now, proofAnnotations = :proof' +
-            (approvedAt
-              ? ', approvedAt = :approvedAt, approvalTokenHash = :approvalTokenHash, expiresAt = :approvalExpiresAt'
-              : ''),
-          ConditionExpression:
-            'attribute_exists(PK) AND attribute_not_exists(returnCodeConsumedAt)',
-          ExpressionAttributeValues: {
-            ':v': validateProfile,
-            ':verdict': verdict.ok ? 'approved' : 'failed',
-            ':reason': verdict.reason,
-            ':now': now,
-            ':proof': proofAnnotations,
-            ...(approvedAt && approvalToken
-              ? {
-                  ':approvedAt': approvedAt,
-                  ':approvalTokenHash': hashApprovalToken(approvalToken),
-                  ':approvalExpiresAt': approvedAt + SSO_APPROVAL_TTL_SECONDS,
-                }
-              : {}),
-          },
-        })
-      );
-      return ssoValidationResponse({
-        verdict,
-        approvalToken,
-        merchantSessionId: s.merchantSessionId,
-        cpi: s.cpi,
-        merchantCallbackUrl: s.merchantCallbackUrl,
-        merchantChallengeId: s.merchantChallengeId,
-        nextDeviceTrust,
-      });
+      const validated = await validateSsoSessionRequest(sessionId!, body, getViewerIp(event));
+      if (!validated.ok) return jsonResp(validated.status, validated.body);
+      return ssoValidationResponse(validated);
     }
 
     case 'POST /api/sso/approval/redeem': {
