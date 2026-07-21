@@ -10,6 +10,7 @@ import path from 'node:path';
 // and the release paths coupled.
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const verdictGate = fs.readFileSync(path.join(root, 'src/lib/desktop-verdict-gate.ts'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
 const verdictPush = fs.readFileSync(path.join(root, 'cdk/lib/pair-api/verdict-push.ts'), 'utf8');
@@ -37,13 +38,15 @@ assert(
 );
 
 assert(
-  pairLib.includes('if (phoneInChallenge && !phoneDone)') &&
-    !pairLib.includes("v.verdict === 'paired' && phoneInChallenge"),
+  pairLib.includes('verdictGate.notePhoneChallenge') &&
+    verdictGate.includes('if (this.phoneInChallenge && !this.phoneDone)') &&
+    !verdictGate.includes("verdict.verdict === 'paired'"),
   'desktop should hold every verdict while the challenge is unfinished'
 );
 
 assert(
-  pairLib.includes("data.kind === 'phone-done'") && pairLib.includes('releaseHeldVerdict()'),
+  pairLib.includes("data.kind === 'phone-done'") &&
+    pairLib.includes('verdictGate.releaseHeldVerdict()'),
   'desktop should release the held verdict on the phone-done message'
 );
 
@@ -55,7 +58,8 @@ assert(
 // Every hold needs a bounded escape: the DONE tap, challenge dismissal,
 // pagehide, the hold cap, and the session-expiry timer.
 assert(
-  pairLib.includes('window.setTimeout(releaseHeldVerdict, 90_000)'),
+  verdictGate.includes('const VERDICT_HOLD_CAP_MS = 90_000') &&
+    verdictGate.includes('this.releaseHeldVerdict'),
   'a held verdict must be capped so a vanished phone cannot wedge the desktop'
 );
 
