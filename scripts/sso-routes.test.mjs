@@ -17,6 +17,7 @@ const pairLib = read('src/lib/pair.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
+const ssoStart = read('cdk/lib/pair-api/sso-start.ts');
 const ssoApproval = read('cdk/lib/pair-api/sso-approval.ts');
 const verifyRoute = read('cdk/lib/pair-api/verdict-verification-route.ts');
 
@@ -52,9 +53,9 @@ for (const routeKey of [
 assert(ssoScan.includes('sso_requires_phone'), 'SSO API must reject non-phone scans');
 assert(ssoScan.includes('scan?.isPhone === true'), 'SSO API must require phone-classified scans');
 assert(
-  api.includes('parseScopedCpi(rawCpi)') &&
-    api.includes('proofRequired') &&
-    api.includes('freshProofRequired'),
+  ssoStart.includes('parseScopedCpi(body.cpi)') &&
+    ssoStart.includes('proofRequired') &&
+    ssoStart.includes('freshProofRequired'),
   'SSO start must snapshot the server-resolved scoped CPI policy'
 );
 assert(

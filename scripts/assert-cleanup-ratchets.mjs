@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 1335,
+    maxLines: 1274,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
   },
   {
@@ -45,6 +45,16 @@ const ratchets = [
     file: 'src/lib/oauth.ts',
     maxLines: 172,
     why: 'keep retired OAuth provider scaffolding out of the browser bundle',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-start.ts',
+    maxLines: 77,
+    why: 'keep SSO start policy independent from AWS and API Gateway response shaping',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-session.ts',
+    maxLines: 25,
+    why: 'keep shared SSO session state explicit and free of route implementation',
   },
   {
     file: 'cdk/lib/pair-api/sso-approval-route.ts',

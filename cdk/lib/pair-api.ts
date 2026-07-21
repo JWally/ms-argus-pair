@@ -93,13 +93,12 @@ import {
   PROJECTION_FRESHNESS_WINDOW_SECONDS,
   summarizeDesktopScan,
 } from './pair-api/projection-verdict';
-import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
+import { evaluateSsoContinuity, mintReturnCode } from './sso-continuity';
 import { getVerdictSecret } from './pair-api/verdict-token';
 import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
-import { parseScopedCpi, requiresProofOfLife } from './pair-api/scoped-cpi';
 import { evaluateSsoProofPolicy } from './pair-api/sso-assurance';
 import {
   buildSealedResult,
@@ -113,7 +112,6 @@ import {
   SSO_APPROVAL_TTL_SECONDS,
 } from './pair-api/sso-approval';
 import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
-import { parseSsoMerchantBinding } from './pair-api/sso-merchant-callback';
 import { ssoFailureReturn } from './pair-api/sso-merchant-callback';
 import { createSsoMerchantApprovalHandler } from './pair-api/sso-merchant-approval-route';
 import { ssoChallengeResp, ssoStartResp } from './pair-api/sso-route-response';
@@ -128,6 +126,8 @@ import type { StoredHostPreflight } from './pair-api/host-preflight';
 import { collectHostPreflightEvidence } from './pair-api/host-preflight-evidence';
 import { prepareAndStoreStartedSession } from './pair-api/session-start-store';
 import { startPairSession } from './pair-api/session-start';
+import { startSsoSession } from './pair-api/sso-start';
+import type { SsoSessionItem } from './pair-api/sso-session';
 import {
   prepareDesktopAttestation,
   type StoredDesktopAttestation,
@@ -294,30 +294,6 @@ interface SessionItem {
   verdictReason?: string;
 }
 
-interface SsoSessionItem {
-  PK: string;
-  SK: 'META';
-  nonce: string;
-  merchantSessionId: string;
-  cpi: string;
-  merchantChallengeId?: string;
-  merchantCallbackUrl?: string;
-  proofRequired: boolean;
-  freshProofRequired: boolean;
-  startProfile: SsoLegProfile;
-  challengeProfile?: SsoLegProfile;
-  validateProfile?: SsoLegProfile;
-  returnCodeHash?: string;
-  returnCodeExpiresAt?: number;
-  returnCodeConsumedAt?: number;
-  approvalTokenHash?: string;
-  approvalRedeemedAt?: number;
-  verdict: 'pending' | 'approved' | 'failed';
-  verdictReason?: string;
-  expiresAt: number;
-  approvedAt?: number;
-}
-
 async function authenticateSessionParticipant(
   event: {
     queryStringParameters?: Record<string, string | undefined>;
@@ -396,6 +372,31 @@ async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null>
   return (res.Item as SsoSessionItem | undefined) ?? null;
 }
 
+function startSsoSessionRequest(body: Record<string, unknown>) {
+  return startSsoSession(body, {
+    callbackOrigins: SSO_CALLBACK_ORIGINS,
+    validateAttestation: (requestBody, cpi) =>
+      validateSsoAttestation(requestBody, { role: 'merchant-start', cpi }),
+    fetchProjection: async (argusSessionId) =>
+      projectionValue(await fetchProjection(argusSessionId)),
+    storeSession: async (session) => {
+      await ddb.send(
+        new PutCommand({
+          TableName: TABLE,
+          Item: session,
+          ConditionExpression: 'attribute_not_exists(PK)',
+        })
+      );
+    },
+    newSessionId: randomUUID,
+    newNonce: () => randomBytes(32).toString('base64url'),
+    newMerchantSessionId: randomUUID,
+    nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+    sessionTtlSeconds: SESSION_TTL_SECONDS,
+    requireProofOfLife: REQUIRE_PROOF_OF_LIFE,
+  });
+}
+
 const redeemSsoApprovalRequest = createSsoApprovalRedemptionHandler({
   ddb,
   tableName: TABLE,
@@ -453,54 +454,9 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/sso/start': {
-      const rawCpi = body.cpi;
-      if (rawCpi === undefined) return jsonResp(400, { error: 'missing_cpi' });
-      const scopedCpi = parseScopedCpi(rawCpi);
-      if (!scopedCpi) return jsonResp(400, { error: 'invalid_cpi' });
-      const checked = validateSsoAttestation(body, {
-        role: 'merchant-start',
-        cpi: scopedCpi.cpi,
-      });
-      if (!checked.ok) return jsonResp(checked.status, checked.body);
-      const argusSessionId = body.argusSessionId as string;
-      const id = randomUUID();
-      const nonce = randomBytes(32).toString('base64url');
-      const merchantSessionId =
-        typeof body.merchantSessionId === 'string' && body.merchantSessionId.length > 0
-          ? body.merchantSessionId.slice(0, 128)
-          : randomUUID();
-      const merchantBinding = parseSsoMerchantBinding(body, SSO_CALLBACK_ORIGINS);
-      if (!merchantBinding.ok) {
-        return jsonResp(400, { error: 'invalid_sso_merchant_binding' });
-      }
-      const failureReturnUrl = ssoFailureReturn(id, scopedCpi.cpi, merchantBinding.value);
-      const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-      const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
-      const projection = projectionValue(await fetchProjection(argusSessionId));
-      const scan = classifyScan(projection, 'sso_start');
-      const phoneCheck = requirePhoneSsoScan(scan, 'start', failureReturnUrl);
-      if (!phoneCheck.ok) return phoneCheck.response;
-      const item: SsoSessionItem = {
-        PK: `SSO#${id}`,
-        SK: 'META',
-        nonce,
-        merchantSessionId,
-        cpi: scopedCpi.cpi,
-        ...merchantBinding.value,
-        proofRequired,
-        freshProofRequired: scopedCpi.freshProofRequired,
-        startProfile: ssoProfileFromScan(argusSessionId, checked.attestation, scan),
-        verdict: 'pending',
-        expiresAt,
-      };
-      await ddb.send(
-        new PutCommand({
-          TableName: TABLE,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(PK)',
-        })
-      );
-      return ssoStartResp(id, item, failureReturnUrl);
+      const started = await startSsoSessionRequest(body);
+      if (!started.ok) return jsonResp(started.status, started.body);
+      return ssoStartResp(started.sessionId, started.session, started.failureReturnUrl);
     }
 
     case 'POST /api/sso/{id}/challenge': {
@@ -519,7 +475,7 @@ const lambdaHandler = async (event: {
       const projection = projectionValue(await fetchProjection(argusSessionId));
       const scan = classifyScan(projection, 'sso_challenge');
       const phoneCheck = requirePhoneSsoScan(scan, 'challenge', failureReturnUrl);
-      if (!phoneCheck.ok) return phoneCheck.response;
+      if (!phoneCheck.ok) return jsonResp(phoneCheck.status, phoneCheck.body);
       const challengeProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
       const code = mintReturnCode({ sessionId: sessionId!, ttlSeconds: 90 });
       await ddb.send(
@@ -572,7 +528,7 @@ const lambdaHandler = async (event: {
         'validate',
         ssoFailureReturn(sessionId!, s.cpi, s)
       );
-      if (!phoneCheck.ok) return phoneCheck.response;
+      if (!phoneCheck.ok) return jsonResp(phoneCheck.status, phoneCheck.body);
       const validateProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
       const requesterIp = getViewerIp(event);
       const deviceTrustToken =

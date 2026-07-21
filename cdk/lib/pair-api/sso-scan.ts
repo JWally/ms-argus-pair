@@ -2,7 +2,6 @@ import { createHash } from 'crypto';
 import type { SsoLegProfile } from '../sso-continuity';
 import type { AttestationInput } from './attestation/envelope';
 import type { ClassifiedScan } from './projection-verdict';
-import { jsonResp } from './shared/http';
 
 export type SsoScanLeg = 'start' | 'challenge' | 'validate';
 
@@ -30,16 +29,28 @@ export function requirePhoneSsoScan(
   scan: ClassifiedScan | null,
   leg: SsoScanLeg,
   failureReturnUrl?: string
-): { ok: true } | { ok: false; response: ReturnType<typeof jsonResp> } {
+):
+  | { ok: true }
+  | {
+      ok: false;
+      status: 403;
+      body: {
+        error: 'sso_requires_phone';
+        leg: SsoScanLeg;
+        message: string;
+        failureReturnUrl?: string;
+      };
+    } {
   if (scan?.isPhone === true) return { ok: true };
   return {
     ok: false,
-    response: jsonResp(403, {
+    status: 403,
+    body: {
       error: 'sso_requires_phone',
       leg,
       message: 'SSO is only available from phone-classified Argus scans.',
       ...(failureReturnUrl ? { failureReturnUrl } : {}),
-    }),
+    },
   };
 }
 

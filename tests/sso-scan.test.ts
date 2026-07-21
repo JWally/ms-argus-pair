@@ -46,8 +46,8 @@ describe('sso scan helpers', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.response.statusCode).toBe(403);
-      expect(JSON.parse(result.response.body)).toMatchObject({
+      expect(result.status).toBe(403);
+      expect(result.body).toMatchObject({
         error: 'sso_requires_phone',
         leg: 'challenge',
         failureReturnUrl: 'https://merchant.example/sso-return?status=failed',
