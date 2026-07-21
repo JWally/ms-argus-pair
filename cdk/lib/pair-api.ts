@@ -47,7 +47,6 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import middy from '@middy/core';
-import type { MiddlewareObj } from '@middy/core';
 import { mintBootstrapToken, openEnvelope, verifyBootstrapToken } from './ws-handler';
 import {
   isValkeySessionsEnabled,
@@ -122,6 +121,8 @@ import { ssoChallengeResp, ssoStartResp } from './pair-api/sso-route-response';
 import { ssoValidationResponse } from './pair-api/sso-validation-response';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
 import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
+import { createServerQrRendererPrimer } from './pair-api/qr-renderer-primer';
+import { createPairApiWarmupMiddleware } from './pair-api/warmup';
 import { hashSsoReturnCode, requirePhoneSsoScan, ssoProfileFromScan } from './pair-api/sso-scan';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 import type { StoredHostPreflight } from './pair-api/host-preflight';
@@ -157,6 +158,7 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
 const WEBAUTHN_EXPECTED_ORIGIN = `https://${WEBAUTHN_RP_ID}`;
 const PAIR_PUBLIC_ORIGIN = process.env.PAIR_PUBLIC_ORIGIN || `https://${WEBAUTHN_RP_ID}`;
+const primeQrRenderer = createServerQrRendererPrimer(PAIR_PUBLIC_ORIGIN);
 const SSO_CALLBACK_ORIGINS = (process.env.SSO_CALLBACK_ORIGINS || '').split(',').filter(Boolean);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -1344,37 +1346,18 @@ const lambdaHandler = async (event: {
 };
 
 // ── Warmer wiring ──────────────────────────────────────────────────────
-// EventBridge fires {source:'serverless-plugin-warmup'} every 5 min (see
-// pair-stack.ts → PairApiWarmupRule). The middleware below detects that,
-// pre-hydrates caches, and short-circuits — the route switch above never
-// sees the synthetic event.
+// The alias heater sends {source:'serverless-plugin-warmup'} every 10 seconds.
+// The middleware pre-hydrates caches and primes the CPU-heavy PNG renderer,
+// then short-circuits so the route switch never sees the synthetic event.
 //
-// @middy/warmup v6 dropped its onWarmup callback (it's now a pure
-// short-circuiter), so we roll a tiny middleware that does both.
-const isWarmingUp = (event: unknown): boolean => {
-  if (!event || typeof event !== 'object') return false;
-  const e = event as { source?: unknown; warmup?: unknown };
-  return e.source === 'serverless-plugin-warmup' || e.warmup === true;
-};
-
-const warmupMiddleware = (): MiddlewareObj<unknown, unknown> => ({
-  before: async (request) => {
-    if (!isWarmingUp(request.event)) return;
-    // Pre-fetch the device-trust secret so the first real /phone-attest
-    // after a cold container start skips the SecretsManager round-trip,
-    // and drive one DDB call to warm the underlying HTTPS pool.
-    try {
-      await Promise.all([
-        getTrustSecret(),
-        ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: '__warmup__', SK: 'META' } })),
-      ]);
-    } catch (e) {
-      console.warn(`[pair] warmup hydration failed: ${(e as Error).message}`);
-    }
-    // Returning a value short-circuits the rest of the chain — the real
-    // lambdaHandler (and the route switch) never runs for warmup pings.
-    request.response = { warmed: true };
-  },
-});
-
-export const handler = middy(lambdaHandler).use(warmupMiddleware());
+export const handler = middy(lambdaHandler).use(
+  createPairApiWarmupMiddleware({
+    hydrateTrustSecret: getTrustSecret,
+    warmStoreConnection: () =>
+      ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: '__warmup__', SK: 'META' } })),
+    primeQrRenderer,
+    now: Date.now,
+    logInfo: console.info,
+    logWarn: console.warn,
+  })
+);
