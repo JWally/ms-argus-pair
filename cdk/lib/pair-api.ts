@@ -93,7 +93,7 @@ import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-rou
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { createSessionResultHandler } from './pair-api/session-result-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
-import { validatePairTokenMintBody } from './pair-api/pair-token-request';
+import { createPairTokenMintHandler } from './pair-api/pair-token-mint-route';
 import {
   buildSealedResult,
   deliverSealedVerdict,
@@ -111,7 +111,7 @@ import { verifySsoValidationProof } from './pair-api/sso-validation-proof';
 import { ssoValidationResponse } from './pair-api/sso-validation-response';
 import { storeSsoValidation } from './pair-api/sso-validation-store';
 import { buildSessionStartRateLimit } from './pair-api/session-start-rate-limit';
-import { sealPairTokenQr, type QrCompression } from './pair-api/sealed-qr';
+import { sealPairTokenQr } from './pair-api/sealed-qr';
 import { createServerQrRendererPrimer } from './pair-api/qr-renderer-primer';
 import { createPairApiWarmupMiddleware } from './pair-api/warmup';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
@@ -454,6 +454,16 @@ const getSessionResult = createSessionResultHandler({
   authenticateParticipant: authenticateSessionParticipant,
   loadSession,
   sealResult: (input) => buildSealedResult({ ddb, tableName: TABLE }, input),
+});
+const mintPairTokenRequest = createPairTokenMintHandler({
+  authenticateParticipant: authenticateSessionParticipant,
+  loadSession,
+  verifyWorkerIntegrity,
+  mintToken: (blob) => mintPairToken(pairTokenStore, blob),
+  sealQr: sealPairTokenQr,
+  pairOrigin: PAIR_PUBLIC_ORIGIN,
+  proofRequiredByDefault: REQUIRE_PROOF_OF_LIFE,
+  logWarn: console.warn,
 });
 
 const lambdaHandler = async (event: {
@@ -1015,51 +1025,7 @@ const lambdaHandler = async (event: {
     // needs a sparse QR, so we no longer pack {wsUrl,e,pt,n} into the fragment.
     // Auth = the same bootstrap wsToken as /result (only a participant mints).
     case 'POST /api/session/{id}/pair-token': {
-      if (!(await authenticateSessionParticipant(event, sessionId!))) {
-        return jsonResp(401, { error: 'pair_token_unauthorized' });
-      }
-      const parsedPairTokenBody = validatePairTokenMintBody(body);
-      if (!parsedPairTokenBody.ok) {
-        return jsonResp(parsedPairTokenBody.status, parsedPairTokenBody.body);
-      }
-      const pb = parsedPairTokenBody.body;
-      const pairSession = await loadSession(sessionId!);
-      if (!pairSession) return jsonResp(404, { error: 'session_not_found' });
-      const workerIntegrity = await verifyWorkerIntegrity({
-        workerUrl: pb.workerUrl,
-        workerSha256: pb.workerSha256,
-      });
-      if (!workerIntegrity.ok) {
-        return jsonResp(workerIntegrity.status, {
-          error: workerIntegrity.error,
-          reason: workerIntegrity.reason,
-        });
-      }
-      const token = await mintPairToken(pairTokenStore, {
-        sessionId: sessionId!,
-        wsUrl: pb.wsUrl,
-        e: pb.e,
-        pt: pb.pt,
-        n: pb.n,
-        proofRequired: pairSession.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
-        freshProofRequired: pairSession.freshProofRequired ?? false,
-      });
-      try {
-        const compression: QrCompression = 'none';
-        return jsonResp(
-          200,
-          await sealPairTokenQr({
-            pairOrigin: PAIR_PUBLIC_ORIGIN,
-            token,
-            suffix: pb.debug === true ? '?debug=true' : '',
-            clientPublicKey: pb.cPub,
-            compression,
-          })
-        );
-      } catch (e) {
-        console.warn(`[pair] pair-token seal failed, refusing plaintext: ${(e as Error).message}`);
-        return jsonResp(400, { error: 'bad_client_pubkey' });
-      }
+      return mintPairTokenRequest(event, sessionId!, body);
     }
 
     // Phone redeems the short token (single-use) for the connection blob.
