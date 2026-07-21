@@ -49,6 +49,7 @@ import {
   type SealedVerdictEnvelope,
 } from './verdict-envelope';
 import { awaitWithDeadline } from './client-deadline';
+import { createDesktopVerdictGate, type DesktopVerdict } from './desktop-verdict-gate';
 import { HttpError, jsonFetch } from './json-http';
 import { withSsoClientStage } from './sso-observability';
 
@@ -204,12 +205,6 @@ interface SessionStartResp {
     desktopToken: string;
     phoneToken: string;
   };
-}
-
-interface VerdictShape {
-  verdict: string;
-  reason: string | null;
-  annotations?: Record<string, unknown>;
 }
 
 interface SealedResultShape {
@@ -398,97 +393,21 @@ export async function startDesktopSession(
     }
   };
 
-  // Result promise — resolved by the server-pushed verdict arriving over
-  // the WS. /phone-attest decrypts the desktopEnvelope it received from
-  // the phone and PostToConnection's the verdict to this socket.
-  let resolveResult!: (v: VerdictShape) => void;
-  let rejectResult!: (e: unknown) => void;
-  const result = new Promise<VerdictShape>((resolve, reject) => {
-    resolveResult = resolve;
-    rejectResult = reject;
-  });
-  // Settle exactly once. The WS verdict push (fast path, from /phone-attest)
-  // and the /result poll (fallback) race — whichever lands first wins; later
-  // calls and the expiry timer become no-ops.
-  //
-  // Reveal gate: when the phone announced it is showing the drawing
-  // challenge (phone-here carries challenge:true), every verdict is HELD —
-  // verification already finished in the background — until the phone relays
-  // `phone-done` (user tapped DONE / left the challenge). Gating both outcomes
-  // keeps the drawing challenge from becoming a pass/fail timing oracle. A cap
-  // plus the session-expiry timer release the hold so a vanished phone cannot
-  // wedge the desktop.
-  let settled = false;
-  let phoneInChallenge = false;
-  let phoneDone = false;
-  let heldVerdict: VerdictShape | null = null;
-  let holdCapTimer: number | null = null;
-  let sealedVerdict: SealedVerdictEnvelope | null = null;
-  let verdictRevealKey: string | null = null;
-  let isOpeningSealedVerdict = false;
-  const settle = (v: VerdictShape) => {
-    if (settled) return;
-    if (phoneInChallenge && !phoneDone) {
-      if (!heldVerdict) {
-        heldVerdict = v;
-        holdCapTimer = window.setTimeout(releaseHeldVerdict, 90_000);
-      }
-      return;
-    }
-    settled = true;
-    resolveResult(v);
-  };
-  const openSealedVerdictIfReady = async () => {
-    if (settled || isOpeningSealedVerdict || !sealedVerdict || !verdictRevealKey) {
-      return;
-    }
-    isOpeningSealedVerdict = true;
-    try {
-      const payload = await openFixedVerdictEnvelope(
-        decodeVerdictRevealKey(verdictRevealKey),
-        session.sessionId,
-        sealedVerdict
-      );
-      if (payload.kind !== 'desktop-verdict') throw new Error('unexpected verdict payload kind');
-      settle({
-        verdict: payload.verdict,
-        reason: payload.reason,
-        annotations: payload.annotations,
-      });
-    } catch (error) {
-      fail(error);
-    } finally {
-      isOpeningSealedVerdict = false;
-    }
-  };
-  const releaseHeldVerdict = () => {
-    phoneDone = true;
-    if (holdCapTimer !== null) {
-      window.clearTimeout(holdCapTimer);
-      holdCapTimer = null;
-    }
-    if (heldVerdict) {
-      const v = heldVerdict;
-      heldVerdict = null;
-      settle(v);
-    }
-  };
-  const fail = (e: unknown) => {
-    if (settled) return;
-    settled = true;
-    rejectResult(e);
-  };
+  // The gate owns exactly-once settlement and withholds both pass and fail
+  // results while the phone's drawing challenge is visible. Keeping this state
+  // outside the transport workflow makes the timing-oracle boundary explicit.
+  const verdictGate = createDesktopVerdictGate(session.sessionId);
   const startResultPoll = (initialDelayMs: number) => {
     if (hasStartedResultPoll) return;
     hasStartedResultPoll = true;
     (async () => {
       let stepMs = initialDelayMs;
-      // heldVerdict also stops the poll — the verdict is already known,
-      // it's just waiting on the phone's DONE tap to be revealed.
-      while (!cancelled && !settled && !heldVerdict) {
+      // A held verdict also stops the poll — the verdict is already known;
+      // the gate is only waiting on the phone's DONE tap to reveal it.
+      while (!cancelled && !verdictGate.isSettled() && !verdictGate.hasHeldVerdict()) {
         await new Promise((r) => window.setTimeout(r, stepMs));
         stepMs = Math.min(10_000, Math.max(2_000, Math.round(stepMs * 1.5)));
-        if (cancelled || settled || heldVerdict) return;
+        if (cancelled || verdictGate.isSettled() || verdictGate.hasHeldVerdict()) return;
         try {
           const res = await fetch(
             `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
@@ -497,12 +416,11 @@ export async function startDesktopSession(
             { headers: { accept: 'application/json' } }
           );
           if (res.status === 200) {
-            const response = (await res.json()) as VerdictShape | SealedResultShape;
+            const response = (await res.json()) as DesktopVerdict | SealedResultShape;
             if ('status' in response && response.status === 'sealed') {
-              sealedVerdict = response.envelope;
-              if (response.revealKey) verdictRevealKey = response.revealKey;
-              await openSealedVerdictIfReady();
-              if (settled || heldVerdict) return;
+              await verdictGate.receiveSealedVerdict(response.envelope);
+              if (response.revealKey) await verdictGate.receiveRevealKey(response.revealKey);
+              if (verdictGate.isSettled() || verdictGate.hasHeldVerdict()) return;
               // Once ciphertext exists, only DONE/release is outstanding.
               // Poll tightly enough that a disconnected desktop does not add
               // the old multi-second backoff after the user's final tap.
@@ -511,7 +429,7 @@ export async function startDesktopSession(
             }
             // Compatibility for sessions decided by a pre-sealing Lambda
             // during a rolling deployment.
-            settle(response as VerdictShape);
+            verdictGate.settle(response as DesktopVerdict);
             return;
           }
           // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
@@ -536,7 +454,7 @@ export async function startDesktopSession(
     if (data.kind === 'phone-here') {
       if (!msg.fromEnvelope) return;
       phoneEnvelope = msg.fromEnvelope;
-      if ((data as { challenge?: boolean }).challenge === true) phoneInChallenge = true;
+      verdictGate.notePhoneChallenge((data as { challenge?: boolean }).challenge === true);
       if (!notifiedPhoneConnected) {
         notifiedPhoneConnected = true;
         events.onPhoneConnected?.();
@@ -549,7 +467,7 @@ export async function startDesktopSession(
       // this — the relay stamps `from` server-side. It can't fabricate a
       // verdict; it only releases one the server already pushed.
       if ((msg as unknown as { from?: string }).from !== 'phone') return;
-      releaseHeldVerdict();
+      verdictGate.releaseHeldVerdict();
     } else if (data.kind === 'verdict') {
       // The WS handler stamps `from` server-side (relayed peer messages
       // get the sender's REAL role from their envelope; the verdict push
@@ -562,19 +480,17 @@ export async function startDesktopSession(
         console.warn(`[pair] dropping verdict with from=${msg.from} (not server)`);
         return;
       }
-      settle({
+      verdictGate.settle({
         verdict: (data as { verdict: string }).verdict,
         reason: (data as { reason: string | null }).reason ?? null,
         annotations: (data as { annotations?: Record<string, unknown> }).annotations,
       });
     } else if (data.kind === 'verdict-sealed') {
       if (msg.from !== 'server') return;
-      sealedVerdict = (data as { envelope: SealedVerdictEnvelope }).envelope;
-      void openSealedVerdictIfReady();
+      void verdictGate.receiveSealedVerdict((data as { envelope: SealedVerdictEnvelope }).envelope);
     } else if (data.kind === 'verdict-release') {
       if (msg.from !== 'server') return;
-      verdictRevealKey = (data as { revealKey: string }).revealKey;
-      void openSealedVerdictIfReady();
+      void verdictGate.receiveRevealKey((data as { revealKey: string }).revealKey);
     }
   });
 
@@ -586,11 +502,11 @@ export async function startDesktopSession(
     if (cancelled) return;
     // A verdict held for the phone's DONE tap is still a verdict — reveal
     // it rather than expiring a session that actually succeeded.
-    if (heldVerdict) {
-      releaseHeldVerdict();
+    if (verdictGate.hasHeldVerdict()) {
+      verdictGate.releaseHeldVerdict();
       return;
     }
-    fail(new Error('session expired'));
+    verdictGate.fail(new Error('session expired'));
   }, expiryMs);
 
   // WS verdict push is the primary path. /result is now only a delayed fallback
@@ -636,7 +552,7 @@ export async function startDesktopSession(
     } catch (e) {
       scanError = e as Error;
       events.onError?.(e);
-      fail(e);
+      verdictGate.fail(e);
     }
   })();
 
@@ -662,10 +578,10 @@ export async function startDesktopSession(
       desktopConn.close();
       if (scanError) {
         // Surface the still-buffered error if nothing else has resolved.
-        fail(scanError);
+        verdictGate.fail(scanError);
       }
     },
-    result,
+    result: verdictGate.result,
     getVerdictToken,
   };
 }

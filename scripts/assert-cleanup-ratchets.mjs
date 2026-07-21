@@ -47,6 +47,16 @@ const ratchets = [
     why: 'keep retired OAuth provider scaffolding out of the browser bundle',
   },
   {
+    file: 'src/lib/pair.ts',
+    maxLines: 1367,
+    why: 'keep desktop workflow state moving into named, tested client modules',
+  },
+  {
+    file: 'src/lib/desktop-verdict-gate.ts',
+    maxLines: 153,
+    why: 'keep verdict reveal timing independent from transport and page orchestration',
+  },
+  {
     file: 'cdk/lib/pair-api/sso-start.ts',
     maxLines: 77,
     why: 'keep SSO start policy independent from AWS and API Gateway response shaping',
