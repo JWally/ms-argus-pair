@@ -38,11 +38,14 @@ Optional environment variables:
 
 ## GitHub Actions
 
-`.github/workflows/live-e2e.yml` runs nightly and on manual dispatch. It intentionally fails with a
-clear setup error until the repository Actions variable `AWS_ROLE_ARN` names a GitHub OIDC role.
-The role needs `dynamodb:ListTables` when `PAIR_TABLE_NAME` is unset, plus
-`dynamodb:GetItem`, `dynamodb:PutItem`, and `dynamodb:DeleteItem` on the dev-jw PairSessions table.
-The projection contract additionally needs:
+`.github/workflows/live-e2e.yml` runs nightly and on manual dispatch. `PairStack` owns its
+repository-scoped GitHub OIDC role in `cdk/lib/live-e2e-role.ts` and exports both values needed by
+Actions. Set repository variable `AWS_ROLE_ARN` from the `LiveE2eRoleArn...` stack output and
+`PAIR_TABLE_NAME` from `LiveE2ePairTableName...`. Keeping the exact table name in Actions avoids
+granting the role account-wide `dynamodb:ListTables` access.
+
+The role grants `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`, and
+`dynamodb:DeleteItem` on the dev-jw PairSessions table. The projection contract additionally needs:
 
 - `ssm:GetParameters` for the four exact `/argus/.../dev-jw` table/key pointers used by the fixture;
 - `apigateway:GET` for the exact dev-jw projection-test API key;
@@ -53,5 +56,6 @@ The projection contract additionally needs:
 That signing permission is intentionally powerful. Keep the GitHub role restricted to this
 repository/environment and never grant it the production signing secret.
 
-Set the optional repository variable `PAIR_TABLE_NAME` to the exact dev-jw table name to remove the
-`ListTables` permission from the role. The public HTTP portion of the suite needs no AWS permission.
+The public HTTP portion of the suite needs no AWS permission. The construct refuses to synthesize
+for any stage other than `dev-jw`; do not broaden that guard or its repository trust for a
+production test target.

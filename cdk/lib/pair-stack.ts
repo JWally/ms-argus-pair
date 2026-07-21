@@ -35,6 +35,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { LiveE2eRole } from './live-e2e-role';
 import { RecurringAliasHeater } from './recurring-alias-heater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +159,13 @@ export class PairStack extends cdk.Stack {
     // → `dev-jw`, matching the SSM path ms-argus-infra exports under
     // /argus/{stage}/*.
     const sharedStage = cdk.Stack.of(this).stackName.replace(/^ms-argus-pair-/, '');
+    if (sharedStage === 'dev-jw') {
+      new LiveE2eRole(this, 'LiveE2e', {
+        stage: sharedStage,
+        repo: 'JWally/ms-argus-pair',
+        pairTable: table,
+      });
+    }
     const vpcId = ssm.StringParameter.valueFromLookup(this, `/argus/${sharedStage}/vpc-id`);
     const sharedVpc = ec2.Vpc.fromLookup(this, 'SharedVpc', { vpcId });
     const sharedLambdaSgId = ssm.StringParameter.valueForStringParameter(
