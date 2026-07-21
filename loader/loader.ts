@@ -15,15 +15,10 @@
  * is a notification, not proof.
  */
 
+import { parseCaptchaMessage, type CaptchaResult } from './message-contract';
+
 // Replaced at build time by esbuild `define`.
 declare const __EMBED_ORIGIN__: string;
-
-type CaptchaResult = {
-  sessionId: string;
-  verdict: string;
-  reason: string | null;
-  token: string | null;
-};
 
 interface RenderOpts {
   cpi?: string;
@@ -104,25 +99,16 @@ interface CaptchaHandle {
     window.addEventListener('resize', sendViewport);
 
     const onMsg = (e: MessageEvent) => {
-      if (e.origin !== origin) return; // only trust the embed origin
-      if (e.source !== iframe.contentWindow) return;
-      const d = e.data as (Record<string, unknown> & { source?: string; event?: string }) | null;
-      if (!d || d.source !== 'argus-captcha') return;
-      if (d.event === 'size' && typeof d.height === 'number') {
+      const message = parseCaptchaMessage(e, origin, iframe.contentWindow);
+      if (!message) return;
+      if (message.sizeHeight !== null) {
         // Follow the widget's reported height (clamped — a compromised embed
         // shouldn't be able to blow the iframe up over the host page).
-        iframe.style.height = Math.min(640, Math.max(260, Math.ceil(d.height))) + 'px';
+        iframe.style.height = Math.min(640, Math.max(260, Math.ceil(message.sizeHeight))) + 'px';
         return;
       }
-      if (typeof opts.onEvent === 'function') opts.onEvent(d);
-      if (d.event === 'result' && onResult) {
-        onResult({
-          sessionId: String(d.sessionId ?? ''),
-          verdict: String(d.verdict ?? ''),
-          reason: (d.reason as string | null) ?? null,
-          token: (d.token as string | null) ?? null,
-        });
-      }
+      if (typeof opts.onEvent === 'function') opts.onEvent(message.payload);
+      if (message.result && onResult) onResult(message.result);
     };
     window.addEventListener('message', onMsg);
 
