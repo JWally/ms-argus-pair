@@ -94,6 +94,7 @@ import { createVerdictVerificationHandler } from './pair-api/verdict-verificatio
 import { createSessionResultHandler } from './pair-api/session-result-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { createPairTokenMintHandler } from './pair-api/pair-token-mint-route';
+import { createDesktopAttestationHandler } from './pair-api/desktop-attestation-route';
 import {
   buildSealedResult,
   deliverSealedVerdict,
@@ -358,6 +359,25 @@ async function loadSession(sessionId: string): Promise<SessionItem | null> {
   return item;
 }
 
+async function storeDesktopAttestation(
+  sessionId: string,
+  stored: StoredDesktopAttestation
+): Promise<boolean> {
+  if (isValkeySessionsEnabled()) {
+    return recordDesktopAttestationValkey(sessionId, stored as unknown as Record<string, unknown>);
+  }
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
+      UpdateExpression: 'SET desktopAttestation = :d',
+      ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(desktopAttestation)',
+      ExpressionAttributeValues: { ':d': stored },
+    })
+  );
+  return true;
+}
+
 async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null> {
   const res = await ddb.send(
     new GetCommand({ TableName: TABLE, Key: { PK: `SSO#${sessionId}`, SK: 'META' } })
@@ -465,6 +485,18 @@ const mintPairTokenRequest = createPairTokenMintHandler({
   proofRequiredByDefault: REQUIRE_PROOF_OF_LIFE,
   logWarn: console.warn,
 });
+const attestDesktop = createDesktopAttestationHandler({
+  loadSession,
+  prepareDesktopAttestation: (body, session) =>
+    prepareDesktopAttestation(body, session, claimArgusSessionId),
+  storeDesktopAttestation,
+  classifyDesktop: async (argusSessionId) => {
+    const projection = projectionValue(await fetchProjection(argusSessionId));
+    const scan = classifyScan(projection, 'desktop');
+    return scan ? summarizeDesktopScan(scan) : null;
+  },
+  logWarn: console.warn,
+});
 
 const lambdaHandler = async (event: {
   routeKey: string;
@@ -554,64 +586,7 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/session/{id}/desktop-attest': {
-      const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(404, { error: 'session_not_found' });
-      if (s.desktopAttestation) return jsonResp(409, { error: 'already_attested' });
-      const prepared = await prepareDesktopAttestation(
-        body,
-        {
-          pairSessionId: sessionId!,
-          nonce: s.nonce,
-          challengeId: s.challengeId,
-          cpi: s.cpi,
-          hostPreflightRequired: s.hostPreflightRequired,
-          hostOrigin: s.hostOrigin,
-        },
-        claimArgusSessionId
-      );
-      if (!prepared.ok) return jsonResp(prepared.status, prepared.body);
-      const stored = prepared.stored;
-      const argusSessionId = stored.argusSessionId;
-      if (isValkeySessionsEnabled()) {
-        const claimed = await recordDesktopAttestationValkey(
-          sessionId!,
-          stored as unknown as Record<string, unknown>
-        );
-        if (!claimed) {
-          // Lost the race — another desktop-attest beat us. Mirrors the
-          // DDB conditional-write rejection.
-          return jsonResp(409, { error: 'already_attested' });
-        }
-      } else {
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-            UpdateExpression: 'SET desktopAttestation = :d',
-            ConditionExpression:
-              'attribute_exists(PK) AND attribute_not_exists(desktopAttestation)',
-            ExpressionAttributeValues: { ':d': stored },
-          })
-        );
-      }
-
-      // Optimistic desktop classification — purely for the "APPROVED, no QR
-      // needed in production" UX hint. Real verdict still runs in
-      // phone-attest after both sides arrive. Best-effort: if the
-      // projection isn't ready yet, the frontend just hides the banner.
-      let summary: Record<string, unknown> | null = null;
-      let clean = false;
-      try {
-        const proj = projectionValue(await fetchProjection(argusSessionId));
-        const c = classifyScan(proj, 'desktop');
-        if (c) {
-          ({ clean, summary } = summarizeDesktopScan(c));
-        }
-      } catch (e) {
-        console.warn(`[pair] desktop-attest optimistic classify failed: ${(e as Error).message}`);
-      }
-
-      return jsonResp(200, { ok: true, clean, summary });
+      return attestDesktop(body, sessionId!);
     }
 
     case 'POST /api/session/{id}/phone-attest': {
