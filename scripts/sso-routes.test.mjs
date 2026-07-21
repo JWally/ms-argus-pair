@@ -18,6 +18,7 @@ const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
 const ssoStart = read('cdk/lib/pair-api/sso-start.ts');
+const ssoChallenge = read('cdk/lib/pair-api/sso-challenge.ts');
 const ssoApproval = read('cdk/lib/pair-api/sso-approval.ts');
 const verifyRoute = read('cdk/lib/pair-api/verdict-verification-route.ts');
 
@@ -57,6 +58,12 @@ assert(
     ssoStart.includes('proofRequired') &&
     ssoStart.includes('freshProofRequired'),
   'SSO start must snapshot the server-resolved scoped CPI policy'
+);
+assert(
+  api.includes('challengeSsoSessionRequest') &&
+    ssoChallenge.includes('requirePhoneSsoScan') &&
+    ssoChallenge.includes('storeChallenge'),
+  'SSO challenge must stay behind its tested application boundary'
 );
 assert(
   verifyRoute.includes("error: 'missing_cpi'") &&

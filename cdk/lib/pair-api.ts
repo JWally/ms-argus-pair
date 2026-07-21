@@ -112,6 +112,8 @@ import {
   SSO_APPROVAL_TTL_SECONDS,
 } from './pair-api/sso-approval';
 import { createSsoApprovalRedemptionHandler } from './pair-api/sso-approval-route';
+import { challengeSsoSession } from './pair-api/sso-challenge';
+import { storeSsoChallenge } from './pair-api/sso-challenge-store';
 import { ssoFailureReturn } from './pair-api/sso-merchant-callback';
 import { createSsoMerchantApprovalHandler } from './pair-api/sso-merchant-approval-route';
 import { ssoChallengeResp, ssoStartResp } from './pair-api/sso-route-response';
@@ -397,6 +399,17 @@ function startSsoSessionRequest(body: Record<string, unknown>) {
   });
 }
 
+function challengeSsoSessionRequest(sessionId: string, body: Record<string, unknown>) {
+  return challengeSsoSession(sessionId, body, {
+    loadSession: loadSsoSession,
+    validateAttestation: validateSsoAttestation,
+    fetchProjection: async (argusSessionId) =>
+      projectionValue(await fetchProjection(argusSessionId)),
+    mintReturnCode: (id) => mintReturnCode({ sessionId: id, ttlSeconds: 90 }),
+    storeChallenge: (challenge) => storeSsoChallenge(challenge, { ddb, tableName: TABLE }),
+  });
+}
+
 const redeemSsoApprovalRequest = createSsoApprovalRedemptionHandler({
   ddb,
   tableName: TABLE,
@@ -460,39 +473,14 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/sso/{id}/challenge': {
-      const s = await loadSsoSession(sessionId!);
-      if (!s) return jsonResp(404, { error: 'sso_session_not_found' });
-      if (s.challengeProfile) return jsonResp(409, { error: 'sso_challenge_already_completed' });
-      const failureReturnUrl = ssoFailureReturn(sessionId!, s.cpi, s);
-      const checked = validateSsoAttestation(body, {
-        role: 'argus-challenge',
-        sessionId: sessionId!,
-        nonce: s.nonce,
-        cpi: s.cpi,
-      });
-      if (!checked.ok) return jsonResp(checked.status, checked.body);
-      const argusSessionId = body.argusSessionId as string;
-      const projection = projectionValue(await fetchProjection(argusSessionId));
-      const scan = classifyScan(projection, 'sso_challenge');
-      const phoneCheck = requirePhoneSsoScan(scan, 'challenge', failureReturnUrl);
-      if (!phoneCheck.ok) return jsonResp(phoneCheck.status, phoneCheck.body);
-      const challengeProfile = ssoProfileFromScan(argusSessionId, checked.attestation, scan);
-      const code = mintReturnCode({ sessionId: sessionId!, ttlSeconds: 90 });
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: { PK: `SSO#${sessionId}`, SK: 'META' },
-          UpdateExpression:
-            'SET challengeProfile = :c, returnCodeHash = :h, returnCodeExpiresAt = :e',
-          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(challengeProfile)',
-          ExpressionAttributeValues: {
-            ':c': challengeProfile,
-            ':h': hashSsoReturnCode(code.value),
-            ':e': Math.floor(code.expiresAt / 1000),
-          },
-        })
+      const challenged = await challengeSsoSessionRequest(sessionId!, body);
+      if (!challenged.ok) return jsonResp(challenged.status, challenged.body);
+      return ssoChallengeResp(
+        challenged.sessionId,
+        challenged.returnCode,
+        challenged.cpi,
+        challenged.hasMerchantCallback
       );
-      return ssoChallengeResp(sessionId!, code.value, s.cpi, !!s.merchantCallbackUrl);
     }
 
     case 'POST /api/sso/{id}/validate': {

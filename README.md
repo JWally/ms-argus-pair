@@ -210,8 +210,8 @@ ms-argus-pair/
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
-│   ├── lib/pair-api.ts               # the API Lambda (all HTTP routes)
-│   ├── lib/pair-api/                 # pair-token, QR PNG, verdict-token, attestation
+│   ├── lib/pair-api.ts               # API Lambda composition root and HTTP router
+│   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
 │   ├── lib/ws-handler.ts             # WS Lambda (whoami / message relay)
 │   ├── lib/session-store.ts, valkey-client.ts, sso-continuity.ts, oauth-providers.ts
 │   ├── lib/captcha-cdn/              # loader CDN stack (S3+CloudFront)
