@@ -3,9 +3,9 @@ import {
   isProjectionFresh,
   projectionAgeSeconds,
   type ClassifiedScan,
-  type MerchantProjection,
 } from './projection-verdict';
-import { fetchProjection } from './projection-client';
+import type { MerchantProjection } from './merchant-projection';
+import { fetchProjection, projectionValue } from './projection-client';
 import { applyBraveSharedWorkerPolicy } from './brave-shared-worker-policy';
 
 export interface HostPreflightEvidenceInput {
@@ -37,14 +37,14 @@ export function buildHostPreflightEvidence(
     host_projection_age_sec: projectionAgeSeconds(input.hostProjection),
   };
   if (input.hostProjection) {
-    evidence.host_automation = input.hostProjection.automation ?? 0;
-    evidence.host_device_tampering = input.hostProjection.device_tampering ?? 0;
-    evidence.host_network_tampering = input.hostProjection.network_tampering ?? 0;
+    evidence.host_automation = input.hostProjection.automation;
+    evidence.host_device_tampering = input.hostProjection.device_tampering;
+    evidence.host_network_tampering = input.hostProjection.network_tampering;
   }
   if (input.iframeProjection) {
-    evidence.iframe_automation = input.iframeProjection.automation ?? 0;
-    evidence.iframe_device_tampering = input.iframeProjection.device_tampering ?? 0;
-    evidence.iframe_network_tampering = input.iframeProjection.network_tampering ?? 0;
+    evidence.iframe_automation = input.iframeProjection.automation;
+    evidence.iframe_device_tampering = input.iframeProjection.device_tampering;
+    evidence.iframe_network_tampering = input.iframeProjection.network_tampering;
   }
   if (input.hostScan) evidence.host_score = input.hostScan.individualScore;
   if (input.iframeScan) evidence.iframe_score = input.iframeScan.individualScore;
@@ -69,10 +69,12 @@ export async function collectHostPreflightEvidence(input: {
   iframeScan: ClassifiedScan | null;
   annotations: Record<string, unknown>;
 }> {
-  const [hostProjection, iframeProjection] = await Promise.all([
+  const [hostProjectionResult, iframeProjectionResult] = await Promise.all([
     input.hostArgusSessionId ? fetchProjection(input.hostArgusSessionId) : Promise.resolve(null),
     fetchProjection(input.iframeArgusSessionId),
   ]);
+  const hostProjection = hostProjectionResult ? projectionValue(hostProjectionResult) : null;
+  const iframeProjection = projectionValue(iframeProjectionResult);
   const hostScan = classifyScan(hostProjection, 'host');
   const rawIframeScan = classifyScan(iframeProjection, 'desktop');
   const observations = buildHostPreflightEvidence({
@@ -88,7 +90,13 @@ export async function collectHostPreflightEvidence(input: {
     iframeProjection,
     iframeScan: rawIframeScan,
   });
-  const annotations = { ...observations, ...policy.annotations };
+  const annotations: Record<string, unknown> = {
+    ...observations,
+    host_projection_failure:
+      hostProjectionResult && !hostProjectionResult.ok ? hostProjectionResult.reason : null,
+    iframe_projection_failure: !iframeProjectionResult.ok ? iframeProjectionResult.reason : null,
+    ...policy.annotations,
+  };
   if (input.hostArgusSessionId) {
     console.info(
       `[pair] host-preflight pairSession=${input.pairSessionId} ` +

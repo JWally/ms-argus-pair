@@ -18,12 +18,13 @@ env:
   AWS_REGION: us-east-1
   AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
   PAIR_HOST: https://captcha-dev-jw.argus.pw
+  MERCHANT_API_URL: https://merchant-dev-jw.argus.pw
   PAIR_STACK_NAME: ms-argus-pair-dev-jw
   PAIR_TABLE_NAME: ${{ vars.PAIR_TABLE_NAME }}
 
 jobs:
   deployed-infrastructure:
-    name: API Gateway / Lambda / DynamoDB contracts
+    name: Pair / merchant API deployed contracts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,7 +37,7 @@ jobs:
       - name: Require the Pair E2E AWS role
         run: |
           if [ -z "$AWS_ROLE_ARN" ]; then
-            echo '::error::Set the repository Actions variable AWS_ROLE_ARN to a GitHub OIDC role that can access the dev-jw PairSessions table.'
+            echo '::error::Set AWS_ROLE_ARN to the dev-jw-only Pair E2E OIDC role documented in tests/e2e/README.md.'
             exit 1
           fi
       - name: Assume the Pair E2E role

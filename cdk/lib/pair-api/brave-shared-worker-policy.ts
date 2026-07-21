@@ -2,8 +2,8 @@ import {
   INDIVIDUAL_SCORE_LIMIT,
   isProjectionFresh,
   type ClassifiedScan,
-  type MerchantProjection,
 } from './projection-verdict';
+import type { MerchantProjection } from './merchant-projection';
 
 export interface BraveSharedWorkerPolicyInput {
   hostProjection: MerchantProjection | null;
@@ -21,9 +21,9 @@ function hasSafeScores(iframeProjection: MerchantProjection): boolean {
   const iframeEvidence = iframeProjection.worker_scope_evidence;
   if (!iframeEvidence) return false;
   return (
-    (iframeProjection.device_tampering ?? 0) >= INDIVIDUAL_SCORE_LIMIT &&
-    (iframeProjection.automation ?? 0) < INDIVIDUAL_SCORE_LIMIT &&
-    (iframeProjection.network_tampering ?? 0) < INDIVIDUAL_SCORE_LIMIT &&
+    iframeProjection.device_tampering >= INDIVIDUAL_SCORE_LIMIT &&
+    iframeProjection.automation < INDIVIDUAL_SCORE_LIMIT &&
+    iframeProjection.network_tampering < INDIVIDUAL_SCORE_LIMIT &&
     iframeEvidence.device_tampering_without_worker < INDIVIDUAL_SCORE_LIMIT
   );
 }
@@ -59,15 +59,14 @@ export function applyBraveSharedWorkerPolicy(
 
   const iframeEvidence = input.iframeProjection.worker_scope_evidence!;
   const effectiveScore = Math.max(
-    input.iframeProjection.automation ?? 0,
+    input.iframeProjection.automation,
     iframeEvidence.device_tampering_without_worker,
-    input.iframeProjection.network_tampering ?? 0
+    input.iframeProjection.network_tampering
   );
   return {
     effectiveIframeScan: {
       ...input.iframeScan,
       individualScore: effectiveScore,
-      ok: effectiveScore < INDIVIDUAL_SCORE_LIMIT,
     },
     annotations: {
       brave_shared_worker_adjusted: true,

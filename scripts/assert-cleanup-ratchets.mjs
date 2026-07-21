@@ -3,8 +3,38 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 1380,
+    maxLines: 1262,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
+  },
+  {
+    file: 'cdk/lib/pair-api/session-start.ts',
+    maxLines: 116,
+    why: 'keep the session-start application flow independent from AWS and route multiplexing',
+  },
+  {
+    file: 'cdk/lib/pair-api/session-start-store.ts',
+    maxLines: 92,
+    why: 'keep session-start persistence separate from request policy and response shaping',
+  },
+  {
+    file: 'cdk/lib/pair-api/merchant-projection.ts',
+    maxLines: 39,
+    why: 'keep the current merchant projection model explicit and transport-free',
+  },
+  {
+    file: 'cdk/lib/pair-api/projection-contract.ts',
+    maxLines: 91,
+    why: 'keep API wire validation separate from projection policy and transport',
+  },
+  {
+    file: 'cdk/lib/pair-api/projection-client.ts',
+    maxLines: 125,
+    why: 'keep the merchant HTTP adapter narrow and dependency-injectable',
+  },
+  {
+    file: 'cdk/lib/pair-api/projection-verdict.ts',
+    maxLines: 334,
+    why: 'keep projection policy from absorbing transport and wire validation',
   },
   {
     file: 'cdk/lib/oauth-providers.ts',
@@ -15,6 +45,26 @@ const ratchets = [
     file: 'src/lib/oauth.ts',
     maxLines: 172,
     why: 'keep retired OAuth provider scaffolding out of the browser bundle',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-start.ts',
+    maxLines: 77,
+    why: 'keep SSO start policy independent from AWS and API Gateway response shaping',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-challenge.ts',
+    maxLines: 84,
+    why: 'keep SSO challenge policy independent from AWS and API Gateway response shaping',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-challenge-store.ts',
+    maxLines: 22,
+    why: 'keep SSO challenge persistence as a narrow DynamoDB adapter',
+  },
+  {
+    file: 'cdk/lib/pair-api/sso-session.ts',
+    maxLines: 25,
+    why: 'keep shared SSO session state explicit and free of route implementation',
   },
   {
     file: 'cdk/lib/pair-api/sso-approval-route.ts',

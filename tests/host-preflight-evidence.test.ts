@@ -3,7 +3,9 @@ import {
   buildHostPreflightEvidence,
   type HostPreflightEvidenceInput,
 } from '../cdk/lib/pair-api/host-preflight-evidence.ts';
-import type { ClassifiedScan, MerchantProjection } from '../cdk/lib/pair-api/projection-verdict.ts';
+import type { ClassifiedScan } from '../cdk/lib/pair-api/projection-verdict.ts';
+import type { MerchantProjection } from '../cdk/lib/pair-api/merchant-projection.ts';
+import { merchantProjection } from './fixtures/merchant-projection.ts';
 
 function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
   return {
@@ -12,7 +14,6 @@ function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
     isDatacenter: false,
     isProxy: false,
     patAttested: false,
-    ok: true,
     browserName: 'Chrome',
     browserVersion: '126',
     os: 'Linux',
@@ -23,19 +24,18 @@ function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
     country: 'US',
     isMobileNetwork: false,
     isVpn: false,
+    isIsolatedLocationMismatch: false,
     ...overrides,
   };
 }
 
 function projection(overrides: Partial<MerchantProjection> = {}): MerchantProjection {
-  return {
-    created_at: Date.now(),
-    verdict: 'PASS',
+  return merchantProjection({
     automation: 1,
     device_tampering: 2,
     network_tampering: 3,
     ...overrides,
-  };
+  });
 }
 
 describe('buildHostPreflightEvidence', () => {
