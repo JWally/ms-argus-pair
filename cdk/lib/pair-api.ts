@@ -27,8 +27,8 @@
  *     session+nonce as the desktop's attestation, and emits a verdict.
  *
  *   GET /api/session/{id}/result
- *     → { verdict, reason }
- *     Polled by the desktop to detect when the phone has completed pairing.
+ *     → 204 while pending; otherwise { status: 'sealed', envelope, revealKey? }
+ *     Authenticated desktop fallback when WebSocket result delivery is missed.
  *
  * Envelope verification follows device-attestation.md from the SDK repo:
  *   1. base64url-decode envelope, parse JSON, check v === 1
@@ -56,13 +56,7 @@ import {
   claimArgusValkey,
   type PhoneBundle,
 } from './session-store';
-import {
-  getViewerIp,
-  jsonResp,
-  noContentResp,
-  originAllowed,
-  parseBody,
-} from './pair-api/shared/http';
+import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
 import {
   validateAttestInput,
   validatePairAttestationBody,
@@ -97,6 +91,7 @@ import { mintReturnCode } from './sso-continuity';
 import { getVerdictSecret } from './pair-api/verdict-token';
 import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
+import { createSessionResultHandler } from './pair-api/session-result-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
 import {
@@ -454,6 +449,11 @@ const mintVerdictTokenRequest = createVerdictTokenMintHandler({
   isReleased: (sessionId, decidedAt, now) =>
     isVerdictReleased({ ddb, tableName: TABLE }, sessionId, decidedAt, now),
   getSecret: getVerdictSecret,
+});
+const getSessionResult = createSessionResultHandler({
+  authenticateParticipant: authenticateSessionParticipant,
+  loadSession,
+  sealResult: (input) => buildSealedResult({ ddb, tableName: TABLE }, input),
 });
 
 const lambdaHandler = async (event: {
@@ -1007,43 +1007,7 @@ const lambdaHandler = async (event: {
     }
 
     case 'GET /api/session/{id}/result': {
-      // #10: authenticate. The verdict (and its annotations) used to be
-      // readable by anyone who knew the sessionId. Require a valid bootstrap
-      // token for THIS session — either role, since both the desktop and the
-      // phone are legitimate session participants. The token is the same HMAC
-      // wsToken minted at /session/start (desktop holds desktopToken; the
-      // phone holds phoneToken from the QR hash). 5-min TTL matches the
-      // session TTL, so it covers the whole polling window.
-      if (!(await authenticateSessionParticipant(event, sessionId!))) {
-        return jsonResp(401, { error: 'result_unauthorized' });
-      }
-      const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(410, { error: 'session_expired' });
-      // 204 No Content while still pending — saves polling clients a few
-      // bytes per tick and is semantically correct. Real verdicts return
-      // 200 + JSON. Client checks status === 204 to decide whether to
-      // keep polling.
-      if (s.verdict === 'pending') {
-        return noContentResp();
-      }
-      const annotations =
-        (s as unknown as { annotations?: Record<string, unknown> }).annotations ?? {};
-      const decidedAt = s.phoneAttestation?.receivedAt ?? Math.floor(Date.now() / 1000);
-      return jsonResp(
-        200,
-        await buildSealedResult(
-          { ddb, tableName: TABLE },
-          {
-            sessionId: sessionId!,
-            verdict: s.verdict,
-            reason: s.verdictReason ?? null,
-            annotations,
-            nextDeviceTrust: null,
-            decidedAt,
-            now: Math.floor(Date.now() / 1000),
-          }
-        )
-      );
+      return getSessionResult(event, sessionId!);
     }
 
     // ── Short pairing token: the sparse QR carries /p/<token>, phone redeems ─

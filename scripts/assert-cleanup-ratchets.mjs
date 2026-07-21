@@ -3,8 +3,13 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 1146,
+    maxLines: 1110,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
+  },
+  {
+    file: 'cdk/lib/pair-api/session-result-route.ts',
+    maxLines: 57,
+    why: 'keep authenticated verdict polling separate from route multiplexing and persistence',
   },
   {
     file: 'cdk/lib/pair-api/session-start.ts',
