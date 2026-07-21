@@ -3,15 +3,12 @@ import {
   applyBraveSharedWorkerPolicy,
   type BraveSharedWorkerPolicyInput,
 } from '../cdk/lib/pair-api/brave-shared-worker-policy.ts';
-import type { ClassifiedScan, MerchantProjection } from '../cdk/lib/pair-api/projection-verdict.ts';
+import type { ClassifiedScan } from '../cdk/lib/pair-api/projection-verdict.ts';
+import type { MerchantProjection } from '../cdk/lib/pair-api/merchant-projection.ts';
+import { merchantProjection } from './fixtures/merchant-projection.ts';
 
 function projection(overrides: Partial<MerchantProjection> = {}): MerchantProjection {
-  return {
-    automation: 0,
-    device_tampering: 0,
-    network_tampering: 0,
-    verdict: 'clean',
-    created_at: Date.now(),
+  return merchantProjection({
     worker_scope_evidence: {
       all_scopes_consistent: true,
       main_web_consensus_id: 'consensus-1',
@@ -20,7 +17,7 @@ function projection(overrides: Partial<MerchantProjection> = {}): MerchantProjec
       device_tampering_without_worker: 0,
     },
     ...overrides,
-  };
+  });
 }
 
 function scan(individualScore: number, overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
@@ -30,7 +27,6 @@ function scan(individualScore: number, overrides: Partial<ClassifiedScan> = {}):
     isDatacenter: false,
     isProxy: false,
     patAttested: false,
-    ok: individualScore < 30,
     browserName: 'Chrome',
     browserVersion: '148 Brave',
     os: 'Linux',
@@ -41,6 +37,7 @@ function scan(individualScore: number, overrides: Partial<ClassifiedScan> = {}):
     country: 'US',
     isMobileNetwork: false,
     isVpn: false,
+    isIsolatedLocationMismatch: false,
     ...overrides,
   };
 }
@@ -61,7 +58,7 @@ function eligibleInput(): BraveSharedWorkerPolicyInput {
         device_tampering_without_worker: 0,
       },
     }),
-    iframeScan: scan(100, { ok: false }),
+    iframeScan: scan(100),
   };
 }
 
@@ -74,7 +71,6 @@ describe('applyBraveSharedWorkerPolicy', () => {
 
     expect(result.effectiveIframeScan).toMatchObject({
       individualScore: 20,
-      ok: true,
     });
     expect(result.annotations).toMatchObject({
       brave_shared_worker_adjusted: true,

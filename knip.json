@@ -1,7 +1,13 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "entry": ["src/phone-main.tsx", "cdk/bin/app.ts", "cdk/lib/pair-api.ts", "cdk/lib/ws-handler.ts"],
-  "project": ["src/**/*.{ts,tsx}", "cdk/**/*.ts"],
+  "entry": [
+    "src/phone-main.tsx",
+    "cdk/bin/app.ts",
+    "cdk/lib/pair-api.ts",
+    "cdk/lib/ws-handler.ts",
+    "tests/e2e/**/*.e2e.ts"
+  ],
+  "project": ["src/**/*.{ts,tsx}", "cdk/**/*.ts", "tests/e2e/**/*.ts"],
   "ignoreExportsUsedInFile": true,
   "ignoreBinaries": []
 }

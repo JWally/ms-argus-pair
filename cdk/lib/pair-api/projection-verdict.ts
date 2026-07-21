@@ -1,3 +1,5 @@
+import type { MerchantProjection } from './merchant-projection';
+
 // Verdict thresholds (per spec). Individual = max(automation, device_tampering,
 // network_tampering) for one side. Total = sum of the two sides' individual
 // scores.
@@ -20,37 +22,12 @@ export const PROJECTION_FRESHNESS_WINDOW_SECONDS = 180;
 
 type PairVerdict = 'paired' | 'failed';
 
-export interface MerchantProjection {
-  automation?: number;
-  device_tampering?: number;
-  network_tampering?: number;
-  /** Epoch ms; null on legacy records. From ms-argus-api MerchantSafeResponse. */
-  created_at?: number | null;
-  verdict?: string;
-  identification?: {
-    browserDetails?: {
-      device?: string | null;
-      os?: string | null;
-    };
-  };
-  tags?: string[];
-  pat_attested?: boolean;
-  worker_scope_evidence?: {
-    all_scopes_consistent: boolean;
-    main_web_consensus_id: string | null;
-    shared_partition_candidate: boolean;
-    brave_detected: boolean;
-    device_tampering_without_worker: number;
-  } | null;
-}
-
 export interface ClassifiedScan {
   individualScore: number;
   isPhone: boolean;
   isDatacenter: boolean;
   isProxy: boolean;
   patAttested: boolean;
-  ok: boolean;
   browserName: string | null;
   browserVersion: string | null;
   os: string | null;
@@ -76,10 +53,8 @@ export interface DesktopScanSummary {
 }
 
 interface BrowserSignals {
-  details: Record<string, unknown> | undefined;
+  details: MerchantProjection['identification']['browserDetails'];
   deviceLabel: string;
-  deviceType: string;
-  platform: string;
   os: string;
   ua: string;
 }
@@ -95,7 +70,7 @@ interface NetworkSignals {
 }
 
 export function projectionAgeSeconds(p: MerchantProjection | null): number | null {
-  if (!p || typeof p.created_at !== 'number') return null;
+  if (!p) return null;
   return Math.round((Date.now() - p.created_at) / 1000);
 }
 
@@ -105,9 +80,8 @@ export function isProjectionFresh(p: MerchantProjection | null): boolean {
   return age >= -PROJECTION_FRESHNESS_WINDOW_SECONDS && age <= PROJECTION_FRESHNESS_WINDOW_SECONDS;
 }
 
-/** Lowercased tag check, defensive against missing/empty tags array. */
-function hasTagLike(tags: string[] | undefined, ...patterns: string[]): boolean {
-  if (!Array.isArray(tags) || tags.length === 0) return false;
+function hasTagLike(tags: string[], ...patterns: string[]): boolean {
+  if (tags.length === 0) return false;
   const lc = tags.map((t) => String(t).toLowerCase());
   return patterns.some((p) => {
     const needle = p.toLowerCase();
@@ -116,65 +90,46 @@ function hasTagLike(tags: string[] | undefined, ...patterns: string[]): boolean 
 }
 
 function browserSignals(p: MerchantProjection): BrowserSignals {
-  const projAny = p as unknown as Record<string, unknown>;
-  const details = (projAny.identification as Record<string, unknown> | undefined)
-    ?.browserDetails as Record<string, unknown> | undefined;
+  const details = p.identification.browserDetails;
   return {
     details,
     deviceLabel: String(details?.device ?? '').toLowerCase(),
-    deviceType: String(details?.deviceType ?? '').toLowerCase(),
-    platform: String(details?.platform ?? '').toLowerCase(),
     os: String(details?.os ?? '').toLowerCase(),
     ua: String(details?.userAgent ?? ''),
   };
 }
 
 function hasPhoneSignals(signals: BrowserSignals): boolean {
-  const phoneSignals = [signals.deviceLabel, signals.deviceType, signals.platform, signals.os].some(
-    (v) => v === 'mobile' || v === 'tablet' || v === 'phone'
+  const phoneSignals = [signals.deviceLabel, signals.os].some(
+    (value) => value === 'mobile' || value === 'tablet' || value === 'phone'
   );
   const phoneOsRe = /\b(ios|ipados|android|iphone|ipod)\b/i;
   return (
-    phoneSignals ||
-    phoneOsRe.test(signals.os) ||
-    phoneOsRe.test(signals.platform) ||
-    /Mobile|Android|iPhone|iPad|iPod/.test(signals.ua)
+    phoneSignals || phoneOsRe.test(signals.os) || /Mobile|Android|iPhone|iPad|iPod/.test(signals.ua)
   );
 }
 
 function networkSignals(p: MerchantProjection): NetworkSignals {
-  const projAny = p as unknown as Record<string, unknown>;
-  const ipInfo = projAny.ipInfo as
-    | {
-        asn?: { organization?: string | null };
-        datacenter?: { result?: boolean };
-        mobile?: { result?: boolean };
-        vpn?: { result?: boolean };
-        hosting?: { result?: boolean };
-      }
-    | undefined;
-  const ipLocation = projAny.ipLocation as
-    | { city?: string | null; country?: string | null }
-    | undefined;
+  const ipInfo = p.ipInfo;
+  const ipLocation = p.ipLocation;
   return {
-    asnName: ipInfo?.asn?.organization ?? null,
-    city: ipLocation?.city ?? null,
-    country: ipLocation?.country ?? null,
-    isProxy: hasTagLike(p.tags, 'proxy') || ipInfo?.hosting?.result === true,
+    asnName: ipInfo.asn.organization,
+    city: ipLocation.city,
+    country: ipLocation.country,
+    isProxy: hasTagLike(p.tags, 'proxy') || ipInfo.hosting.result,
     isDatacenter:
-      hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn') ||
-      ipInfo?.datacenter?.result === true,
-    isMobileNetwork: ipInfo?.mobile?.result === true,
-    isVpn: ipInfo?.vpn?.result === true,
+      hasTagLike(p.tags, 'datacenter', 'hyperscaler', 'dc_asn') || ipInfo.datacenter.result,
+    isMobileNetwork: ipInfo.mobile.result,
+    isVpn: ipInfo.vpn.result,
   };
 }
 
 function isIsolatedLocationMismatch(p: MerchantProjection): boolean {
-  const tags = (p.tags ?? []).map((tag) => String(tag).toLowerCase());
+  const tags = p.tags.map((tag) => tag.toLowerCase());
   return (
-    (p.automation ?? 0) === 0 &&
-    (p.device_tampering ?? 0) === LOCATION_MISMATCH_SCORE &&
-    (p.network_tampering ?? 0) === 0 &&
+    p.automation === 0 &&
+    p.device_tampering === LOCATION_MISMATCH_SCORE &&
+    p.network_tampering === 0 &&
     tags.includes('location_mismatch') &&
     tags.every((tag) => ISOLATED_LOCATION_MISMATCH_TAGS.has(tag))
   );
@@ -189,34 +144,25 @@ function isIndividualScoreAllowed(scan: ClassifiedScan): boolean {
 
 export function classifyScan(p: MerchantProjection | null, side: string): ClassifiedScan | null {
   if (!p) return null;
-  const individualScore = Math.max(
-    p.automation ?? 0,
-    p.device_tampering ?? 0,
-    p.network_tampering ?? 0
-  );
+  const individualScore = Math.max(p.automation, p.device_tampering, p.network_tampering);
 
-  const projAny = p as unknown as Record<string, unknown>;
   const browser = browserSignals(p);
   const network = networkSignals(p);
   const isPhone = hasPhoneSignals(browser);
-  const patAttested = p.pat_attested === true || hasTagLike(p.tags, 'apple_attested');
+  const patAttested = hasTagLike(p.tags, 'apple_attested');
   const isolatedLocationMismatch = isIsolatedLocationMismatch(p);
-  const ok = (p.verdict ?? 'PASS').toUpperCase() === 'PASS';
 
-  const browserName = (browser.details?.browserName as string | null | undefined) ?? null;
-  const browserVersion = (browser.details?.browserVersion as string | null | undefined) ?? null;
-  const osLabel = (browser.details?.os as string | null | undefined) ?? null;
-  const ip = (projAny.ip as string | null | undefined) ?? null;
+  const browserName = browser.details.browserName;
+  const browserVersion = browser.details.browserVersion;
+  const osLabel = browser.details.os;
 
   console.log(
     `[pair] classifyScan side=${side} score=${individualScore} isPhone=${isPhone} isProxy=${network.isProxy} isDC=${network.isDatacenter} pat=${patAttested} verdict=${p.verdict} ` +
       `device=${JSON.stringify({
         deviceLabel: browser.deviceLabel,
-        deviceType: browser.deviceType,
-        platform: browser.platform,
         os: browser.os,
         ua: browser.ua.slice(0, 80),
-      })} tags=${JSON.stringify(p.tags ?? null)}`
+      })} tags=${JSON.stringify(p.tags)}`
   );
 
   return {
@@ -225,11 +171,10 @@ export function classifyScan(p: MerchantProjection | null, side: string): Classi
     isDatacenter: network.isDatacenter,
     isProxy: network.isProxy,
     patAttested,
-    ok,
     browserName,
     browserVersion,
     os: osLabel,
-    ip,
+    ip: p.ip,
     ua: browser.ua || null,
     asnName: network.asnName,
     city: network.city,

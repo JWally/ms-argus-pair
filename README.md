@@ -140,9 +140,10 @@ Key mechanics:
 - **Attestation + verdict.** Each side runs the Argus integrity SDK
   (`argus.run`, purpose `argus-pair-v1`); the server fetches scan projections
   from the merchant API and scores them (individual ≤ 30, total ≤ 50, PAT
-  floor 70). Missing or stale projections fail **closed**. Proof-of-life is
-  required: silent device-trust redeem (12h IndexedDB token) → WebAuthn →
-  Google OAuth.
+  floor 70). The HTTP adapter validates the single current merchant projection
+  shape before policy reads it; malformed, unsupported, missing, or stale
+  projections fail **closed**. Proof-of-life is required: silent device-trust
+  redeem (12h IndexedDB token) → WebAuthn → Google OAuth.
 - **Desktop trusts only the server.** The verdict must arrive `from:'server'`
   (WS push or authenticated `/result` poll) — a phone-side forgery via the
   relay is ignored.
@@ -263,6 +264,12 @@ and phone-entry invariants, QR poison geometry, pair-token semantics, WS
 single-connection, SSO routes/continuity. `test:cdk-hardening` asserts the
 synthesized CloudFront template (frame-deny, HSTS, no error-response SPA
 fallback, exactly one CFF) and the bounded HTTP API access-log configuration.
+
+`npm run test:e2e` drives the deployed `dev-jw` Pair and merchant APIs. The
+merchant projection contract test creates isolated short-lived records, proves
+the live 401/200/404/402 sequence through API Gateway and Lambda, and removes
+its fixtures after the run. Required role permissions are documented in
+`tests/e2e/README.md`.
 
 Stacks (stage `dev-jw`; no prod stage configured yet):
 

@@ -5,8 +5,8 @@ import {
   isProjectionFresh,
   summarizeDesktopScan,
   type ClassifiedScan,
-  type MerchantProjection,
 } from '../cdk/lib/pair-api/projection-verdict.ts';
+import { merchantProjection } from './fixtures/merchant-projection.ts';
 
 function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
   return {
@@ -15,7 +15,6 @@ function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
     isDatacenter: false,
     isProxy: false,
     patAttested: false,
-    ok: true,
     browserName: 'Chrome',
     browserVersion: '126',
     os: 'Linux',
@@ -33,23 +32,24 @@ function scan(overrides: Partial<ClassifiedScan> = {}): ClassifiedScan {
 
 describe('projection verdict', () => {
   it('classifies mobile projections from browser details and UA', () => {
-    const projection: MerchantProjection = {
-      verdict: 'PASS',
+    const projection = merchantProjection({
       automation: 2,
       device_tampering: 3,
       network_tampering: 4,
       identification: {
         browserDetails: {
+          browserName: 'Chrome',
+          browserVersion: '150',
           device: 'mobile',
           os: 'iOS',
+          userAgent: 'Mozilla/5.0 (iPhone) Mobile',
         },
       },
-    };
+    });
 
     expect(classifyScan(projection, 'phone')).toMatchObject({
       individualScore: 4,
       isPhone: true,
-      ok: true,
     });
   });
 
@@ -81,13 +81,13 @@ describe('projection verdict', () => {
   });
 
   it('allows the isolated score-35 location mismatch observed on travel networks', () => {
-    const projection: MerchantProjection = {
+    const projection = merchantProjection({
       verdict: 'suspect',
       automation: 0,
       device_tampering: 35,
       network_tampering: 0,
       tags: ['location_mismatch', 'apple_attestation_missing'],
-    };
+    });
     const desktop = classifyScan(projection, 'desktop');
 
     expect(desktop).toMatchObject({
@@ -101,13 +101,13 @@ describe('projection verdict', () => {
   });
 
   it('keeps score-35 projections fail-closed when another signal is present', () => {
-    const projection: MerchantProjection = {
+    const projection = merchantProjection({
       verdict: 'suspect',
       automation: 0,
       device_tampering: 35,
       network_tampering: 0,
       tags: ['location_mismatch', 'unrecognized_signal'],
-    };
+    });
     const desktop = classifyScan(projection, 'desktop');
 
     expect(desktop?.isIsolatedLocationMismatch).toBe(false);
@@ -129,8 +129,8 @@ describe('projection verdict', () => {
   });
 
   it('requires fresh created_at timestamps', () => {
-    expect(isProjectionFresh({ created_at: Date.now() })).toBe(true);
-    expect(isProjectionFresh({ created_at: Date.now() - 300_000 })).toBe(false);
-    expect(isProjectionFresh({})).toBe(false);
+    expect(isProjectionFresh(merchantProjection())).toBe(true);
+    expect(isProjectionFresh(merchantProjection({ created_at: Date.now() - 300_000 }))).toBe(false);
+    expect(isProjectionFresh(null)).toBe(false);
   });
 });

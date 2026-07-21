@@ -96,7 +96,6 @@ import {
 import { evaluateSsoContinuity, mintReturnCode, type SsoLegProfile } from './sso-continuity';
 import { getVerdictSecret } from './pair-api/verdict-token';
 import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
-import { parseMerchantChallenge } from './pair-api/merchant-challenge';
 import { createVerdictVerificationHandler } from './pair-api/verdict-verification-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { validatePairTokenMintBody } from './pair-api/pair-token-request';
@@ -107,7 +106,7 @@ import {
   deliverSealedVerdict,
   isVerdictReleased,
 } from './pair-api/verdict-disclosure';
-import { fetchProjection } from './pair-api/projection-client';
+import { fetchProjection, projectionValue } from './pair-api/projection-client';
 import {
   hashApprovalToken,
   mintApprovalToken,
@@ -128,6 +127,7 @@ import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
 import type { StoredHostPreflight } from './pair-api/host-preflight';
 import { collectHostPreflightEvidence } from './pair-api/host-preflight-evidence';
 import { prepareAndStoreStartedSession } from './pair-api/session-start-store';
+import { startPairSession } from './pair-api/session-start';
 import {
   prepareDesktopAttestation,
   type StoredDesktopAttestation,
@@ -257,6 +257,21 @@ async function checkSessionStartRateLimit(ip: string): Promise<boolean> {
     if ((e as { name?: string }).name === 'ConditionalCheckFailedException') return false;
     throw e;
   }
+}
+
+function startPairSessionRequest(body: Record<string, unknown>, viewerIp: string) {
+  return startPairSession(body, viewerIp, {
+    allowStart: checkSessionStartRateLimit,
+    storeSession: (session) => prepareAndStoreStartedSession(session, { ddb, tableName: TABLE }),
+    mintBootstrapToken,
+    newSessionId: randomUUID,
+    newNonce: () => randomBytes(32).toString('base64url'),
+    nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+    sessionTtlSeconds: SESSION_TTL_SECONDS,
+    requireProofOfLife: REQUIRE_PROOF_OF_LIFE,
+    wsApiUrl: process.env.WS_API_URL ?? null,
+    warn: (message) => console.warn(message),
+  });
 }
 
 type Verdict = 'pending' | 'paired' | 'failed';
@@ -433,68 +448,8 @@ const lambdaHandler = async (event: {
 
   switch (routeKey) {
     case 'POST /api/session/start': {
-      // #10: per-IP throttle. Fail OPEN on limiter error — a Valkey/DDB hiccup
-      // must not take down all pairing; the cap is abuse-bounding, not a
-      // security boundary on its own.
-      let startAllowed = true;
-      try {
-        startAllowed = await checkSessionStartRateLimit(getViewerIp(event));
-      } catch (e) {
-        console.warn(`[pair] session-start rate-limit check failed open: ${(e as Error).message}`);
-      }
-      if (!startAllowed) {
-        return jsonResp(429, { error: 'rate_limited', scope: 'session_start' });
-      }
-      const merchantChallenge = parseMerchantChallenge(body.challengeId);
-      if (body.challengeId === undefined) {
-        return jsonResp(400, { error: 'missing_challenge_id' });
-      }
-      if (!merchantChallenge) return jsonResp(400, { error: 'invalid_challenge_id' });
-      const id = randomUUID();
-      const nonce = randomBytes(32).toString('base64url');
-      const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-      // The suffix is public, but its meaning is server-owned and snapshotted
-      // here. Unknown scopes fail instead of silently becoming an unscoped CPI.
-      const rawCpi = (body as { cpi?: unknown }).cpi;
-      const scopedCpi = parseScopedCpi(rawCpi);
-      if (rawCpi !== undefined && !scopedCpi) {
-        return jsonResp(400, { error: 'invalid_cpi' });
-      }
-      const cpi = scopedCpi?.cpi ?? null;
-      const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
-      const freshProofRequired = scopedCpi?.freshProofRequired ?? false;
-      const started = await prepareAndStoreStartedSession(
-        {
-          id,
-          nonce,
-          expiresAt,
-          challengeId: merchantChallenge,
-          cpi,
-          proofRequired,
-          freshProofRequired,
-          hostPreflightRequired: body.hostPreflightRequired === true,
-          hostOrigin: typeof body.hostOrigin === 'string' ? body.hostOrigin : undefined,
-        },
-        { ddb, tableName: TABLE }
-      );
-      if (!started.ok) return jsonResp(started.status, started.body);
-      // Bootstrap WebSocket tokens — one per role. Client opens WSS,
-      // sends whoami with the matching token, server returns an AES-
-      // sealed connection-identity envelope. See cdk/lib/ws-handler.ts.
-      const [desktopWsToken, phoneWsToken] = await Promise.all([
-        mintBootstrapToken(id, 'desktop'),
-        mintBootstrapToken(id, 'phone'),
-      ]);
-      return jsonResp(200, {
-        sessionId: id,
-        nonce,
-        expiresAt,
-        ws: {
-          url: process.env.WS_API_URL ?? null,
-          desktopToken: desktopWsToken,
-          phoneToken: phoneWsToken,
-        },
-      });
+      const response = await startPairSessionRequest(body, getViewerIp(event));
+      return jsonResp(response.status, response.body);
     }
 
     case 'POST /api/sso/start': {
@@ -521,7 +476,7 @@ const lambdaHandler = async (event: {
       const failureReturnUrl = ssoFailureReturn(id, scopedCpi.cpi, merchantBinding.value);
       const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
       const proofRequired = requiresProofOfLife(scopedCpi, REQUIRE_PROOF_OF_LIFE);
-      const projection = await fetchProjection(argusSessionId);
+      const projection = projectionValue(await fetchProjection(argusSessionId));
       const scan = classifyScan(projection, 'sso_start');
       const phoneCheck = requirePhoneSsoScan(scan, 'start', failureReturnUrl);
       if (!phoneCheck.ok) return phoneCheck.response;
@@ -561,7 +516,7 @@ const lambdaHandler = async (event: {
       });
       if (!checked.ok) return jsonResp(checked.status, checked.body);
       const argusSessionId = body.argusSessionId as string;
-      const projection = await fetchProjection(argusSessionId);
+      const projection = projectionValue(await fetchProjection(argusSessionId));
       const scan = classifyScan(projection, 'sso_challenge');
       const phoneCheck = requirePhoneSsoScan(scan, 'challenge', failureReturnUrl);
       if (!phoneCheck.ok) return phoneCheck.response;
@@ -610,7 +565,7 @@ const lambdaHandler = async (event: {
       });
       if (!checked.ok) return jsonResp(checked.status, checked.body);
       const argusSessionId = body.argusSessionId as string;
-      const projection = await fetchProjection(argusSessionId);
+      const projection = projectionValue(await fetchProjection(argusSessionId));
       const scan = classifyScan(projection, 'sso_validate');
       const phoneCheck = requirePhoneSsoScan(
         scan,
@@ -809,7 +764,7 @@ const lambdaHandler = async (event: {
       let summary: Record<string, unknown> | null = null;
       let clean = false;
       try {
-        const proj = await fetchProjection(argusSessionId);
+        const proj = projectionValue(await fetchProjection(argusSessionId));
         const c = classifyScan(proj, 'desktop');
         if (c) {
           ({ clean, summary } = summarizeDesktopScan(c));
@@ -979,7 +934,7 @@ const lambdaHandler = async (event: {
           iframeArgusSessionId: s.desktopAttestation.argusSessionId,
           pairSessionId: sessionId!,
         }),
-        fetchProjection(argusSessionId),
+        fetchProjection(argusSessionId).then(projectionValue),
         proofPath,
       ]);
       const desktopProj = hostEvidence.iframeProjection;

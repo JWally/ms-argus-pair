@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-const [api, verifyRoute, store, pair, embed, loader, readme] = await Promise.all([
+const [api, sessionStart, verifyRoute, store, pair, embed, loader, readme] = await Promise.all([
   read('cdk/lib/pair-api.ts'),
+  read('cdk/lib/pair-api/session-start.ts'),
   read('cdk/lib/pair-api/verdict-verification-route.ts'),
   read('cdk/lib/session-store.ts'),
   read('src/lib/pair.ts'),
@@ -12,8 +13,8 @@ const [api, verifyRoute, store, pair, embed, loader, readme] = await Promise.all
   read('README.md'),
 ]);
 
-assert.match(api, /parseMerchantChallenge\(body\.challengeId\)/);
-assert.match(api, /challengeId: merchantChallenge/);
+assert.match(sessionStart, /parseMerchantChallenge\(body\.challengeId\)/);
+assert.match(sessionStart, /challengeId/);
 assert.match(api, /challengeId: s\.challengeId/);
 assert.match(verifyRoute, /verifyVerdictForContext/);
 assert.match(verifyRoute, /missing_challenge_id/);
