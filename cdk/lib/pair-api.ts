@@ -71,22 +71,15 @@ import {
 } from './pair-api/attestation/trust';
 import { createDdbPasskeyStore } from './pair-api/passkey-store';
 import {
-  isProofOfLifeSatisfied,
   verifyProofOfLife,
   type OAuthAnnotations,
   type WebAuthnAnnotations,
 } from './pair-api/proof-of-life';
+import { decidePhoneVerdict } from './pair-api/phone-verdict-decision';
 import { proofModeForLog } from './pair-api/phone-observability';
 import { handleTelemetryRoute } from './pair-api/telemetry-routes';
 import { claimArgusSessionIdDdb } from './pair-api/argus-session-claim';
-import {
-  classifyScan,
-  computeVerdict,
-  isProjectionFresh,
-  projectionAgeSeconds,
-  PROJECTION_FRESHNESS_WINDOW_SECONDS,
-  summarizeDesktopScan,
-} from './pair-api/projection-verdict';
+import { classifyScan, summarizeDesktopScan } from './pair-api/projection-verdict';
 import { mintReturnCode } from './sso-continuity';
 import { getVerdictSecret } from './pair-api/verdict-token';
 import { createVerdictTokenMintHandler } from './pair-api/verdict-token-mint-route';
@@ -753,71 +746,15 @@ const lambdaHandler = async (event: {
       const desktopProj = hostEvidence.iframeProjection;
       const desktopClass = hostEvidence.iframeScan;
       const phoneClass = classifyScan(phoneProj, 'phone');
-
-      // Proof of life: the phone side must have EITHER passed a fresh
-      // WebAuthn registration OR redeemed a valid device-trust token
-      // (which itself is proof of a prior WebAuthn from the same IP).
-      // `webauthnResult.phone_webauthn_attested` is already unified for
-      // both paths above — the trust-redeem branch synthesizes it as
-      // true. Without proof of life, fail the pair even when integrity
-      // scans look clean — design intent is `magic-token || webauthn`.
-      const proofOfLife = isProofOfLifeSatisfied(webauthnResult);
-
-      let verdict: Verdict;
-      let reason: string;
-      let annotations: Record<string, unknown>;
-      const desktopAgeSec = projectionAgeSeconds(desktopProj);
-      const phoneAgeSec = projectionAgeSeconds(phoneProj);
-
-      if ((s.proofRequired ?? REQUIRE_PROOF_OF_LIFE) && !proofOfLife) {
-        verdict = 'failed';
-        reason = 'no_proof_of_life';
-        annotations = {
-          desktop_projection_present: !!desktopProj,
-          phone_projection_present: !!phoneProj,
-          ...webauthnResult,
-        };
-      } else if (!desktopClass || !phoneClass) {
-        // Projection lookup failed for at least one side. Old behavior was
-        // fail-OPEN ("paired" with lookup_unavailable_skipped), which let
-        // any attacker who could sign an envelope choose argusSessionIds
-        // that don't exist in Argus and ride the fall-through to a
-        // verdict. Fail CLOSED instead — the whole captcha premise is
-        // that the integrity scans actually ran, so if we can't read them
-        // we don't pair. Operational risk (Argus genuinely down) is
-        // accepted: better to fail visibly than authenticate silently.
-        verdict = 'failed';
-        reason = 'projection_lookup_failed';
-        annotations = {
-          score_lookup_skipped: true,
-          desktop_projection_present: !!desktopProj,
-          phone_projection_present: !!phoneProj,
-          ...webauthnResult,
-        };
-      } else if (!isProjectionFresh(desktopProj) || !isProjectionFresh(phoneProj)) {
-        // Secondary defense alongside the single-use ledger. Stale
-        // projections (legacy or recycled past the freshness window) get
-        // rejected even if they somehow slipped past the ledger. Strict
-        // on missing created_at — real argus scans backfill that field.
-        verdict = 'failed';
-        reason = 'projection_stale';
-        annotations = {
-          desktop_projection_age_sec: desktopAgeSec,
-          phone_projection_age_sec: phoneAgeSec,
-          freshness_window_sec: PROJECTION_FRESHNESS_WINDOW_SECONDS,
-          ...webauthnResult,
-        };
-      } else {
-        const computed = computeVerdict(desktopClass, phoneClass);
-        verdict = computed.verdict;
-        reason = computed.reason;
-        annotations = { ...computed.annotations, ...webauthnResult, proof_of_life: proofOfLife };
-      }
-
-      // Preserve the raw host/iframe comparison and the narrow Brave policy
-      // annotations. hostEvidence.iframeScan already carries the effective
-      // score used above; every unqualified shape retains the raw API score.
-      annotations = { ...annotations, ...hostEvidence.annotations };
+      const { verdict, reason, annotations, proofOfLife } = decidePhoneVerdict({
+        proofRequired: s.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
+        proofAnnotations: webauthnResult,
+        desktopProjection: desktopProj,
+        phoneProjection: phoneProj,
+        desktopScan: desktopClass,
+        phoneScan: phoneClass,
+        hostAnnotations: hostEvidence.annotations,
+      });
 
       // Always log the verdict reason + the proof-of-life sub-error so
       // a fail-pattern is debuggable from CloudWatch without reading
