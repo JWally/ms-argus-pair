@@ -49,7 +49,8 @@ import {
   type SealedVerdictEnvelope,
 } from './verdict-envelope';
 import { awaitWithDeadline } from './client-deadline';
-import { createDesktopVerdictGate, type DesktopVerdict } from './desktop-verdict-gate';
+import { createDesktopResultPoll } from './desktop-result-poll';
+import { createDesktopVerdictGate } from './desktop-verdict-gate';
 import { HttpError, jsonFetch } from './json-http';
 import { withSsoClientStage } from './sso-observability';
 
@@ -205,12 +206,6 @@ interface SessionStartResp {
     desktopToken: string;
     phoneToken: string;
   };
-}
-
-interface SealedResultShape {
-  status: 'sealed';
-  envelope: SealedVerdictEnvelope;
-  revealKey?: string;
 }
 
 export interface StartDesktopOptions {
@@ -384,7 +379,6 @@ export async function startDesktopSession(
   let bufferedReady: Record<string, unknown> | null = null;
   let notifiedPhoneConnected = false;
   let isDesktopWsConnected = true;
-  let hasStartedResultPoll = false;
 
   const sendReadyIfBothUp = () => {
     if (phoneEnvelope && bufferedReady) {
@@ -397,54 +391,16 @@ export async function startDesktopSession(
   // results while the phone's drawing challenge is visible. Keeping this state
   // outside the transport workflow makes the timing-oracle boundary explicit.
   const verdictGate = createDesktopVerdictGate(session.sessionId);
-  const startResultPoll = (initialDelayMs: number) => {
-    if (hasStartedResultPoll) return;
-    hasStartedResultPoll = true;
-    (async () => {
-      let stepMs = initialDelayMs;
-      // A held verdict also stops the poll — the verdict is already known;
-      // the gate is only waiting on the phone's DONE tap to reveal it.
-      while (!cancelled && !verdictGate.isSettled() && !verdictGate.hasHeldVerdict()) {
-        await new Promise((r) => window.setTimeout(r, stepMs));
-        stepMs = Math.min(10_000, Math.max(2_000, Math.round(stepMs * 1.5)));
-        if (cancelled || verdictGate.isSettled() || verdictGate.hasHeldVerdict()) return;
-        try {
-          const res = await fetch(
-            `${API}/session/${session.sessionId}/result?t=${encodeURIComponent(
-              session.ws.desktopToken
-            )}`,
-            { headers: { accept: 'application/json' } }
-          );
-          if (res.status === 200) {
-            const response = (await res.json()) as DesktopVerdict | SealedResultShape;
-            if ('status' in response && response.status === 'sealed') {
-              await verdictGate.receiveSealedVerdict(response.envelope);
-              if (response.revealKey) await verdictGate.receiveRevealKey(response.revealKey);
-              if (verdictGate.isSettled() || verdictGate.hasHeldVerdict()) return;
-              // Once ciphertext exists, only DONE/release is outstanding.
-              // Poll tightly enough that a disconnected desktop does not add
-              // the old multi-second backoff after the user's final tap.
-              stepMs = 500;
-              continue;
-            }
-            // Compatibility for sessions decided by a pre-sealing Lambda
-            // during a rolling deployment.
-            verdictGate.settle(response as DesktopVerdict);
-            return;
-          }
-          // 204 → keep polling. Anything else (401 auth, etc.) → stop the poll
-          // and let the WS push / expiry timer be the deciders.
-          if (res.status !== 204) return;
-        } catch {
-          // Transient network error — keep polling until settled or expiry.
-        }
-      }
-    })();
-  };
+  const resultPoll = createDesktopResultPoll({
+    sessionId: session.sessionId,
+    desktopToken: session.ws.desktopToken,
+    gate: verdictGate,
+    isCancelled: () => cancelled,
+  });
 
   desktopConn.onDisconnect(() => {
     isDesktopWsConnected = false;
-    if (notifiedPhoneConnected) startResultPoll(0);
+    if (notifiedPhoneConnected) void resultPoll.start(0);
   });
 
   desktopConn.onMessage((msg) => {
@@ -458,7 +414,7 @@ export async function startDesktopSession(
       if (!notifiedPhoneConnected) {
         notifiedPhoneConnected = true;
         events.onPhoneConnected?.();
-        startResultPoll(isDesktopWsConnected ? 20_000 : 0);
+        void resultPoll.start(isDesktopWsConnected ? 20_000 : 0);
       }
       sendReadyIfBothUp();
     } else if (data.kind === 'phone-done') {

@@ -10,6 +10,7 @@ import path from 'node:path';
 // and the release paths coupled.
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const resultPoll = fs.readFileSync(path.join(root, 'src/lib/desktop-result-poll.ts'), 'utf8');
 const verdictGate = fs.readFileSync(path.join(root, 'src/lib/desktop-verdict-gate.ts'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
@@ -61,6 +62,14 @@ assert(
   verdictGate.includes('const VERDICT_HOLD_CAP_MS = 90_000') &&
     verdictGate.includes('this.releaseHeldVerdict'),
   'a held verdict must be capped so a vanished phone cannot wedge the desktop'
+);
+
+assert(
+  pairLib.includes('const resultPoll = createDesktopResultPoll') &&
+    pairLib.includes('void resultPoll.start(isDesktopWsConnected ? 20_000 : 0)') &&
+    resultPoll.includes('gate.receiveSealedVerdict') &&
+    resultPoll.includes('response.status !== 204'),
+  'the delayed authenticated result fallback should stay behind its tested poll boundary'
 );
 
 const signalCallCount = phoneEntry.split('signalChallengeComplete()').length - 1;

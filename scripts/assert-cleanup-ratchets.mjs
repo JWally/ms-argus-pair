@@ -48,8 +48,13 @@ const ratchets = [
   },
   {
     file: 'src/lib/pair.ts',
-    maxLines: 1367,
+    maxLines: 1323,
     why: 'keep desktop workflow state moving into named, tested client modules',
+  },
+  {
+    file: 'src/lib/desktop-result-poll.ts',
+    maxLines: 116,
+    why: 'keep the authenticated verdict fallback independent from desktop orchestration',
   },
   {
     file: 'src/lib/desktop-verdict-gate.ts',
