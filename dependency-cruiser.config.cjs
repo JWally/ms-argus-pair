@@ -29,10 +29,17 @@ module.exports = {
       from: { pathNot: '^(tests/|scripts/)' },
       to: { path: '^tests/' },
     },
+    {
+      name: 'loader-is-self-contained',
+      severity: 'error',
+      comment: 'The independently bundled customer loader must not absorb app or CDK code.',
+      from: { path: '^loader/' },
+      to: { path: '^(src|cdk)/' },
+    },
   ],
   options: {
     doNotFollow: {
-      path: '^(node_modules|dist|cdk\\.out|loader)',
+      path: '^(node_modules|dist|cdk\\.out|loader/dist)',
     },
     enhancedResolveOptions: {
       extensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.json'],

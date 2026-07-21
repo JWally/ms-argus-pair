@@ -10,7 +10,13 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary'],
-      include: ['cdk/lib/**/*.ts', 'src/lib/**/*.ts', 'src/lib/**/*.tsx', 'src/pages/**/*.tsx'],
+      include: [
+        'cdk/lib/**/*.ts',
+        'loader/message-contract.ts',
+        'src/lib/**/*.ts',
+        'src/lib/**/*.tsx',
+        'src/pages/**/*.tsx',
+      ],
       exclude: [
         'cdk/lib/pair-stack.ts',
         'cdk/lib/ws-stack.ts',

@@ -121,6 +121,16 @@ const ratchets = [
     maxLines: 100,
     why: 'keep one-time SSO redemption as a narrow, reviewable trust boundary',
   },
+  {
+    file: 'loader/loader.ts',
+    maxLines: 148,
+    why: 'keep customer-loader orchestration from absorbing message validation policy',
+  },
+  {
+    file: 'loader/message-contract.ts',
+    maxLines: 62,
+    why: 'keep the cross-window message trust boundary small and directly testable',
+  },
 ];
 
 function lineCount(file) {
