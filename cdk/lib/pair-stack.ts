@@ -13,9 +13,6 @@ import {
   CachePolicy,
   OriginAccessIdentity,
   OriginRequestPolicy,
-  ResponseHeadersPolicy,
-  HeadersFrameOption,
-  HeadersReferrerPolicy,
   Function as CloudFrontFunction,
   FunctionCode,
   FunctionEventType,
@@ -37,6 +34,7 @@ import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { LiveE2eRole } from './live-e2e-role';
 import { createPairHttpApi } from './pair-http-api';
+import { createPairResponseHeaderPolicies } from './pair-response-headers';
 import { RecurringAliasHeater } from './recurring-alias-heater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -390,45 +388,7 @@ export class PairStack extends cdk.Stack {
 
     const s3Origin = new S3Origin(bucket, { originAccessIdentity: oai });
     const apiOrigin = new HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`);
-    const siteHeaders = new ResponseHeadersPolicy(this, 'SiteResponseHeaders', {
-      securityHeadersBehavior: {
-        strictTransportSecurity: {
-          accessControlMaxAge: cdk.Duration.days(365),
-          includeSubdomains: true,
-          preload: true,
-          override: true,
-        },
-        contentTypeOptions: { override: true },
-        referrerPolicy: {
-          referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
-          override: true,
-        },
-        frameOptions: {
-          frameOption: HeadersFrameOption.DENY,
-          override: true,
-        },
-      },
-    });
-
-    // The embeddable widget (/embed) MUST be iframable by customer sites, so it
-    // can't carry X-Frame-Options: DENY. Same security headers minus frameOptions
-    // — framing is gated by the single-use token (and, later, originAllowlist),
-    // not by the frame header.
-    const embedHeaders = new ResponseHeadersPolicy(this, 'EmbedResponseHeaders', {
-      securityHeadersBehavior: {
-        strictTransportSecurity: {
-          accessControlMaxAge: cdk.Duration.days(365),
-          includeSubdomains: true,
-          preload: true,
-          override: true,
-        },
-        contentTypeOptions: { override: true },
-        referrerPolicy: {
-          referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
-          override: true,
-        },
-      },
-    });
+    const { siteHeaders, embedHeaders } = createPairResponseHeaderPolicies(this);
     const spaRouter = new CloudFrontFunction(this, 'SpaRouter', {
       code: FunctionCode.fromFile({
         filePath: path.join(__dirname, '../cloudfront/spa-router.js'),
