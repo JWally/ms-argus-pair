@@ -88,8 +88,13 @@ const ratchets = [
   },
   {
     file: 'src/lib/pair.ts',
-    maxLines: 1287,
+    maxLines: 1181,
     why: 'keep desktop workflow state moving into named, tested client modules',
+  },
+  {
+    file: 'src/lib/desktop-session-runtime.ts',
+    maxLines: 207,
+    why: 'keep authenticated peer routing, polling fallback, and expiry independent from evidence collection',
   },
   {
     file: 'src/lib/desktop-session-bootstrap.ts',

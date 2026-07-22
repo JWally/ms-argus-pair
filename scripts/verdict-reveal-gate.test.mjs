@@ -10,6 +10,10 @@ import path from 'node:path';
 // and the release paths coupled.
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const desktopRuntime = fs.readFileSync(
+  path.join(root, 'src/lib/desktop-session-runtime.ts'),
+  'utf8'
+);
 const resultPoll = fs.readFileSync(path.join(root, 'src/lib/desktop-result-poll.ts'), 'utf8');
 const verdictGate = fs.readFileSync(path.join(root, 'src/lib/desktop-verdict-gate.ts'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
@@ -43,15 +47,15 @@ assert(
 );
 
 assert(
-  pairLib.includes('verdictGate.notePhoneChallenge') &&
+  desktopRuntime.includes('this.gate.notePhoneChallenge') &&
     verdictGate.includes('if (this.phoneInChallenge && !this.phoneDone)') &&
     !verdictGate.includes("verdict.verdict === 'paired'"),
   'desktop should hold every verdict while the challenge is unfinished'
 );
 
 assert(
-  pairLib.includes("data.kind === 'phone-done'") &&
-    pairLib.includes('verdictGate.releaseHeldVerdict()'),
+  desktopRuntime.includes("case 'phone-done'") &&
+    desktopRuntime.includes('this.gate.releaseHeldVerdict()'),
   'desktop should release the held verdict on the phone-done message'
 );
 
@@ -69,8 +73,9 @@ assert(
 );
 
 assert(
-  pairLib.includes('const resultPoll = createDesktopResultPoll') &&
-    pairLib.includes('void resultPoll.start(isDesktopWsConnected ? 20_000 : 0)') &&
+  desktopRuntime.includes('const CONNECTED_POLL_DELAY_MS = 20_000') &&
+    desktopRuntime.includes('void this.poll.start(0)') &&
+    desktopRuntime.includes('this.clearFallbackTimer()') &&
     resultPoll.includes('gate.receiveSealedVerdict') &&
     resultPoll.includes('response.status !== 204'),
   'the delayed authenticated result fallback should stay behind its tested poll boundary'

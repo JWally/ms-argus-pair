@@ -10,14 +10,10 @@
  *   (background) Promise.all([iframe scan, merchant scan])
  *                → POST /desktop-attest
  *
- *   ─── poll /api/session/{id}/result ───
- *
  *   (QR scanned)                                                                ─►
- *                                            GET /api/session/{id}/info ◄──────
- *                                              {nonce, desktopReady,
- *                                               desktopArgusSessionId,
- *                                               desktopKeyId}
- *                                            (poll if !desktopReady)
+ *                                            redeem short token ◄─────────────
+ *                                            WS whoami + phone-here ──────────►
+ *      ◄────────────────────────── desktop-ready (authenticated peer relay)
  *
  *                                            user taps "Proof of Life"
  *                                            Promise.all([
@@ -25,8 +21,8 @@
  *                                              argus.run({attest: {nonce, ...}}),
  *                                            ])
  *                                            POST /api/session/{id}/phone-attest
- *      ◄────────────────  poll result      { argusSessionId, attestation, webauthn }
- *                                          → {verdict, reason, annotations}
+ *                                          { argusSessionId, attestation, webauthn }
+ *      ◄──────────── sealed verdict; reveal after authenticated phone-done
  *
  * WebAuthn rides as a sibling field in the phone-attest POST body (not
  * inside the Argus envelope payload), so the WebAuthn ceremony and the
@@ -50,8 +46,7 @@ import {
   type SealedVerdictEnvelope,
 } from './verdict-envelope';
 import { awaitWithDeadline } from './client-deadline';
-import { createDesktopResultPoll } from './desktop-result-poll';
-import { createDesktopVerdictGate } from './desktop-verdict-gate';
+import { createDesktopSessionRuntime } from './desktop-session-runtime';
 import { HttpError, jsonFetch } from './json-http';
 import { withSsoClientStage } from './sso-observability';
 
@@ -336,105 +331,13 @@ export async function startDesktopSession(
   });
   events.onStatus?.('waiting for phone');
 
-  // Routing state. The peer envelope only arrives when the phone sends
-  // its first peer message (phone-here); buffer desktopReady until both
-  // sides are present.
-  let cancelled = false;
-  let scanError: Error | null = null;
-  let phoneEnvelope: string | null = null;
-  let bufferedReady: Record<string, unknown> | null = null;
-  let notifiedPhoneConnected = false;
-  let isDesktopWsConnected = true;
-
-  const sendReadyIfBothUp = () => {
-    if (phoneEnvelope && bufferedReady) {
-      desktopConn.sendPeer(phoneEnvelope, bufferedReady);
-      bufferedReady = null;
-    }
-  };
-
-  // The gate owns exactly-once settlement and withholds both pass and fail
-  // results while the phone's drawing challenge is visible. Keeping this state
-  // outside the transport workflow makes the timing-oracle boundary explicit.
-  const verdictGate = createDesktopVerdictGate(session.sessionId);
-  const resultPoll = createDesktopResultPoll({
+  const runtime = createDesktopSessionRuntime({
     sessionId: session.sessionId,
     desktopToken: session.ws.desktopToken,
-    gate: verdictGate,
-    isCancelled: () => cancelled,
+    expiresAt: session.expiresAt,
+    connection: desktopConn,
+    onPhoneConnected: events.onPhoneConnected,
   });
-
-  desktopConn.onDisconnect(() => {
-    isDesktopWsConnected = false;
-    if (notifiedPhoneConnected) void resultPoll.start(0);
-  });
-
-  desktopConn.onMessage((msg) => {
-    if (cancelled) return;
-    const data = msg.data as { kind?: string } | null;
-    if (!data || typeof data.kind !== 'string') return;
-    if (data.kind === 'phone-here') {
-      if (!msg.fromEnvelope) return;
-      phoneEnvelope = msg.fromEnvelope;
-      verdictGate.notePhoneChallenge((data as { challenge?: boolean }).challenge === true);
-      if (!notifiedPhoneConnected) {
-        notifiedPhoneConnected = true;
-        events.onPhoneConnected?.();
-        void resultPoll.start(isDesktopWsConnected ? 20_000 : 0);
-      }
-      sendReadyIfBothUp();
-    } else if (data.kind === 'phone-done') {
-      // The phone user finished the drawing challenge (tapped DONE or the
-      // challenge screen was dismissed). Only the real phone role can send
-      // this — the relay stamps `from` server-side. It can't fabricate a
-      // verdict; it only releases one the server already pushed.
-      if ((msg as unknown as { from?: string }).from !== 'phone') return;
-      verdictGate.releaseHeldVerdict();
-    } else if (data.kind === 'verdict') {
-      // The WS handler stamps `from` server-side (relayed peer messages
-      // get the sender's REAL role from their envelope; the verdict push
-      // hard-codes 'server'). Phone-side script can't forge from:'server'
-      // through the relay path — server overwrites whatever the sender
-      // claims. Only accept verdict messages with from:'server' so a
-      // compromised phone (or anyone holding the leaked QR) can't push
-      // a fake `paired` verdict at the desktop UI.
-      if ((msg as unknown as { from?: string }).from !== 'server') {
-        console.warn(`[pair] dropping verdict with from=${msg.from} (not server)`);
-        return;
-      }
-      verdictGate.settle({
-        verdict: (data as { verdict: string }).verdict,
-        reason: (data as { reason: string | null }).reason ?? null,
-        annotations: (data as { annotations?: Record<string, unknown> }).annotations,
-      });
-    } else if (data.kind === 'verdict-sealed') {
-      if (msg.from !== 'server') return;
-      void verdictGate.receiveSealedVerdict((data as { envelope: SealedVerdictEnvelope }).envelope);
-    } else if (data.kind === 'verdict-release') {
-      if (msg.from !== 'server') return;
-      void verdictGate.receiveRevealKey((data as { revealKey: string }).revealKey);
-    }
-  });
-
-  // Bound the wait. Session TTL is 5 minutes — once the server-side row
-  // is gone /phone-attest will 404 anyway and no verdict push will land,
-  // so reject locally rather than spin forever.
-  const expiryMs = Math.max(0, session.expiresAt * 1000 - Date.now());
-  window.setTimeout(() => {
-    if (cancelled) return;
-    // A verdict held for the phone's DONE tap is still a verdict — reveal
-    // it rather than expiring a session that actually succeeded.
-    if (verdictGate.hasHeldVerdict()) {
-      verdictGate.releaseHeldVerdict();
-      return;
-    }
-    verdictGate.fail(new Error('session expired'));
-  }, expiryMs);
-
-  // WS verdict push is the primary path. /result is now only a delayed fallback
-  // after the phone has appeared, or immediate fallback if the desktop socket
-  // disconnects during that phase. This avoids hammering /result while the QR is
-  // simply sitting on screen waiting to be scanned.
 
   // Background: scan + desktop-attest. When done, queue the desktop-
   // ready peer message (or send immediately if the phone is already up).
@@ -446,7 +349,7 @@ export async function startDesktopSession(
       if (!run.attestation) {
         throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
       }
-      if (cancelled) return;
+      if (runtime.isCancelled()) return;
       const attResp = await jsonFetch<{
         ok: boolean;
         clean?: boolean;
@@ -463,18 +366,16 @@ export async function startDesktopSession(
         clean: !!attResp.clean,
         summary: attResp.summary ?? null,
       });
-      bufferedReady = {
+      runtime.queueDesktopReady({
         kind: 'desktop-ready',
         nonce: session.nonce,
         expiresAt: session.expiresAt,
         desktopArgusSessionId: run.argusSessionId,
         desktopKeyId: run.attestation.keyId,
-      };
-      sendReadyIfBothUp();
+      });
     } catch (e) {
-      scanError = e as Error;
       events.onError?.(e);
-      verdictGate.fail(e);
+      runtime.fail(e);
     }
   })();
 
@@ -495,15 +396,8 @@ export async function startDesktopSession(
     sessionId: session.sessionId,
     qr,
     expiresAt: session.expiresAt,
-    stop: () => {
-      cancelled = true;
-      desktopConn.close();
-      if (scanError) {
-        // Surface the still-buffered error if nothing else has resolved.
-        verdictGate.fail(scanError);
-      }
-    },
-    result: verdictGate.result,
+    stop: runtime.stop,
+    result: runtime.result,
     getVerdictToken,
   };
 }
