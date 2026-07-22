@@ -3,6 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src/phone-main.tsx'), 'utf8');
+const drawingBoard = fs.readFileSync(
+  path.join(process.cwd(), 'src/lib/phone-drawing-board.ts'),
+  'utf8'
+);
 
 function assert(condition, message) {
   if (!condition) {
@@ -52,14 +56,15 @@ assert(
   'DONE must finish the phone flow for either server verdict without revealing the decision'
 );
 assert(
-  /if \(opts\.keepDialpad\) \{\s*\/\/ Background verdict calculation[\s\S]*?state\.verdict = result\.verdict;[\s\S]*?state\.phase = 'challenge';[\s\S]*?updateBioDrawActionLabel\(\);\s*}/s.test(
+  /if \(options\.keepDrawingBoard\) \{\s*\/\/ Background verdict calculation[\s\S]*?state\.verdict = result\.verdict;[\s\S]*?state\.phase = 'challenge';[\s\S]*?updateBioDrawActionLabel\(\);[\s\S]*?return;\s*}/s.test(
     pair
   ),
   'a background verdict must stay behind the drawing challenge until DONE'
 );
 assert(
-  updateActionLabel.includes("state.verdict ? 'DONE' : 'Next'") &&
-    !updateActionLabel.includes("state.verdict === 'paired'"),
+  updateActionLabel.includes('drawingBoard?.setDone(Boolean(state.verdict))') &&
+    drawingBoard.includes("isDone ? 'DONE' : 'Next'") &&
+    !drawingBoard.includes("isDone === 'paired'"),
   'either terminal verdict must expose the same neutral DONE action on the phone'
 );
 assert(

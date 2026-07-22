@@ -5,11 +5,11 @@ import { Splash } from './components/Splash';
 import './fonts.css';
 import './index.css';
 
-// Pair and Embed remain route-split. The SSO pages intentionally share one
-// chunk so moving between its stages cannot flash the Suspense fallback.
+// Embed remains route-split. The SSO pages intentionally share one chunk so
+// moving between its stages cannot flash the Suspense fallback. Phone pairing
+// has its own non-React entry in phone-main.tsx and is routed by CloudFront.
 //
 // Named exports → default-export shape that React.lazy expects.
-const Pair = lazy(() => import('./pages/Pair').then((m) => ({ default: m.Pair })));
 const SsoRoute = lazy(() => import('./pages/SsoRoutes').then((m) => ({ default: m.SsoRoute })));
 const Embed = lazy(() => import('./pages/Embed').then((m) => ({ default: m.Embed })));
 
@@ -27,7 +27,6 @@ createRoot(rootElement).render(
           <Route path="/sso/challenge/:sessionId" element={<SsoRoute page="challenge" />} />
           <Route path="/merchant/validate" element={<SsoRoute page="validate" />} />
           <Route path="/sso/mobile" element={<SsoRoute page="mobile" />} />
-          <Route path="/pair/:roomId" element={<Pair />} />
           <Route path="/embed" element={<Embed />} />
         </Routes>
       </Suspense>

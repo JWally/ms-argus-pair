@@ -1,32 +1,22 @@
 import './index.css';
 import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
-import { startBioDotPlate } from './lib/bio-dot-plate';
+import { mountPhoneDrawingBoard, type PhoneDrawingBoard } from './lib/phone-drawing-board';
+import { decidePhonePairFailure, type PhoneProofMode } from './lib/phone-pair-failure';
 import { isPairSessionTimeout } from './lib/pair-timeout';
 import { createPhonePerfReporter, type PhonePerfBatch } from './lib/phone-perf';
+import { renderPhonePanelView, renderPhoneReadyView, type PhonePhase } from './lib/phone-view';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = 'integrity' | 'passkey' | 'passkey-create' | 'google';
-type Phase =
-  | 'awaiting-desktop'
-  | 'ready'
-  | 'challenge'
-  | 'returning'
-  | 'pairing'
-  | 'paired'
-  | 'failed'
-  | 'taken'
-  | 'timeout'
-  | 'error';
-
-type PairModule = typeof import('./lib/pair');
+type ProofChoice = PhoneProofMode;
+type PhonePair = (typeof import('./lib/phone-pair'))['phonePair'];
 type OAuthModule = typeof import('./lib/oauth');
 
 interface Runtime {
-  pairMod?: PairModule;
+  pairMod?: PhonePair;
   oauthMod?: OAuthModule;
   info: PhoneSessionInfo | null;
-  phase: Phase;
+  phase: PhonePhase;
   status: string;
   verdict: string | null;
   errorMsg: string | null;
@@ -42,15 +32,13 @@ interface Runtime {
   ctl: AbortController;
 }
 
-const DRAW_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.split('');
-
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('root element missing');
 const root = rootElement;
 let firstRenderReported = false;
 let bioDrawStarted = false;
 let challengeCompleteSignaled = false;
-let stopBioDotPlate: (() => void) | undefined;
+let drawingBoard: PhoneDrawingBoard | undefined;
 
 const sessionId = sessionIdFromPath();
 const phonePerf = createPhonePerfReporter({
@@ -94,6 +82,7 @@ window.addEventListener('pagehide', () => {
   // Best-effort: a phone closed mid-challenge shouldn't leave the desktop
   // holding a finished verdict until the hold cap expires.
   signalChallengeComplete();
+  drawingBoard?.stop();
   state.ctl.abort();
   state.info?.conn.close();
 });
@@ -196,7 +185,7 @@ async function bootstrap(): Promise<void> {
   recordPhonePerf('bootstrap_start');
   try {
     const [pairMod, trustMod] = await Promise.all([
-      import('./lib/pair'),
+      import('./lib/phone-pair').then(({ phonePair }) => phonePair),
       import('./lib/device-trust'),
     ]);
     if (state.ctl.signal.aborted) return;
@@ -281,7 +270,7 @@ function maybeStartFastPass(): void {
   }
   state.fastPassAttempted = true;
   recordPhonePerf('fast_pass_attempt');
-  void pair('passkey', { keepDialpad: true, trustOnly: true });
+  void pair('passkey', { keepDrawingBoard: true, trustOnly: true });
 }
 
 function advanceChallenge(): void {
@@ -312,7 +301,7 @@ function advanceChallenge(): void {
     // Keep the challenge moving while the already-running scan is submitted.
     // The button becomes DONE only after the paired verdict arrives.
     setState({ challengeIndex: state.challengeIndex + 1 });
-    void pair('integrity', { keepDialpad: true });
+    void pair('integrity', { keepDrawingBoard: true });
     return;
   }
   if (state.info.freshProofRequired) {
@@ -347,22 +336,13 @@ async function finalizePhoneStateAndClose(): Promise<void> {
 
 async function pair(
   proofMode: ProofChoice = 'passkey',
-  opts: { keepDialpad?: boolean; trustOnly?: boolean } = {}
+  opts: { keepDrawingBoard?: boolean; trustOnly?: boolean } = {}
 ): Promise<void> {
   if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
+  const keepDrawingBoard = opts.keepDrawingBoard === true;
   recordPhonePerf('pair_start', { proofMode, trustOnly: opts.trustOnly === true });
   state.inflight = true;
-  if (opts.keepDialpad) {
-    state.status = 'starting';
-    state.errorMsg = null;
-    updateBioDrawActionLabel();
-  } else {
-    setState({
-      phase: state.hasTrust && !state.info.freshProofRequired ? 'returning' : 'pairing',
-      status: 'starting',
-      errorMsg: null,
-    });
-  }
+  startPairUi(keepDrawingBoard);
   try {
     const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
     const options: SubmitPhoneAttestationOptions = {
@@ -379,91 +359,114 @@ async function pair(
       options.oauthResult = oauthResult;
     }
 
-    const events: PairEvents = {
-      onStatus: (status) => {
-        if (opts.keepDialpad) {
-          state.status = status;
-          updateBioDrawActionLabel();
-          return;
-        }
-        setState({ status });
-      },
-    };
-    const result = await state.pairMod.submitPhoneAttestation(sessionId, state.info, events, {
-      ...options,
-      trustOnly: opts.trustOnly,
-    });
-    recordPhonePerf('attest_done', {
-      verdict: result.verdict,
+    const result = await state.pairMod.submitPhoneAttestation(
+      sessionId,
+      state.info,
+      createPairEvents(keepDrawingBoard),
+      {
+        ...options,
+        trustOnly: opts.trustOnly,
+      }
+    );
+    applyPairResult(result, {
+      proofMode,
+      passkeyMode,
+      keepDrawingBoard,
       trustOnly: opts.trustOnly === true,
     });
-    flushPhonePerf('attest_done');
-    state.finalizeAfterDone = result.finalizeAfterDone;
-    if (
-      proofMode !== 'integrity' &&
-      passkeyMode === 'passkey-auth' &&
-      result.annotations?.phone_webauthn_error === 'credential_not_registered'
-    ) {
-      state.pairMod.clearPasskeyHint();
-    }
-    if (opts.keepDialpad) {
-      // Background verdict calculation must not interrupt the drawing challenge or
-      // disclose its result on the phone. Store it only to unlock DONE; the
-      // desktop receives and enforces the unmodified server verdict.
-      state.verdict = result.verdict;
-      state.status = 'done';
-      state.phase = 'challenge';
-      updateBioDrawActionLabel();
-    } else {
-      setState({
-        verdict: result.verdict,
-        status: 'done',
-        phase: 'paired',
-      });
-    }
-    if (!opts.keepDialpad) {
-      window.setTimeout(() => void finalizePhoneStateAndClose(), 1500);
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failure = decidePhonePairFailure(error, {
+      proofMode,
+      keepDrawingBoard,
+    });
     recordPhonePerf('pair_error', {
       trustOnly: opts.trustOnly === true,
-      error: msg.slice(0, 80),
+      error: message.slice(0, 80),
     });
-    if (opts.keepDialpad) {
-      state.hasTrust = false;
-      setState({
-        phase: 'ready',
-        status: '',
-        errorMsg: 'Trusted device expired. Choose a check.',
-      });
-      return;
-    }
-    if (proofMode === 'passkey' || proofMode === 'passkey-create') {
-      setState({ phase: 'ready', errorMsg: msg });
-      return;
-    }
+    if (failure.resetTrust) state.hasTrust = false;
     setState({
-      phase: msg.includes('session_paired_with_other_device') ? 'taken' : 'error',
-      errorMsg: msg,
+      phase: failure.phase,
+      ...(failure.clearStatus ? { status: '' } : {}),
+      errorMsg: failure.errorMessage,
     });
   } finally {
     state.inflight = false;
   }
 }
 
+function startPairUi(keepDrawingBoard: boolean): void {
+  if (keepDrawingBoard) {
+    state.status = 'starting';
+    state.errorMsg = null;
+    updateBioDrawActionLabel();
+    return;
+  }
+  setState({
+    phase: state.hasTrust && !state.info?.freshProofRequired ? 'returning' : 'pairing',
+    status: 'starting',
+    errorMsg: null,
+  });
+}
+
+function createPairEvents(keepDrawingBoard: boolean): PairEvents {
+  return {
+    onStatus: (status) => {
+      if (keepDrawingBoard) {
+        state.status = status;
+        updateBioDrawActionLabel();
+        return;
+      }
+      setState({ status });
+    },
+  };
+}
+
+type PhoneAttestationResult = Awaited<ReturnType<PhonePair['submitPhoneAttestation']>>;
+
+function applyPairResult(
+  result: PhoneAttestationResult,
+  options: {
+    proofMode: ProofChoice;
+    passkeyMode: 'passkey-create' | 'passkey-auth';
+    keepDrawingBoard: boolean;
+    trustOnly: boolean;
+  }
+): void {
+  recordPhonePerf('attest_done', {
+    verdict: result.verdict,
+    trustOnly: options.trustOnly,
+  });
+  flushPhonePerf('attest_done');
+  state.finalizeAfterDone = result.finalizeAfterDone;
+  if (
+    options.proofMode !== 'integrity' &&
+    options.passkeyMode === 'passkey-auth' &&
+    result.annotations?.phone_webauthn_error === 'credential_not_registered'
+  ) {
+    state.pairMod?.clearPasskeyHint();
+  }
+  if (options.keepDrawingBoard) {
+    // Background verdict calculation must not interrupt the drawing challenge or
+    // disclose its result on the phone. Store it only to unlock DONE; the
+    // desktop receives and enforces the unmodified server verdict.
+    state.verdict = result.verdict;
+    state.status = 'done';
+    state.phase = 'challenge';
+    updateBioDrawActionLabel();
+    return;
+  }
+  setState({
+    verdict: result.verdict,
+    status: 'done',
+    phase: 'paired',
+  });
+  window.setTimeout(() => void finalizePhoneStateAndClose(), 1500);
+}
+
 async function loadOAuthModule(): Promise<OAuthModule> {
   state.oauthMod ??= await import('./lib/oauth');
   return state.oauthMod;
-}
-
-function hashChallenge(nonce: string, challengeIndex: number): number {
-  let h = 2166136261;
-  for (const ch of `${nonce}:${challengeIndex}`) {
-    h ^= ch.charCodeAt(0);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
 }
 
 function render(): void {
@@ -475,8 +478,8 @@ function render(): void {
   // Leaving the challenge for any other screen (proof menu, returning,
   // paired, error) also counts as "user is done drawing".
   signalChallengeComplete();
-  stopBioDotPlate?.();
-  stopBioDotPlate = undefined;
+  drawingBoard?.stop();
+  drawingBoard = undefined;
   if (state.phase === 'ready') {
     void renderReady();
     return;
@@ -538,203 +541,32 @@ function getPhonePerfStorage(): Storage | undefined {
 function renderBioDraw(): void {
   const nonce = state.nonce;
   if (!nonce) return;
-  const targetLetter = drawLetterFromNonce(nonce, state.challengeIndex);
-  const challengeSeed = hashChallenge(nonce, state.challengeIndex);
-  let hasDrawn = false;
-  stopBioDotPlate?.();
-  stopBioDotPlate = undefined;
-  root.innerHTML = `
-    <div class="bio-draw app">
-      <header>
-        <h1>ARGUS <span class="accent">PAIR</span></h1>
-        <p class="subtitle">Handwriting Biometric Captcha</p>
-      </header>
-      <main>
-        <div class="challenge-digits">
-          <div class="bio-draw-challenge" aria-label="Draw ${targetLetter}">
-            <span>DRAW</span>
-            <canvas class="bio-draw-dot-canvas" aria-label="${targetLetter}"></canvas>
-          </div>
-        </div>
-        <div class="canvas-area canvas-idle">
-          <canvas class="drawing-canvas bio-draw-canvas" aria-label="Draw the requested letter"></canvas>
-          <div class="canvas-overlay bio-draw-overlay${
-            bioDrawStarted ? ' bio-draw-overlay-hidden' : ''
-          }">
-            <p class="canvas-overlay-text">Draw the Character You See Above</p>
-            <p class="canvas-overlay-start">-- CLICK HERE TO START --</p>
-          </div>
-        </div>
-        <div class="action-stack">
-          <button type="button" disabled class="btn btn-next btn-stack bio-draw-send">Next</button>
-          <button type="button" disabled class="btn btn-erase btn-stack bio-draw-erase">Erase</button>
-        </div>
-      </main>
-    </div>`;
-
-  const plate = root.querySelector<HTMLCanvasElement>('.bio-draw-dot-canvas');
-  const canvas = root.querySelector<HTMLCanvasElement>('.bio-draw-canvas');
-  const overlay = root.querySelector<HTMLElement>('.bio-draw-overlay');
-  const canvasArea = root.querySelector<HTMLElement>('.canvas-area');
-  const erase = root.querySelector<HTMLElement>('.bio-draw-erase');
-  const send = root.querySelector<HTMLElement>('.bio-draw-send');
-  const ctx = canvas?.getContext('2d', { willReadFrequently: true }) ?? null;
-  let drawing = false;
-  if (plate) {
-    stopBioDotPlate = startBioDotPlate(plate, targetLetter, challengeSeed);
-  }
-
-  const vibrate = (pattern: number | number[]) => {
-    try {
-      navigator.vibrate?.(pattern);
-    } catch {
-      /* noop */
-    }
-  };
-
-  const syncCanvas = () => {
-    if (!canvas || !ctx) return;
-    const rect = canvas.getBoundingClientRect();
-    const width = Math.max(1, Math.round(rect.width));
-    const height = Math.max(1, Math.round(rect.height));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  };
-
-  const pointFromEvent = (event: PointerEvent) => {
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: (event.clientX - rect.left) * (canvas.width / rect.width),
-      y: (event.clientY - rect.top) * (canvas.height / rect.height),
-    };
-  };
-
-  const update = () => {
-    overlay?.classList.toggle('bio-draw-overlay-hidden', bioDrawStarted);
-    canvasArea?.classList.toggle('canvas-idle', !hasDrawn);
-    canvasArea?.classList.toggle('canvas-active', hasDrawn);
-    setDisabled(erase, !hasDrawn);
-    if (send) {
-      setDisabled(send, !hasDrawn);
-    }
-  };
-
-  const clear = () => {
-    hasDrawn = false;
-    syncCanvas();
-    update();
-  };
-
-  syncCanvas();
-  new ResizeObserver(syncCanvas).observe(canvas!);
-
-  canvas?.addEventListener('pointerdown', (event) => {
-    if (!ctx || !canvas) return;
-    event.preventDefault();
-    canvas.setPointerCapture(event.pointerId);
-    const point = pointFromEvent(event);
-    if (!point) return;
-    bioDrawStarted = true;
-    drawing = true;
-    ctx.beginPath();
-    ctx.moveTo(point.x, point.y);
-    if (!hasDrawn) vibrate(5);
-    hasDrawn = true;
-    update();
+  drawingBoard?.stop();
+  drawingBoard = mountPhoneDrawingBoard({
+    root,
+    nonce,
+    challengeIndex: state.challengeIndex,
+    started: bioDrawStarted,
+    done: Boolean(state.verdict),
+    onStarted: () => {
+      bioDrawStarted = true;
+    },
+    onAdvance: advanceChallenge,
   });
-  canvas?.addEventListener('pointermove', (event) => {
-    if (!drawing || !ctx) return;
-    event.preventDefault();
-    const point = pointFromEvent(event);
-    if (!point) return;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 18;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineTo(point.x, point.y);
-    ctx.stroke();
-  });
-  const stopTracing = (event: PointerEvent) => {
-    drawing = false;
-    if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-  };
-  canvas?.addEventListener('pointerup', stopTracing);
-  canvas?.addEventListener('pointercancel', stopTracing);
-  erase?.addEventListener('click', clear);
-  send?.addEventListener('click', advanceChallenge);
-  update();
-  updateBioDrawActionLabel();
-}
-
-function drawLetterFromNonce(nonce: string, challengeIndex: number): string {
-  return DRAW_LETTERS[hashChallenge(nonce, challengeIndex) % DRAW_LETTERS.length];
 }
 
 function updateBioDrawActionLabel(): void {
-  const send = root.querySelector<HTMLButtonElement>('.bio-draw-send');
-  if (!send) return;
-  send.textContent = state.verdict ? 'DONE' : 'Next';
-}
-
-function setDisabled(
-  element: {
-    setAttribute(name: string, value: string): void;
-    removeAttribute(name: string): void;
-  } | null,
-  disabled: boolean
-): void {
-  if (!element) return;
-  if (disabled) {
-    element.setAttribute('disabled', '');
-  } else {
-    element.removeAttribute('disabled');
-  }
+  drawingBoard?.setDone(Boolean(state.verdict));
 }
 
 async function renderReady(): Promise<void> {
   const googleConfigured = await isGoogleConfigured();
-  const canUseTrust = state.hasTrust && !state.info?.freshProofRequired;
-  root.innerHTML = `
-    <div class="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
-      <header class="flex items-center justify-between">
-        <div class="flex items-center gap-2 text-base font-semibold tracking-tight text-white/90">argus<span style="color:#b388ff">.pair</span></div>
-        <span class="pill">${isDebugMode() ? 'debug' : 'phone'}</span>
-      </header>
-      <div class="flex flex-1 flex-col items-center justify-center gap-8 text-center">
-        <div class="flex h-24 w-24 items-center justify-center rounded-3xl bg-accent/15 text-accent">◆</div>
-        <div class="space-y-2">
-          <h1 class="text-2xl font-semibold tracking-tight">${canUseTrust ? 'Welcome back' : 'Choose a check'}</h1>
-          <p class="text-sm leading-relaxed text-muted">${
-            canUseTrust
-              ? 'We remember this device. One tap to confirm.'
-              : 'Use a passkey if you already have one, or pick another proof.'
-          }</p>
-        </div>
-        ${state.errorMsg ? `<div class="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-left text-xs text-red-100">${escapeHtml(state.errorMsg)}</div>` : ''}
-        <div class="w-full space-y-3">
-          ${
-            canUseTrust
-              ? '<button data-action="confirm" class="btn btn-primary w-full py-4 text-base">Confirm</button>'
-              : `
-              <button data-action="passkey" class="btn btn-primary w-full py-4 text-base">Use passkey</button>
-              <button data-action="passkey-create" class="btn w-full py-4 text-base">Create passkey</button>
-              ${googleConfigured ? '<button data-action="google" class="btn w-full py-4 text-base">Continue with Google</button>' : ''}`
-          }
-        </div>
-        <div class="text-[11px] uppercase tracking-[0.18em] text-muted/70">${
-          canUseTrust
-            ? 'Trusted device · same network'
-            : googleConfigured
-              ? 'Passkey · Google · device check'
-              : 'Passkey · device check'
-        }</div>
-      </div>
-  </div>`;
+  root.innerHTML = renderPhoneReadyView({
+    canUseTrust: state.hasTrust && !state.info?.freshProofRequired,
+    googleConfigured,
+    debug: isDebugMode(),
+    errorMessage: state.errorMsg,
+  });
   root.querySelector('[data-action="confirm"]')?.addEventListener('click', () => void pair());
   root
     .querySelector('[data-action="passkey"]')
@@ -757,71 +589,11 @@ async function isGoogleConfigured(): Promise<boolean> {
 }
 
 function renderPanel(): void {
-  const isBusy =
-    state.phase === 'awaiting-desktop' || state.phase === 'pairing' || state.phase === 'returning';
-  const title = panelTitle();
-  const body = panelBody();
-  const icon =
-    state.phase === 'paired'
-      ? '✓'
-      : state.phase === 'failed' || state.phase === 'error'
-        ? '×'
-        : '◆';
-  root.innerHTML = `
-    <div class="mx-auto flex min-h-dvh max-w-sm flex-col gap-8 px-6 py-10">
-      <header class="flex items-center justify-between">
-        <div class="flex items-center gap-2 text-base font-semibold tracking-tight text-white/90">argus<span style="color:#b388ff">.pair</span></div>
-        <span class="pill">${isDebugMode() ? 'debug' : 'phone'}</span>
-      </header>
-      <div class="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-        <div class="relative">
-          ${isBusy ? '<div class="absolute inset-0 animate-ping rounded-full bg-accent/30"></div>' : ''}
-          <div class="relative flex h-20 w-20 items-center justify-center rounded-full ${panelToneClass()} text-3xl">${icon}</div>
-        </div>
-        <div class="space-y-2">
-          <div class="text-xl font-semibold">${title}</div>
-          <p class="break-all text-sm text-muted">${escapeHtml(body)}</p>
-        </div>
-        ${isBusy ? `<div class="mt-1 flex items-center justify-center gap-2 text-xs text-muted"><span class="spinner"></span><span class="pulse-fade">${escapeHtml(state.status || 'working')}</span></div>` : ''}
-      </div>
-    </div>`;
-}
-
-function panelTitle(): string {
-  if (state.phase === 'awaiting-desktop') return 'Waiting for the desktop';
-  if (state.phase === 'returning') return 'Welcome back';
-  if (state.phase === 'pairing') return 'Verifying';
-  if (state.phase === 'paired') return 'Verified';
-  if (state.phase === 'failed') return 'Not verified';
-  if (state.phase === 'taken') return 'This code is already paired';
-  if (state.phase === 'timeout') return 'QR code timed out';
-  return 'Something went wrong';
-}
-
-function panelBody(): string {
-  if (state.phase === 'awaiting-desktop') return 'about a second';
-  if (state.phase === 'returning') return state.status || 'remembered this device';
-  if (state.phase === 'pairing') return state.status || 'working';
-  if (state.phase === 'paired') return 'You can close this tab. The desktop has the result.';
-  if (state.phase === 'failed') return state.verdict ?? 'failed';
-  if (state.phase === 'taken')
-    return 'Another device beat you to it. Ask the desktop for a fresh QR code.';
-  if (state.phase === 'timeout')
-    return 'The desktop has not finished or the code expired. Ask the desktop for a fresh QR code.';
-  return state.errorMsg ?? 'Unknown error';
-}
-
-function panelToneClass(): string {
-  if (state.phase === 'paired') return 'bg-green-500/15 text-green-300';
-  if (state.phase === 'failed' || state.phase === 'error') return 'bg-red-500/15 text-red-300';
-  return 'bg-accent/15 text-accent';
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"]/g, (ch) => {
-    if (ch === '&') return '&amp;';
-    if (ch === '<') return '&lt;';
-    if (ch === '>') return '&gt;';
-    return '&quot;';
+  root.innerHTML = renderPhonePanelView({
+    phase: state.phase,
+    status: state.status,
+    verdict: state.verdict,
+    errorMessage: state.errorMsg,
+    debug: isDebugMode(),
   });
 }

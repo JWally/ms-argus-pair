@@ -943,9 +943,7 @@ export function signalChallengeDone(info: PhoneSessionInfo): void {
 const PASSKEY_HINT_KEY = 'argus-pair:passkey-registered';
 const PASSKEY_CRED_ID_KEY = 'argus-pair:passkey-credential-id';
 
-/** @public — passkey-hint UI helper, dormant while passkeys are off the
- *  mobile UX (Pair.tsx no longer renders passkey buttons). Kept for if/when
- *  passkeys are reinstated. */
+/** @public — passkey-hint UI helper used by the canonical phone entry and SSO. */
 export function hasPasskeyHint(): boolean {
   try {
     return window.localStorage.getItem(PASSKEY_HINT_KEY) === '1';
@@ -956,12 +954,12 @@ export function hasPasskeyHint(): boolean {
 
 /**
  * Clear the passkey hint so the next button screen offers CREATE
- * PASSKEY instead of USE PASSKEY. Called from Pair.tsx when the
+ * PASSKEY instead of USE PASSKEY. Called from phone-main.tsx when the
  * server reports the stored credential isn't recognized server-side
  * (the classic stuck-hint failure mode after a registration-time
  * rpId mismatch).
  *
- * @public — dormant while passkeys are off the mobile UX; kept for reinstating.
+ * @public — shared by phone pairing and mobile SSO.
  */
 export function clearPasskeyHint(): void {
   writePasskeyHint(null);

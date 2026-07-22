@@ -45,7 +45,7 @@ assert(
   'phone timing must record the real background scan window in the batched timeline'
 );
 assert(
-  phoneMain.includes("void pair('integrity', { keepDialpad: true })"),
+  phoneMain.includes("void pair('integrity', { keepDrawingBoard: true })"),
   'Fast Pass should keep the challenge visible while submission finishes'
 );
 assert(

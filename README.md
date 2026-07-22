@@ -201,12 +201,14 @@ ms-argus-pair/
 ├── loader/loader.ts            # embeddable captcha.js (own build + CDN stack)
 ├── src/
 │   ├── main.tsx                # SPA entry: /embed, /merchant, /sso/*, /merchant/validate
-│   ├── phone-main.tsx          # phone entry (vanilla DOM, phone.html): /pair/*, /p/*
+│   ├── phone-main.tsx          # phone orchestration entry (phone.html): /pair/*, /p/*
+│   ├── lib/phone-drawing-board.ts # sole phone challenge UI: letter drawing
+│   ├── lib/phone-view.ts       # pure proof-menu and status presentation
 │   ├── lib/pair.ts             # session orchestration (desktop + phone)
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)
-│   └── pages/                  # Embed, Pair, MerchantSso, SsoChallenge, MerchantValidate
+│   └── pages/                  # Embed, MerchantSso, SsoChallenge, MerchantValidate
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
@@ -223,7 +225,8 @@ Routing: `index.html` serves the React SPA; `phone.html` is a separate
 lightweight entry so the phone paints instantly. A CloudFront Function maps
 `/pair/*` and `/p/*` to `phone.html`; `/api/*` goes to the HTTP API; `/embed`
 gets its own behavior without `X-Frame-Options: DENY` so customers can iframe
-it (everything else keeps DENY).
+it (everything else keeps DENY). There is deliberately no React phone fallback:
+`src/phone-main.tsx` and its letter-drawing board are the single phone UI.
 
 Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection
