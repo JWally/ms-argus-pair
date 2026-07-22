@@ -93,6 +93,12 @@ can pass, until that scan is verified and stored by `desktop-attest`. The
 merchant-realm preflight protocol remains available server-side for future
 work, but the shipped loader does not launch a second browser scan.
 
+The embed route is a thin iframe controller. `embed-config.ts` validates its
+loader-provided URL and viewport message boundary, `embed-session.ts` owns Pair
+startup plus animated QR resource cleanup and host lifecycle messages, and
+`EmbedView.tsx` owns markup. Those contracts are tested without mounting the
+live Pair transport.
+
 ## How a pairing works
 
 ```
@@ -224,6 +230,8 @@ ms-argus-pair/
 │   ├── lib/argus-client.ts     # signed-bootstrap and attested-scan adapter
 │   ├── lib/sso-client.ts       # mobile SSO proof and transport orchestration
 │   ├── lib/merchant-validation-flow.ts # SSO return policy and callback binding
+│   ├── lib/embed-config.ts      # loader URL and viewport-message validation
+│   ├── lib/embed-session.ts     # Pair/QR lifecycle and host message orchestration
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
 │   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow
@@ -231,7 +239,7 @@ ms-argus-pair/
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)
-│   └── pages/                  # route controllers and presentation components
+│   └── pages/                  # thin route controllers plus Embed/merchant views
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets

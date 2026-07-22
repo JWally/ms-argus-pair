@@ -2,18 +2,31 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-const [api, desktopRoute, sessionStart, verifyRoute, store, pair, embed, loader, readme] =
-  await Promise.all([
-    read('cdk/lib/pair-api.ts'),
-    read('cdk/lib/pair-api/desktop-attestation-route.ts'),
-    read('cdk/lib/pair-api/session-start.ts'),
-    read('cdk/lib/pair-api/verdict-verification-route.ts'),
-    read('cdk/lib/session-store.ts'),
-    read('src/lib/pair.ts'),
-    read('src/pages/Embed.tsx'),
-    read('loader/loader.ts'),
-    read('README.md'),
-  ]);
+const [
+  api,
+  desktopRoute,
+  sessionStart,
+  verifyRoute,
+  store,
+  pair,
+  embed,
+  embedConfig,
+  embedSession,
+  loader,
+  readme,
+] = await Promise.all([
+  read('cdk/lib/pair-api.ts'),
+  read('cdk/lib/pair-api/desktop-attestation-route.ts'),
+  read('cdk/lib/pair-api/session-start.ts'),
+  read('cdk/lib/pair-api/verdict-verification-route.ts'),
+  read('cdk/lib/session-store.ts'),
+  read('src/lib/pair.ts'),
+  read('src/pages/Embed.tsx'),
+  read('src/lib/embed-config.ts'),
+  read('src/lib/embed-session.ts'),
+  read('loader/loader.ts'),
+  read('README.md'),
+]);
 
 assert.match(sessionStart, /parseMerchantChallenge\(body\.challengeId\)/);
 assert.match(sessionStart, /challengeId/);
@@ -28,7 +41,8 @@ assert.match(loader, /getAttribute\('data-challenge-id'\)/);
 assert.match(loader, /opts\.challengeId/);
 assert.match(loader, /&challengeId=/);
 assert.match(embed, /challengeId/);
-assert.match(embed, /Missing or invalid merchant challenge/);
+assert.match(embedConfig, /CHALLENGE_FORMAT/);
+assert.match(embedSession, /Missing or invalid merchant challenge/);
 assert.match(readme, /merchant backend/i);
 assert.match(readme, /challengeId/);
 
