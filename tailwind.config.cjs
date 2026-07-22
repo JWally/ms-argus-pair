@@ -32,7 +32,7 @@ module.exports = {
           900: '#2A0E44',
         },
         // Legacy pair-only tokens still referenced by index.css
-        // (qr-frame, step-dot, sso-shell, dialer, etc.).
+        // (qr-frame, step-dot, sso-shell, etc.).
         bg: '#0a0a0a',
         panel: '#141414',
         edge: '#262626',

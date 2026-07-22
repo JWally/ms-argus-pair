@@ -12,13 +12,7 @@ import prettier from 'eslint-config-prettier';
 
 export default [
   {
-    ignores: [
-      'dist',
-      'cdk.out',
-      'node_modules',
-      '**/*.d.ts',
-      'loader',
-    ],
+    ignores: ['dist', 'cdk.out', 'node_modules', '**/*.d.ts', 'loader'],
   },
   js.configs.recommended,
   {
@@ -152,7 +146,7 @@ export default [
   {
     // Known legacy consolidation points. Keep these exemptions narrow so new
     // code gets the ratchet pressure while we split the handlers intentionally.
-    files: ['cdk/lib/pair-api.ts', 'src/lib/pair.ts', 'src/phone-main.tsx'],
+    files: ['cdk/lib/pair-api.ts', 'src/lib/pair.ts'],
     rules: {
       complexity: 'off',
       'max-depth': 'off',
@@ -175,7 +169,6 @@ export default [
       'src/pages/Embed.tsx',
       'src/pages/MerchantSso.tsx',
       'src/pages/MerchantValidate.tsx',
-      'src/pages/Pair.tsx',
       'src/pages/SsoChallenge.tsx',
       'src/phone-main.tsx',
     ],
@@ -194,7 +187,6 @@ export default [
       'cdk/lib/pair-stack.ts',
       'src/pages/Embed.tsx',
       'src/pages/MerchantValidate.tsx',
-      'src/pages/Pair.tsx',
     ],
     rules: {
       complexity: 'off',

@@ -72,6 +72,36 @@ const ratchets = [
     why: 'keep desktop workflow state moving into named, tested client modules',
   },
   {
+    file: 'src/phone-main.tsx',
+    maxLines: 599,
+    why: 'keep the single phone entry focused while drawing and proof logic move into tested modules',
+  },
+  {
+    file: 'src/lib/phone-drawing-board.ts',
+    maxLines: 222,
+    why: 'keep the sole phone challenge isolated from pairing orchestration and alternate UI modes',
+  },
+  {
+    file: 'src/lib/phone-view.ts',
+    maxLines: 141,
+    why: 'keep phone status presentation pure and directly testable',
+  },
+  {
+    file: 'src/lib/phone-pair-failure.ts',
+    maxLines: 42,
+    why: 'keep phone proof failure policy pure and independent from DOM orchestration',
+  },
+  {
+    file: 'src/lib/phone-pair.ts',
+    maxLines: 14,
+    why: 'keep the lazy phone-to-pair boundary explicit and minimal',
+  },
+  {
+    file: 'src/main.tsx',
+    maxLines: 35,
+    why: 'keep phone pairing out of the React SPA router',
+  },
+  {
     file: 'src/lib/desktop-result-poll.ts',
     maxLines: 116,
     why: 'keep the authenticated verdict fallback independent from desktop orchestration',
