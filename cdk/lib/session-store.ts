@@ -1,7 +1,7 @@
 /**
  * Valkey session-state helpers.
  *
- * Mirrors the DDB session-row operations in pair-api.ts, using only
+ * Mirrors the DDB session-row operations in pair-session-repository.ts, using only
  * native Redis commands (no Lua) by splitting the single session row
  * into per-field keys:
  *
@@ -15,8 +15,8 @@
  * annotations into one key so the "claim phone slot + record verdict"
  * pair is atomic on a single SET instead of two ordered writes.
  *
- * Reads compose via `MGET` — 1 round-trip pulls the 4 session keys,
- * the app code reassembles them into the existing `SessionItem` shape
+ * Reads compose via `MGET` — 1 round-trip pulls the 3 session keys,
+ * the repository reassembles them into the existing `PairSessionItem` shape
  * so downstream handlers don't have to care which store served the
  * data.
  *
@@ -52,14 +52,13 @@ const desktopKey = (id: string) => `session:{${id}}:desktop`;
 const phoneKey = (id: string) => `session:{${id}}:phone`;
 const claimKey = (argusSid: string) => `claim:{${argusSid}}`;
 
-// ── Shared type — kept in sync with pair-api.ts ─────────────────────
-// Defining a lightweight alias here so we don't have to import the
-// full StoredAttestation chain. Callers cast to the concrete type
-// when reassembling SessionItem.
+// ── Shared transport types ──────────────────────────────────────────
+// Generic attestation parameters keep this transport adapter independent
+// from Pair policy while preserving concrete types at the repository boundary.
 
 type SessionFieldBlob = Record<string, unknown>;
 
-export interface SessionMeta {
+export interface SessionMeta<HostAttestation extends object = SessionFieldBlob> {
   nonce: string;
   expiresAt: number;
   /** Merchant-generated identifier for the single protected action. */
@@ -75,11 +74,11 @@ export interface SessionMeta {
   /** Exact merchant origin the required host scan must sign. */
   hostOrigin?: string;
   /** Legacy sessions stored host evidence in meta before async attachment shipped. */
-  hostAttestation?: SessionFieldBlob;
+  hostAttestation?: HostAttestation;
 }
 
-export interface PhoneBundle {
-  att: SessionFieldBlob;
+export interface PhoneBundle<Attestation extends object = SessionFieldBlob> {
+  att: Attestation;
   verdict: 'pending' | 'paired' | 'failed';
   reason: string | null;
   annotations: Record<string, unknown>;
@@ -87,13 +86,19 @@ export interface PhoneBundle {
 
 /**
  * MGETs the 3 session keys in one round-trip, returns the raw JSON
- * strings (or null for keys that don't exist). Caller decides how to
- * reassemble into the SessionItem shape.
+ * strings (or null for keys that don't exist). The repository decides how to
+ * reassemble them into the PairSessionItem shape.
  */
-export async function mgetSession(sessionId: string): Promise<{
-  meta: SessionMeta | null;
-  desktop: SessionFieldBlob | null;
-  phone: PhoneBundle | null;
+export async function mgetSession<
+  DesktopAttestation extends object = SessionFieldBlob,
+  PhoneAttestation extends object = SessionFieldBlob,
+  HostAttestation extends object = SessionFieldBlob,
+>(
+  sessionId: string
+): Promise<{
+  meta: SessionMeta<HostAttestation> | null;
+  desktop: DesktopAttestation | null;
+  phone: PhoneBundle<PhoneAttestation> | null;
 }> {
   const valkey = getValkey();
   const [meta, desktop, phone] = await valkey.mget(
@@ -102,9 +107,9 @@ export async function mgetSession(sessionId: string): Promise<{
     phoneKey(sessionId)
   );
   return {
-    meta: meta ? (JSON.parse(meta) as SessionMeta) : null,
-    desktop: desktop ? (JSON.parse(desktop) as SessionFieldBlob) : null,
-    phone: phone ? (JSON.parse(phone) as PhoneBundle) : null,
+    meta: meta ? (JSON.parse(meta) as SessionMeta<HostAttestation>) : null,
+    desktop: desktop ? (JSON.parse(desktop) as DesktopAttestation) : null,
+    phone: phone ? (JSON.parse(phone) as PhoneBundle<PhoneAttestation>) : null,
   };
 }
 
@@ -123,9 +128,9 @@ export async function startSessionValkey(sessionId: string, meta: SessionMeta): 
  * Atomic claim of the desktop attestation slot. Returns false if the
  * slot was already taken — caller maps to 409 already_attested.
  */
-export async function recordDesktopAttestationValkey(
+export async function recordDesktopAttestationValkey<Attestation extends object>(
   sessionId: string,
-  att: SessionFieldBlob
+  att: Attestation
 ): Promise<boolean> {
   const valkey = getValkey();
   const r = await valkey.set(
@@ -147,10 +152,10 @@ export async function recordDesktopAttestationValkey(
  * the race) so the caller can return an idempotent success response
  * with the winning verdict.
  */
-export async function recordPhoneAttestationValkey(
+export async function recordPhoneAttestationValkey<Attestation extends object>(
   sessionId: string,
-  bundle: PhoneBundle
-): Promise<{ ok: true } | { ok: false; existing: PhoneBundle | null }> {
+  bundle: PhoneBundle<Attestation>
+): Promise<{ ok: true } | { ok: false; existing: PhoneBundle<Attestation> | null }> {
   const valkey = getValkey();
   const r = await valkey.set(
     phoneKey(sessionId),
@@ -163,7 +168,7 @@ export async function recordPhoneAttestationValkey(
   const existingRaw = await valkey.get(phoneKey(sessionId));
   return {
     ok: false,
-    existing: existingRaw ? (JSON.parse(existingRaw) as PhoneBundle) : null,
+    existing: existingRaw ? (JSON.parse(existingRaw) as PhoneBundle<Attestation>) : null,
   };
 }
 
