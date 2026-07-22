@@ -200,6 +200,11 @@ structured handling. Each SSO leg also emits a bounded, best-effort event to
 access log records request id, route, status, integration status/error, and
 response length without request bodies or credentials.
 
+Merchant return policy lives in `src/lib/merchant-validation-flow.ts`: scoped
+assurance selection, stale-trust fallback, explicit proof transitions, and the
+server-bound callback URL are tested without React. `MerchantValidate` owns
+only lifecycle state and navigation; `MerchantValidationView` owns presentation.
+
 An otherwise-clean scan whose only risk is the 35-point isolated-location
 mismatch is allowed through the per-side limit. The combined score must still
 remain below 50, so two such mismatches fail closed; any automation/network
@@ -218,6 +223,7 @@ ms-argus-pair/
 │   ├── lib/pair.ts             # desktop and phone Pair composition root
 │   ├── lib/argus-client.ts     # signed-bootstrap and attested-scan adapter
 │   ├── lib/sso-client.ts       # mobile SSO proof and transport orchestration
+│   ├── lib/merchant-validation-flow.ts # SSO return policy and callback binding
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
 │   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow
@@ -225,7 +231,7 @@ ms-argus-pair/
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)
-│   └── pages/                  # Embed, MerchantSso, SsoChallenge, MerchantValidate
+│   └── pages/                  # route controllers and presentation components
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets

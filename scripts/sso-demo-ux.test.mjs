@@ -15,6 +15,8 @@ function assert(condition, message) {
 const merchant = read('src/pages/MerchantSso.tsx');
 const challenge = read('src/pages/SsoChallenge.tsx');
 const validate = read('src/pages/MerchantValidate.tsx');
+const validationView = read('src/pages/MerchantValidationView.tsx');
+const validationFlow = read('src/lib/merchant-validation-flow.ts');
 const mobile = read('src/pages/MobileSso.tsx');
 const ssoClient = read('src/lib/sso-client.ts');
 const argusClient = read('src/lib/argus-client.ts');
@@ -22,16 +24,17 @@ const main = read('src/main.tsx');
 const shell = read('src/components/SsoStatusShell.tsx');
 const brand = read('src/components/Brand.tsx');
 const ssoLegBody = ssoClient.match(/function runSsoLeg[\s\S]*?\n}\n\nfunction/)?.[0];
+const validationSurface = `${validate}\n${validationView}\n${validationFlow}`;
 
 assert(
-  !validate.includes('nameInput') && !validate.includes('submitSsoClaim'),
+  !validationSurface.includes('nameInput') && !validationSurface.includes('submitSsoClaim'),
   'merchant validate page should not contain the retired game claim'
 );
 assert(
-  validate.includes('proof required') &&
-    validate.includes('Use passkey') &&
-    validate.includes('Create passkey') &&
-    validate.includes('Continue with Google'),
+  validationView.includes('proof required') &&
+    validationView.includes('Use passkey') &&
+    validationView.includes('Create passkey') &&
+    validationView.includes('Continue with Google'),
   'merchant validate page should gate SSO validation behind proof buttons'
 );
 assert(
@@ -40,15 +43,15 @@ assert(
 );
 assert(
   validate.includes('useNavigate') &&
-    validate.includes("complete: '1'") &&
-    validate.includes('cpi') &&
-    validate.includes('replace: true'),
+    validationFlow.includes("complete: '1'") &&
+    validationFlow.includes('cpi') &&
+    validate.includes("navigate(redirect.url, { replace: true })"),
   'approved validation should automatically continue to approval-cookie redemption'
 );
 assert(
-  validate.includes("endsWith('.fastpass')") &&
-    validate.includes("mode: 'integrity-only'") &&
-    validate.includes("endsWith('.forceauth')"),
+  validationFlow.includes("endsWith('.fastpass')") &&
+    validationFlow.includes("mode: 'integrity-only'") &&
+    validationFlow.includes("endsWith('.forceauth')"),
   'merchant validation UI should honor fastpass and forceauth policy UX'
 );
 assert(
@@ -64,11 +67,11 @@ assert(
   'the hosted SSO scan should return automatically without a drawing gate'
 );
 assert(
-  !challenge.includes('Session check failed') && !validate.includes('Session is Not Valid'),
+  !challenge.includes('Session check failed') && !validationSurface.includes('Session is Not Valid'),
   'Argus-hosted SSO pages should not disclose the merchant verdict'
 );
 assert(
-  merchant.includes('merchant-page') && validate.includes('merchant-page'),
+  merchant.includes('merchant-page') && validationView.includes('merchant-page'),
   'both merchant legs should use the daylight merchant theme'
 );
 assert(
@@ -76,7 +79,7 @@ assert(
   'the hosted Argus leg should stay dark and omit the redundant route map'
 );
 assert(
-  !merchant.includes('sso-route') && !validate.includes('sso-route'),
+  !merchant.includes('sso-route') && !validationView.includes('sso-route'),
   'merchant pages should omit the redundant route map'
 );
 assert(
@@ -109,7 +112,7 @@ assert(
 assert(
   mobile.includes('<SsoStatusShell') &&
     challenge.includes('<SsoStatusShell') &&
-    validate.includes('<SsoStatusShell'),
+    validationView.includes('<SsoStatusShell'),
   'hosted SSO stages should keep one stable Argus presentation'
 );
 assert(
@@ -124,8 +127,8 @@ assert(
     !challenge.includes('Return to merchant') &&
     !challenge.includes('return to the merchant') &&
     !mobile.includes('Return to merchant') &&
-    !validate.includes('Returning to merchant') &&
-    !validate.includes('Merchant response'),
+    !validationView.includes('Returning to merchant') &&
+    !validationView.includes('Merchant response'),
   'customer-facing SSO copy should not call the destination a merchant'
 );
 assert(
@@ -137,7 +140,7 @@ assert(
     !shell.includes('sso-stage-total') &&
     mobile.includes('step={1}') &&
     challenge.includes('step={2}') &&
-    validate.includes('step={3}'),
+    validationView.includes('step={3}'),
   'the stable SSO shell should show progress tied to the three real protocol stages'
 );
 assert(

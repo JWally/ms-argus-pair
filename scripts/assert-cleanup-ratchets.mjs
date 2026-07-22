@@ -102,6 +102,21 @@ const ratchets = [
     why: 'keep mobile SSO proof selection and transport orchestration independently testable',
   },
   {
+    file: 'src/lib/merchant-validation-flow.ts',
+    maxLines: 207,
+    why: 'keep merchant assurance transitions and callback binding independent from React',
+  },
+  {
+    file: 'src/pages/MerchantValidate.tsx',
+    maxLines: 124,
+    why: 'keep merchant validation lifecycle orchestration below the component size target',
+  },
+  {
+    file: 'src/pages/MerchantValidationView.tsx',
+    maxLines: 192,
+    why: 'keep SSO return presentation separate from validation policy and browser effects',
+  },
+  {
     file: 'src/lib/passkey-client.ts',
     maxLines: 185,
     why: 'keep host-bound WebAuthn and optional browser hints independent from Pair and SSO orchestration',
