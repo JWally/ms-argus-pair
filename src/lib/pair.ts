@@ -35,9 +35,15 @@ import { bootstrapDesktopSession } from './desktop-session-bootstrap';
 import { mintDesktopQr } from './desktop-qr';
 import type { SecureQrImage } from './qr-keyholder';
 import { decodeVerdictRevealKey, openFixedVerdictEnvelope } from './verdict-envelope';
-import { awaitWithDeadline } from './client-deadline';
 import { createDesktopSessionRuntime } from './desktop-session-runtime';
-import { HttpError, jsonFetch } from './json-http';
+import { jsonFetch } from './json-http';
+import {
+  ARGUS_CPI,
+  baseIntegrityCpi,
+  runArgusScan,
+  type ArgusAttestation,
+  type ArgusRunResult,
+} from './argus-client';
 import {
   authenticateExistingPasskey,
   createNewPasskey,
@@ -54,73 +60,15 @@ import {
   type PhoneSessionInfo,
   type PhoneSessionOptions,
 } from './phone-session-runtime';
-import { withSsoClientStage } from './sso-observability';
 
 export type { PhoneSessionInfo } from './phone-session-runtime';
 export type { SubmitPhoneAttestationOptions } from './phone-attestation';
 
 const API = '/api';
-const ATTEST_PURPOSE = 'argus-pair-v1';
-const ATTEST_TTL_SECONDS = 120;
-const ARGUS_BOOTSTRAP_TIMEOUT_MS = 15_000;
-const ARGUS_CPI =
-  (import.meta.env.VITE_MERCHANT_CPI as string | undefined) ??
-  'argus_cpi_test_UEeqk7Bk7uetxKKDxNmIdB';
-
-interface ArgusAttestation {
-  envelope: string;
-  signature: string;
-  publicKey: string;
-  keyId: string;
-}
 
 export interface HostPreflightScan {
   argusSessionId: string;
   attestation: ArgusAttestation;
-}
-
-interface ArgusRunResult {
-  sessionId: string | null;
-  argusSessionId: string;
-  durationMs: number;
-  attestation?: ArgusAttestation | null;
-  attestError?: string | null;
-}
-
-interface ArgusGlobal {
-  run(opts: {
-    sessionId?: string;
-    cpi?: string;
-    timeoutMs?: number;
-    attest?: { purpose: string; payload?: unknown; ttlSeconds?: number };
-  }): Promise<ArgusRunResult>;
-}
-
-declare global {
-  interface Window {
-    argus?: ArgusGlobal;
-    argusBootstrapReady?: Promise<void>;
-  }
-}
-
-function getArgus(): ArgusGlobal {
-  if (!window.argus) {
-    throw new Error('argus SDK not loaded (argus-loader.iife.js missing or blocked)');
-  }
-  return window.argus;
-}
-
-async function waitForArgus(): Promise<ArgusGlobal> {
-  // The stable bootstrap verifies a signed manifest before installing the SDK.
-  // Phone code can execute while that async chain is still in flight. Await the
-  // bootstrap's canonical readiness promise so eager scanning starts at the
-  // earliest safe moment without racing window.argus initialization.
-  await awaitWithDeadline(
-    window.argusBootstrapReady ?? Promise.resolve(),
-    ARGUS_BOOTSTRAP_TIMEOUT_MS,
-    'argus_bootstrap'
-  );
-  return getArgus();
 }
 
 export interface DesktopAttestedSummary {
@@ -173,35 +121,6 @@ export interface DesktopSession {
   getVerdictToken: () => Promise<string | null>;
 }
 
-export interface SsoStartResult {
-  sessionId: string;
-  nonce: string;
-  expiresAt: number;
-  cpi: string;
-  proofRequired: boolean;
-  freshProofRequired: boolean;
-  challengeUrl: string;
-  failureReturnUrl: string;
-}
-
-export interface SsoChallengeResult {
-  ok: true;
-  returnCode: string;
-  returnUrl: string;
-}
-
-export interface SsoValidateResult {
-  verdict: 'approved' | 'failed';
-  reason: string;
-  reasons: string[];
-  merchantSessionId: string;
-  cpi: string;
-  approvalCode?: string;
-  merchantCallbackUrl?: string;
-  merchantChallengeId?: string;
-  nextDeviceTrust?: string | null;
-}
-
 export interface StartDesktopOptions {
   /**
    * Merchant CPI to attribute this pairing's attestation + usage to. Defaults
@@ -217,11 +136,6 @@ export interface StartDesktopOptions {
   requestHostPreflight?: (binding: { pairSessionId: string }) => Promise<HostPreflightScan>;
   /** Exact merchant origin signed by the host scan and snapshotted at session start. */
   hostOrigin?: string;
-}
-
-/** Argus ingestion remains partitioned by the base CPI; Pair binds the full scoped CPI. */
-function integrityCpi(cpi: string): string {
-  return cpi.replace(/\.(?:fastpass|stepup|forceauth)$/, '');
 }
 
 export async function startDesktopSession(
@@ -263,21 +177,14 @@ export async function startDesktopSession(
   // settled wrapper prevents an early rejection from becoming unhandled while
   // WS identity and sealed QR minting continue independently.
   const desktopEvidencePromise = Promise.all([
-    waitForArgus().then((argus) =>
-      argus.run({
-        cpi: integrityCpi(opts.cpi || ARGUS_CPI),
-        timeoutMs: 30_000,
-        attest: {
-          purpose: ATTEST_PURPOSE,
-          ttlSeconds: ATTEST_TTL_SECONDS,
-          payload: {
-            sessionId: session.sessionId,
-            nonce: session.nonce,
-            role: 'desktop',
-          },
-        },
-      })
-    ),
+    runArgusScan({
+      cpi: baseIntegrityCpi(opts.cpi || ARGUS_CPI),
+      payload: {
+        sessionId: session.sessionId,
+        nonce: session.nonce,
+        role: 'desktop',
+      },
+    }),
     opts.hostPreflightRequired
       ? (opts.requestHostPreflight?.({ pairSessionId: session.sessionId }) ??
         Promise.reject(new Error('host preflight callback missing')))
@@ -411,179 +318,15 @@ export async function startDesktopSession(
   };
 }
 
-export function defaultSsoCpi(): string {
-  return `${integrityCpi(ARGUS_CPI)}.stepup`;
-}
-
-async function runSsoLeg(
-  cpi: string,
-  payload: Record<string, unknown>
-): Promise<{
-  argusSessionId: string;
-  attestation: ArgusAttestation;
-}> {
-  const stage = typeof payload.role === 'string' ? payload.role : 'unknown';
-  const sessionId = typeof payload.ssoSessionId === 'string' ? payload.ssoSessionId : null;
-  return withSsoClientStage(stage, 'argus_leg', sessionId, async () => {
-    const argus = await waitForArgus();
-    const run = await argus.run({
-      cpi: integrityCpi(cpi),
-      timeoutMs: 30_000,
-      attest: {
-        purpose: ATTEST_PURPOSE,
-        ttlSeconds: ATTEST_TTL_SECONDS,
-        payload: { ...payload, cpi },
-      },
-    });
-    if (!run.attestation) {
-      throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
-    }
-    return { argusSessionId: run.argusSessionId, attestation: run.attestation };
-  });
-}
-
-export async function startSsoSession(
-  merchantSessionId: string,
-  cpi: string,
-  merchantBinding?: { challengeId: string; callbackUrl: string }
-): Promise<SsoStartResult> {
-  const leg = await runSsoLeg(cpi, { role: 'merchant-start', merchantSessionId });
-  return withSsoClientStage('merchant-start', 'http_request', null, () =>
-    jsonFetch<SsoStartResult>(`${API}/sso/start`, {
-      method: 'POST',
-      body: JSON.stringify({
-        merchantSessionId,
-        cpi,
-        ...(merchantBinding
-          ? {
-              merchantChallengeId: merchantBinding.challengeId,
-              merchantCallbackUrl: merchantBinding.callbackUrl,
-            }
-          : {}),
-        ...leg,
-      }),
-    })
-  );
-}
-
-export async function submitSsoChallenge(
-  sessionId: string,
-  nonce: string,
-  cpi: string
-): Promise<SsoChallengeResult> {
-  const leg = await runSsoLeg(cpi, { role: 'argus-challenge', ssoSessionId: sessionId, nonce });
-  return withSsoClientStage('argus-challenge', 'http_request', sessionId, () =>
-    jsonFetch<SsoChallengeResult>(`${API}/sso/${encodeURIComponent(sessionId)}/challenge`, {
-      method: 'POST',
-      body: JSON.stringify(leg),
-    })
-  );
-}
-
-export async function validateSsoReturn({
-  sessionId,
-  nonce,
-  returnCode,
-  cpi,
-  mode,
-  oauthResult,
-  deviceTrustToken,
-}: {
-  sessionId: string;
-  nonce: string;
-  returnCode: string;
-  cpi: string;
-  mode?: 'integrity-only' | 'passkey-create' | 'passkey-auth' | 'oauth' | 'device-trust';
-  oauthResult?: { provider: 'google'; token: string };
-  deviceTrustToken?: string;
-}): Promise<SsoValidateResult> {
-  const useOAuth = mode === 'oauth';
-  const useDeviceTrust = mode === 'device-trust';
-  const useIntegrityOnly = mode === 'integrity-only';
-  const passkeyMode = mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
-  const webauthnPromise: Promise<unknown | { error: string }> =
-    useOAuth || useDeviceTrust || useIntegrityOnly
-      ? Promise.resolve({ error: `mode_${mode}_skipped` })
-      : passkeyMode === 'passkey-auth'
-        ? authenticateExistingPasskey(nonce)
-        : createNewPasskey(nonce);
-  const legPromise = runSsoLeg(cpi, {
-    role: 'merchant-validate',
-    ssoSessionId: sessionId,
-    nonce,
-    returnCode,
-  });
-  const [webauthnSettled, legSettled] = await Promise.allSettled([webauthnPromise, legPromise]);
-  if (legSettled.status !== 'fulfilled') throw legSettled.reason;
-  const webauthn =
-    webauthnSettled.status === 'fulfilled'
-      ? webauthnSettled.value
-      : { error: (webauthnSettled.reason as Error).message };
-  const createdCredentialId =
-    passkeyMode === 'passkey-create' &&
-    webauthnSettled.status === 'fulfilled' &&
-    webauthnSettled.value !== null &&
-    typeof webauthnSettled.value === 'object' &&
-    typeof (webauthnSettled.value as { id?: unknown }).id === 'string'
-      ? (webauthnSettled.value as { id: string }).id
-      : null;
-
-  const result = await withSsoClientStage('merchant-validate', 'http_request', sessionId, () =>
-    jsonFetch<SsoValidateResult>(`${API}/sso/${encodeURIComponent(sessionId)}/validate`, {
-      method: 'POST',
-      body: JSON.stringify({
-        returnCode,
-        ...legSettled.value,
-        ...(useDeviceTrust && deviceTrustToken ? { deviceTrustToken } : {}),
-        ...(!useDeviceTrust && !useOAuth && !useIntegrityOnly ? { webauthn } : {}),
-        ...(useOAuth && oauthResult ? { oauth: oauthResult } : {}),
-      }),
-    })
-  ).catch((e) => {
-    if (e instanceof HttpError && e.status === 403 && e.bodyJson?.verdict === 'failed') {
-      return e.bodyJson as unknown as SsoValidateResult;
-    }
-    throw e;
-  });
-  if (result.nextDeviceTrust) {
-    const { saveTrustToken } = await import('./device-trust');
-    await saveTrustToken(result.nextDeviceTrust);
-  }
-  if (result.verdict === 'approved' && createdCredentialId) {
-    rememberPasskeyCredential(createdCredentialId);
-  }
-  return result;
-}
-
-export async function redeemSsoApproval(
-  sessionId: string,
-  expectedCpi: string
-): Promise<{ verdict: 'approved'; reason: 'approved'; cpi: string; scope: string }> {
-  return jsonFetch<{ verdict: 'approved'; reason: 'approved'; cpi: string; scope: string }>(
-    `${API}/sso/approval/redeem`,
-    {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: JSON.stringify({ sessionId, cpi: expectedCpi }),
-    }
-  );
-}
-
 // ── CLIENT (phone) ───────────────────────────────────────────────────────
 
 async function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
-  const argus = await waitForArgus();
-  const scanPromise = argus.run({
+  const scanPromise = runArgusScan({
     cpi: ARGUS_CPI,
-    timeoutMs: 30_000,
-    attest: {
-      purpose: ATTEST_PURPOSE,
-      ttlSeconds: ATTEST_TTL_SECONDS,
-      payload: {
-        sessionId,
-        nonce,
-        role: 'phone',
-      },
+    payload: {
+      sessionId,
+      nonce,
+      role: 'phone',
     },
   });
   // Surface scan errors lazily — if a caller starts a scan and then the
@@ -649,5 +392,3 @@ export async function submitPhoneAttestation(
     }
   );
 }
-
-export { HttpError };

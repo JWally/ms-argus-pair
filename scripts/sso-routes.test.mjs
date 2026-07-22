@@ -13,7 +13,7 @@ function assert(condition, message) {
 }
 
 const main = read('src/main.tsx');
-const pairLib = read('src/lib/pair.ts');
+const ssoClient = read('src/lib/sso-client.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
 const router = read('cdk/lib/pair-api/router.ts');
@@ -81,11 +81,11 @@ assert(
   'verdict verification must require an exact merchant CPI assertion'
 );
 assert(
-  ssoApproval.includes('cpi_mismatch') && pairLib.includes('expectedCpi'),
+  ssoApproval.includes('cpi_mismatch') && ssoClient.includes('expectedCpi'),
   'one-time SSO approval redemption must require the merchant expected CPI'
 );
 assert(
-  pairLib.includes("mode?: 'integrity-only'") && pairLib.includes('freshProofRequired'),
+  ssoClient.includes("| 'integrity-only'") && ssoClient.includes('freshProofRequired'),
   'SSO clients must support integrity-only and forceauth policy behavior'
 );
 
@@ -96,7 +96,7 @@ for (const clientFn of [
   'redeemSsoApproval',
 ]) {
   assert(
-    pairLib.includes(`export async function ${clientFn}`),
+    ssoClient.includes(`export const ${clientFn}`),
     `missing client function ${clientFn}`
   );
 }
@@ -106,7 +106,7 @@ assert(
   !router.includes("'POST /api/sso/{id}/claim'"),
   'retired SSO claim handler should be removed'
 );
-assert(!pairLib.includes('submitSsoClaim'), 'retired SSO claim client should be removed');
+assert(!ssoClient.includes('submitSsoClaim'), 'retired SSO claim client should be removed');
 
 if (process.exitCode) process.exit(process.exitCode);
 console.log('sso-routes: ok');

@@ -88,8 +88,18 @@ const ratchets = [
   },
   {
     file: 'src/lib/pair.ts',
-    maxLines: 653,
-    why: 'keep desktop workflow state moving into named, tested client modules',
+    maxLines: 394,
+    why: 'keep Pair focused on desktop and phone composition instead of absorbing SSO or SDK concerns',
+  },
+  {
+    file: 'src/lib/argus-client.ts',
+    maxLines: 95,
+    why: 'keep signed SDK bootstrap and attested scan policy in one small browser adapter',
+  },
+  {
+    file: 'src/lib/sso-client.ts',
+    maxLines: 269,
+    why: 'keep mobile SSO proof selection and transport orchestration independently testable',
   },
   {
     file: 'src/lib/passkey-client.ts',

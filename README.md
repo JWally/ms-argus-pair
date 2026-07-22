@@ -215,7 +215,9 @@ ms-argus-pair/
 │   ├── phone-main.tsx          # phone orchestration entry (phone.html): /pair/*, /p/*
 │   ├── lib/phone-drawing-board.ts # sole phone challenge UI: letter drawing
 │   ├── lib/phone-view.ts       # pure proof-menu and status presentation
-│   ├── lib/pair.ts             # browser composition root and public adapters
+│   ├── lib/pair.ts             # desktop and phone Pair composition root
+│   ├── lib/argus-client.ts     # signed-bootstrap and attested-scan adapter
+│   ├── lib/sso-client.ts       # mobile SSO proof and transport orchestration
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
 │   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow

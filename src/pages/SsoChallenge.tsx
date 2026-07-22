@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { SsoStatusShell } from '../components/SsoStatusShell';
-import { submitSsoChallenge } from '../lib/pair';
+import { submitSsoChallenge } from '../lib/sso-client';
 import {
   failureReturnUrlFrom,
   loadSsoFailureReturnUrl,
