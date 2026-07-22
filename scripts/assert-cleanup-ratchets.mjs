@@ -88,7 +88,7 @@ const ratchets = [
   },
   {
     file: 'src/lib/pair.ts',
-    maxLines: 394,
+    maxLines: 293,
     why: 'keep Pair focused on desktop and phone composition instead of absorbing SSO or SDK concerns',
   },
   {
@@ -140,6 +140,16 @@ const ratchets = [
     file: 'src/lib/desktop-session-bootstrap.ts',
     maxLines: 88,
     why: 'keep desktop session transport bootstrap isolated from evidence and verdict orchestration',
+  },
+  {
+    file: 'src/lib/desktop-evidence.ts',
+    maxLines: 170,
+    why: 'keep desktop integrity, host evidence, and attestation submission directly testable',
+  },
+  {
+    file: 'src/lib/desktop-qr.ts',
+    maxLines: 110,
+    why: 'keep canonical-origin policy and sealed QR minting isolated from session composition',
   },
   {
     file: 'src/phone-main.tsx',

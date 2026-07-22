@@ -101,11 +101,11 @@ This has bitten us **twice** under the same root cause:
 shell-quoting or `source .env` quirk on a fresh shell). Three defenses
 are in place — keep all three.
 
-1. **Runtime guard in `src/lib/pair.ts`.** In production builds, if
-   `VITE_PAIR_URL_BASE` is unset we **throw** before rendering the QR.
-   The desktop demo crashes loudly instead of producing scannable-but-
-   wrong QRs. Dev (vite dev) keeps the fallback so localhost still
-   works.
+1. **Runtime guard in `src/lib/desktop-qr.ts`.** `pair.ts` passes its baked and
+   current origins into `resolveDesktopQrContext`; production builds **throw**
+   before rendering the QR when `VITE_PAIR_URL_BASE` is unset. The desktop demo
+   crashes loudly instead of producing scannable-but-wrong QRs. Dev (vite dev)
+   keeps the fallback so localhost still works.
 2. **Build-time guard in `vite.config.ts`.** Vite refuses to build
    without `VITE_PAIR_URL_BASE` unless `PAIR_ALLOW_ORIGIN_FALLBACK=1`
    is set (pre-push lint builds use that escape hatch).
@@ -126,9 +126,9 @@ If you ever see the QR pointing at the wrong host:
 - Run `node cdk/bin/assert-baked-host.mjs captcha-dev-jw.argus.pw`
   against the local `dist/` to confirm what was just built.
 
-Last incident: 2026-06-02. Both fix branches kept the file at
-`src/lib/pair.ts` around the `pairOrigin` build — that's the choke
-point where the bug surfaces.
+Last incident: 2026-06-02. The choke point is now
+`resolveDesktopQrContext` in `src/lib/desktop-qr.ts`, invoked by
+`startDesktopSession` before QR minting.
 
 ## Deploys: the deploy script sources `.env` and uses `--all`
 

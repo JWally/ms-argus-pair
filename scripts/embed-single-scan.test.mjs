@@ -2,25 +2,27 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-const [loader, embed, embedSession, pair, desktopBootstrap] = await Promise.all([
+const [loader, embed, embedSession, pair, desktopBootstrap, desktopEvidence] = await Promise.all([
   read('loader/loader.ts'),
   read('src/pages/Embed.tsx'),
   read('src/lib/embed-session.ts'),
   read('src/lib/pair.ts'),
   read('src/lib/desktop-session-bootstrap.ts'),
+  read('src/lib/desktop-evidence.ts'),
 ]);
 
 // The standard captcha embed runs only the isolated Pair scan. Keep the
 // server-side host-evidence protocol dormant until it has a deliberate design.
 assert.doesNotMatch(loader, /runHostPreflight|host-scan|hostPreflight=1|argus\.run/);
 assert.doesNotMatch(`${embed}\n${embedSession}`, /requestHostPreflight|host-scan|hostPreflight/);
-assert.match(pair, /role: 'desktop'/);
+assert.match(desktopEvidence, /role: 'desktop'/);
+assert.doesNotMatch(pair, /role: 'desktop'/);
 
 const sessionStart = pair.indexOf(
   'const { session, desktopConn } = await bootstrapDesktopSession('
 );
 const qrMint = pair.indexOf('mintDesktopQr(', sessionStart);
-const evidenceStart = pair.indexOf('desktopEvidencePromise', sessionStart);
+const evidenceStart = pair.indexOf('startDesktopEvidence({', sessionStart);
 assert.ok(sessionStart >= 0 && qrMint > sessionStart, 'desktop session/QR sequence changed');
 assert.ok(
   evidenceStart > sessionStart && evidenceStart < qrMint,

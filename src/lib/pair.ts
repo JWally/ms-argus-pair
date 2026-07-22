@@ -32,18 +32,17 @@
 
 import { connectAndWhoami, openWs } from './ws';
 import { bootstrapDesktopSession } from './desktop-session-bootstrap';
-import { mintDesktopQr } from './desktop-qr';
+import { mintDesktopQr, resolveDesktopQrContext } from './desktop-qr';
 import type { SecureQrImage } from './qr-keyholder';
 import { decodeVerdictRevealKey, openFixedVerdictEnvelope } from './verdict-envelope';
 import { createDesktopSessionRuntime } from './desktop-session-runtime';
-import { jsonFetch } from './json-http';
 import {
-  ARGUS_CPI,
-  baseIntegrityCpi,
-  runArgusScan,
-  type ArgusAttestation,
-  type ArgusRunResult,
-} from './argus-client';
+  startDesktopEvidence,
+  type DesktopAttestedSummary,
+  type HostPreflightScan,
+} from './desktop-evidence';
+import { jsonFetch } from './json-http';
+import { ARGUS_CPI, runArgusScan, type ArgusRunResult } from './argus-client';
 import {
   authenticateExistingPasskey,
   createNewPasskey,
@@ -66,29 +65,7 @@ export type { SubmitPhoneAttestationOptions } from './phone-attestation';
 
 const API = '/api';
 
-export interface HostPreflightScan {
-  argusSessionId: string;
-  attestation: ArgusAttestation;
-}
-
-export interface DesktopAttestedSummary {
-  clean: boolean;
-  summary: {
-    score?: number;
-    pat_attested?: boolean;
-    is_proxy?: boolean;
-    is_datacenter?: boolean;
-    is_vpn?: boolean;
-    is_mobile_network?: boolean;
-    browser_name?: string | null;
-    browser_version?: string | null;
-    os?: string | null;
-    ip?: string | null;
-    asn_name?: string | null;
-    city?: string | null;
-    country?: string | null;
-  } | null;
-}
+export type { DesktopAttestedSummary, HostPreflightScan } from './desktop-evidence';
 
 export interface PairEvents {
   onStatus?: (status: string) => void;
@@ -173,71 +150,21 @@ export async function startDesktopSession(
     }
   );
 
-  // Evidence starts as soon as the server-issued session binding exists. The
-  // settled wrapper prevents an early rejection from becoming unhandled while
-  // WS identity and sealed QR minting continue independently.
-  const desktopEvidencePromise = Promise.all([
-    runArgusScan({
-      cpi: baseIntegrityCpi(opts.cpi || ARGUS_CPI),
-      payload: {
-        sessionId: session.sessionId,
-        nonce: session.nonce,
-        role: 'desktop',
-      },
-    }),
-    opts.hostPreflightRequired
-      ? (opts.requestHostPreflight?.({ pairSessionId: session.sessionId }) ??
-        Promise.reject(new Error('host preflight callback missing')))
-      : Promise.resolve(null),
-  ]).then(
-    ([run, hostScan]) => ({ ok: true as const, run, hostScan }),
-    (error: unknown) => ({ ok: false as const, error })
-  );
+  const desktopEvidence = startDesktopEvidence({
+    sessionId: session.sessionId,
+    nonce: session.nonce,
+    expiresAt: session.expiresAt,
+    cpi: opts.cpi,
+    hostPreflightRequired: opts.hostPreflightRequired,
+    requestHostPreflight: opts.requestHostPreflight,
+  });
 
-  // Keep the canonical-host build canary. The server now owns QR rendering via
-  // PAIR_PUBLIC_ORIGIN, but this still catches the broken deploy class where
-  // the pair bundle was built outside `npm run deploy`.
-  //
-  // In production we REFUSE to fall back to window.location.origin —
-  // that fallback silently produces a QR pointing at whatever alias
-  // domain the desktop happened to be loaded from (e.g. qr.arcades.click
-  // instead of captcha-dev-jw.argus.pw). Two prior incidents shipped
-  // bad bundles because VITE_PAIR_URL_BASE didn't make it through the
-  // deploy chain; failing loud here means a busted deploy is visible
-  // instead of producing scannable-but-wrong QRs.
-  //
-  // Dev (vite dev / pre-push lint builds) keeps the fallback — the
-  // build-time guard in vite.config.ts already short-circuits this when
-  // PAIR_ALLOW_ORIGIN_FALLBACK=1 is acknowledged.
-  const bakedOrigin = import.meta.env.VITE_PAIR_URL_BASE as string | undefined;
-  if (import.meta.env.PROD && !bakedOrigin) {
-    throw new Error(
-      'pair: VITE_PAIR_URL_BASE is not baked into this build. QR would ' +
-        'point at window.location.origin (alias-leak risk). Rebuild via ' +
-        '`npm run deploy` so the env var is set from cdk/bin/print-pair-host.mjs.'
-    );
-  }
-  const pairOriginBuildCanary = bakedOrigin ?? window.location.origin;
-  // Forward the desktop's `?debug=true` query param through the QR so
-  // the phone-side flow can disable its silent-reauth auto-pass. Debug
-  // mode is UI-only; does not relax server-side verification.
-  const debugMode = new URLSearchParams(window.location.search).get('debug') === 'true';
-  // The hash fragment carries the WS routing material end-to-end. Hash
-  // fragments are NOT sent to the server in HTTP requests — they stay
-  // client-side. Phone parses them on page load.
-  // `n` (nonce) lets the phone start its argus.run() scan immediately
-  // on arrival, in parallel with the desktop's scan, instead of waiting
-  // for the desktop-ready WS message. desktopArgusSessionId and
-  // desktopKeyId still arrive via desktop-ready and ship as top-level
-  // POST body fields (no longer inside the phone's signed envelope).
-  // Mint a short single-use token for the connection blob instead of packing
-  // {wsUrl,e,pt,n} into the URL fragment. The server renders a sparse poisoned
-  // QR PNG for /p/<token>. Authed with the desktop's own wsToken (only a
-  // session participant can mint).
-  //
-  // The QR is delivered SEALED: the QR keyholder (a Web Worker) mints an
-  // ephemeral ECDH pubkey, we send it up, the server renders + seals the
-  // poisoned PNG to it, and only image bytes cross back. See qr-keyholder.ts.
+  const { pairOriginBuildCanary, debugMode } = resolveDesktopQrContext({
+    bakedOrigin: import.meta.env.VITE_PAIR_URL_BASE as string | undefined,
+    currentOrigin: window.location.origin,
+    search: window.location.search,
+    isProduction: import.meta.env.PROD,
+  });
   const qr = await mintDesktopQr({
     session,
     desktopEnvelope: desktopConn.envelope,
@@ -255,45 +182,13 @@ export async function startDesktopSession(
     onPhoneConnected: events.onPhoneConnected,
   });
 
-  // Background: scan + desktop-attest. When done, queue the desktop-
-  // ready peer message (or send immediately if the phone is already up).
-  (async () => {
-    try {
-      const evidence = await desktopEvidencePromise;
-      if (!evidence.ok) throw evidence.error;
-      const { run, hostScan } = evidence;
-      if (!run.attestation) {
-        throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
-      }
-      if (runtime.isCancelled()) return;
-      const attResp = await jsonFetch<{
-        ok: boolean;
-        clean?: boolean;
-        summary?: DesktopAttestedSummary['summary'];
-      }>(`${API}/session/${session.sessionId}/desktop-attest`, {
-        method: 'POST',
-        body: JSON.stringify({
-          argusSessionId: run.argusSessionId,
-          attestation: run.attestation,
-          ...(hostScan ? { hostPreflight: hostScan } : {}),
-        }),
-      });
-      events.onDesktopAttested?.({
-        clean: !!attResp.clean,
-        summary: attResp.summary ?? null,
-      });
-      runtime.queueDesktopReady({
-        kind: 'desktop-ready',
-        nonce: session.nonce,
-        expiresAt: session.expiresAt,
-        desktopArgusSessionId: run.argusSessionId,
-        desktopKeyId: run.attestation.keyId,
-      });
-    } catch (e) {
-      events.onError?.(e);
-      runtime.fail(e);
-    }
-  })();
+  void desktopEvidence.complete({
+    isCancelled: runtime.isCancelled,
+    onDesktopAttested: (info) => events.onDesktopAttested?.(info),
+    queueDesktopReady: runtime.queueDesktopReady,
+    onError: (error) => events.onError?.(error),
+    fail: runtime.fail,
+  });
 
   const getVerdictToken = async (): Promise<string | null> => {
     try {

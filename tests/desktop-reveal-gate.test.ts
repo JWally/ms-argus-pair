@@ -20,7 +20,8 @@ vi.mock('../src/lib/ws', () => ({
   openWs: vi.fn(),
   connectAndWhoami: vi.fn(),
 }));
-vi.mock('../src/lib/desktop-qr', () => ({
+vi.mock('../src/lib/desktop-qr', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   mintDesktopQr: vi.fn().mockResolvedValue({
     kind: 'png',
     data: new Uint8Array([1]),

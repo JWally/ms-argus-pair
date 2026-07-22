@@ -92,6 +92,9 @@ setup and QR minting. The phone does not receive `desktop-ready`, and no verdict
 can pass, until that scan is verified and stored by `desktop-attest`. The
 merchant-realm preflight protocol remains available server-side for future
 work, but the shipped loader does not launch a second browser scan.
+`desktop-evidence.ts` owns that concurrent collection, fail-closed validation,
+attestation submission, and ready-message binding; `pair.ts` only starts it and
+connects its result to the desktop runtime.
 
 The embed route is a thin iframe controller. `embed-config.ts` validates its
 loader-provided URL and viewport message boundary, `embed-session.ts` owns Pair
@@ -232,6 +235,9 @@ ms-argus-pair/
 │   ├── lib/merchant-validation-flow.ts # SSO return policy and callback binding
 │   ├── lib/embed-config.ts      # loader URL and viewport-message validation
 │   ├── lib/embed-session.ts     # Pair/QR lifecycle and host message orchestration
+│   ├── lib/desktop-session-bootstrap.ts # concurrent HTTP/WS session connection
+│   ├── lib/desktop-evidence.ts  # integrity/preflight collection + desktop-attest binding
+│   ├── lib/desktop-qr.ts        # canonical-origin policy + sealed QR minting
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
 │   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow

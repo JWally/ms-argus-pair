@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mintDesktopQr, type PairTokenMintResponse } from '../src/lib/desktop-qr.ts';
+import {
+  mintDesktopQr,
+  resolveDesktopQrContext,
+  type PairTokenMintResponse,
+} from '../src/lib/desktop-qr.ts';
 import type { QrKeyholder, SecureQrImage } from '../src/lib/qr-keyholder.ts';
 
 function fakeImage(): SecureQrImage {
@@ -10,6 +14,42 @@ function fakeImage(): SecureQrImage {
     mime: 'image/png',
   };
 }
+
+describe('desktop QR runtime context', () => {
+  it('uses the baked canonical origin and forwards explicit debug mode', () => {
+    expect(
+      resolveDesktopQrContext({
+        bakedOrigin: 'https://captcha-dev-jw.argus.pw',
+        currentOrigin: 'https://merchant-alias.example',
+        search: '?debug=true',
+        isProduction: true,
+      })
+    ).toEqual({
+      pairOriginBuildCanary: 'https://captcha-dev-jw.argus.pw',
+      debugMode: true,
+    });
+  });
+
+  it('allows the current-origin fallback only outside production', () => {
+    expect(
+      resolveDesktopQrContext({
+        currentOrigin: 'http://localhost:5173',
+        search: '?debug=false',
+        isProduction: false,
+      })
+    ).toEqual({ pairOriginBuildCanary: 'http://localhost:5173', debugMode: false });
+  });
+
+  it('fails loudly before minting when a production build has no canonical origin', () => {
+    expect(() =>
+      resolveDesktopQrContext({
+        currentOrigin: 'https://merchant-alias.example',
+        search: '',
+        isProduction: true,
+      })
+    ).toThrow('VITE_PAIR_URL_BASE is not baked into this build');
+  });
+});
 
 describe('desktop QR minting', () => {
   it('mints the sealed pair-token payload and renders the returned ciphertext', async () => {
