@@ -249,7 +249,8 @@ ms-argus-pair/
 │   └── pages/                  # thin route controllers plus Embed/merchant views
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
-│   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
+│   ├── lib/pair-stack.ts             # infrastructure composition root
+│   ├── lib/pair-http-api.ts          # HTTP route inventory, CORS, throttling, access logs
 │   ├── lib/pair-api.ts               # API Lambda AWS/Valkey/Dynamo composition root
 │   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
 │   │   ├── router.ts                    # injectable HTTP validation and route dispatch
@@ -274,6 +275,10 @@ The Pair API's HTTP trust boundary lives in `cdk/lib/pair-api/router.ts` and is
 integration-tested with injected route handlers. `cdk/lib/pair-api.ts` owns the
 runtime composition only: environment policy, AWS/Valkey adapters, secrets,
 and construction of the tested application slices.
+
+The API Gateway boundary lives in `cdk/lib/pair-http-api.ts`. Synth-level tests
+pin all 17 public route keys plus CORS, throttling, and structured access logs;
+`pair-stack.ts` supplies the Lambda alias and keeps resource scope/IDs stable.
 
 Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection
@@ -313,7 +318,8 @@ built asset, loader SRI, no dev proof-skip leaked into prod bundles, SPA-router
 and phone-entry invariants, QR poison geometry, pair-token semantics, WS
 single-connection, SSO routes/continuity. `test:cdk-hardening` asserts the
 synthesized CloudFront template (frame-deny, HSTS, no error-response SPA
-fallback, exactly one CFF) and the bounded HTTP API access-log configuration.
+fallback, exactly one CFF); Vitest separately pins the complete HTTP API route
+and stage configuration.
 
 `npm run test:e2e` drives the deployed `dev-jw` Pair and merchant APIs. The
 merchant projection contract test creates isolated short-lived records, proves
