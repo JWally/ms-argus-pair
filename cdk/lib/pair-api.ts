@@ -54,29 +54,12 @@ import {
   recordDesktopAttestationValkey,
   recordPhoneAttestationValkey,
   claimArgusValkey,
-  type PhoneBundle,
 } from './session-store';
 import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
-import {
-  validateAttestInput,
-  validatePairAttestationBody,
-  validateSsoAttestation,
-  verifyPairAttestationPayload,
-} from './pair-api/attestation/envelope';
-import {
-  getTrustSecret,
-  mintDeviceTrust,
-  verifyDeviceTrust,
-  type DeviceTrustVerifyResult,
-} from './pair-api/attestation/trust';
+import { validateSsoAttestation } from './pair-api/attestation/envelope';
+import { getTrustSecret, mintDeviceTrust, verifyDeviceTrust } from './pair-api/attestation/trust';
 import { createDdbPasskeyStore } from './pair-api/passkey-store';
-import {
-  verifyProofOfLife,
-  type OAuthAnnotations,
-  type WebAuthnAnnotations,
-} from './pair-api/proof-of-life';
-import { decidePhoneVerdict } from './pair-api/phone-verdict-decision';
-import { proofModeForLog } from './pair-api/phone-observability';
+import { verifyProofOfLife } from './pair-api/proof-of-life';
 import { handleTelemetryRoute } from './pair-api/telemetry-routes';
 import { claimArgusSessionIdDdb } from './pair-api/argus-session-claim';
 import { classifyScan, summarizeDesktopScan } from './pair-api/projection-verdict';
@@ -88,6 +71,9 @@ import { createSessionResultHandler } from './pair-api/session-result-route';
 import { mintPairToken, redeemPairToken, type KvStore } from './pair-api/pair-token';
 import { createPairTokenMintHandler } from './pair-api/pair-token-mint-route';
 import { createDesktopAttestationHandler } from './pair-api/desktop-attestation-route';
+import { createPhoneAttestationCommitter } from './pair-api/phone-attestation-commit';
+import { preparePhoneAttestation } from './pair-api/phone-attestation-request';
+import { createPhoneAttestationHandler } from './pair-api/phone-attestation-route';
 import {
   buildSealedResult,
   deliverSealedVerdict,
@@ -491,6 +477,61 @@ const attestDesktop = createDesktopAttestationHandler({
   logWarn: console.warn,
 });
 
+const commitPhoneAttestation = createPhoneAttestationCommitter({
+  useValkey: isValkeySessionsEnabled,
+  recordValkey: recordPhoneAttestationValkey,
+  updateDdb: async ({ sessionId, stored, verdict, reason, annotations }) => {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
+        UpdateExpression:
+          'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
+        ConditionExpression:
+          'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
+        ExpressionAttributeValues: {
+          ':p': stored,
+          ':v': verdict,
+          ':r': reason,
+          ':a': annotations,
+        },
+      })
+    );
+  },
+  loadSession,
+});
+const preparePhoneAttestationRequest = (body: Record<string, unknown>, sessionId: string) =>
+  preparePhoneAttestation(body, sessionId, {
+    loadSession,
+    openDesktopEnvelope: openEnvelope,
+    claimPhoneArgusSession: (argusSessionId, pairSessionId) =>
+      claimArgusSessionId(argusSessionId, pairSessionId, 'phone'),
+    nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+  });
+const attestPhone = createPhoneAttestationHandler({
+  prepare: preparePhoneAttestationRequest,
+  verifyDeviceTrust,
+  verifyProof: (input) =>
+    verifyProofOfLife({
+      ...input,
+      rpId: WEBAUTHN_RP_ID,
+      expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
+      allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
+      passkeyStore,
+      deviceTrustFormat: 'device_trust_redeem',
+    }),
+  collectHostEvidence: collectHostPreflightEvidence,
+  fetchPhoneProjection: async (argusSessionId) =>
+    projectionValue(await fetchProjection(argusSessionId)),
+  mintDeviceTrust,
+  commit: commitPhoneAttestation,
+  deliverVerdict: (input) => deliverSealedVerdict({ ddb, tableName: TABLE }, input),
+  nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+  proofRequiredByDefault: REQUIRE_PROOF_OF_LIFE,
+  logInfo: (message) => console.info(message),
+  logWarn: (message) => console.warn(message),
+});
+
 const lambdaHandler = async (event: {
   routeKey: string;
   pathParameters?: Record<string, string | undefined>;
@@ -583,349 +624,7 @@ const lambdaHandler = async (event: {
     }
 
     case 'POST /api/session/{id}/phone-attest': {
-      const pairBody = validatePairAttestationBody(body);
-      if (!pairBody.ok) return jsonResp(pairBody.status, pairBody.body);
-      const { argusSessionId, attestation: att } = pairBody;
-      // WebAuthn now arrives as a sibling field (not inside the Argus
-      // envelope payload) so the client can run WebAuthn + Argus scan in
-      // parallel. Both still bind to the session nonce, verified
-      // independently below.
-      const webauthnInput = body.webauthn;
-      // OAuth proof-of-life. Alternative to WebAuthn: client completed a
-      // Google flow on the phone and posts the resulting token here. The
-      // verifier binds its OIDC nonce to the pair session nonce.
-      const oauthInput = body.oauth;
-      // Device-trust token. Alternative to a fresh ceremony — proves
-      // "this device passed proof-of-life recently from this same IP".
-      // Strict IP-pin; any verify failure returns 401 so the client can
-      // clear the stale token and fall back to fresh WebAuthn or OAuth.
-      const deviceTrustToken =
-        typeof body.deviceTrustToken === 'string' ? body.deviceTrustToken : undefined;
-      const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(404, { error: 'session_not_found' });
-      if (!s.desktopAttestation) {
-        return jsonResp(409, { error: 'desktop_not_attested_yet' });
-      }
-      if (s.freshProofRequired && deviceTrustToken) {
-        return jsonResp(401, { error: 'fresh_proof_required', clearDeviceTrust: false });
-      }
-      // QR sessions are single-use. If a phoneAttestation already exists,
-      // distinguish two cases by pubkey:
-      //   - Same pubkey  → same device retrying (network blip, double-tap).
-      //                    Return idempotent success below in the catch.
-      //   - Different pubkey → a SECOND scanner. Tell them the session is
-      //                        spoken for so their UI doesn't falsely claim
-      //                        success. The desktop already saw the first
-      //                        phone's verdict; we won't replace it.
-      const earlyAtt = validateAttestInput(body);
-      if (s.phoneAttestation) {
-        if (earlyAtt && earlyAtt.publicKey === s.phoneAttestation.publicKey) {
-          return jsonResp(409, { error: 'already_attested' });
-        }
-        return jsonResp(409, {
-          error: 'session_paired_with_other_device',
-          reason: 'This QR code is already paired with a different device.',
-        });
-      }
-      const verified = verifyPairAttestationPayload(att, {
-        role: 'phone',
-        sessionId: sessionId!,
-        nonce: s.nonce,
-        argusSessionId,
-      });
-      if (!verified.ok) return jsonResp(verified.status, verified.body);
-      // SECURITY (#8) — cross-sign / authenticate the desktop binding.
-      //
-      // The binding used to be trusted from `body.desktopArgusSessionId` /
-      // `body.desktopKeyId` (plaintext), whose values were ALSO handed out by
-      // the unauthenticated GET /info — so anyone with the sessionId could
-      // satisfy this check and pair against a desktop session they never
-      // co-operated (relay / farm pool-decoupling, verified live 2026-06-24).
-      //
-      // We now require the phone to present the server-sealed `desktopEnvelope`
-      // — the AES-256-GCM identity the WS handler minted for the desktop's
-      // authenticated connection. The phone obtains it ONLY over the
-      // authenticated WebSocket `desktop-ready` relay, which is gated by the
-      // phoneToken carried in the QR-hash fragment. It is unforgeable
-      // (auth-tag) and bound to {sessionId, role}. There is exactly one
-      // desktop per session, so an authentic role:'desktop' envelope for THIS
-      // session uniquely proves the phone went through the legitimate paired
-      // channel. /info no longer leaks any of this material.
-      const desktopEnv =
-        typeof body.desktopEnvelope === 'string' && body.desktopEnvelope.length > 0
-          ? await openEnvelope(body.desktopEnvelope)
-          : null;
-      if (!desktopEnv || desktopEnv.sessionId !== sessionId || desktopEnv.role !== 'desktop') {
-        return jsonResp(400, { error: 'desktop_binding_unauthenticated' });
-      }
-
-      // Defense-in-depth: the phone-presented binding values (sourced from the
-      // authenticated WS desktop-ready message client-side) must still match
-      // what the desktop actually stored server-side. These are no longer the
-      // authenticity boundary (the sealed envelope above is) — they catch a
-      // mis-bound or stale phone client.
-      const desktopArgusSessionIdInput = body.desktopArgusSessionId as string | undefined;
-      const desktopKeyIdInput = body.desktopKeyId as string | undefined;
-      if (
-        !desktopArgusSessionIdInput ||
-        desktopArgusSessionIdInput !== s.desktopAttestation.argusSessionId
-      ) {
-        return jsonResp(400, { error: 'desktop_argus_session_mismatch' });
-      }
-      if (!desktopKeyIdInput || desktopKeyIdInput !== s.desktopAttestation.keyId) {
-        return jsonResp(400, { error: 'desktop_keyId_mismatch' });
-      }
-      // Optional integrity check: phone & desktop must be different devices.
-      if (att.keyId === s.desktopAttestation.keyId) {
-        return jsonResp(400, { error: 'same_device_both_sides' });
-      }
-      // Claim the phone argusSessionId before storing — closes Tier-1 recycling.
-      const phoneClaim = await claimArgusSessionId(argusSessionId, sessionId!, 'phone');
-      if (!phoneClaim.ok) {
-        return jsonResp(409, {
-          error: 'argus_session_already_claimed',
-          reason: phoneClaim.reason,
-        });
-      }
-      const stored: StoredPairAttestation = {
-        ...att,
-        argusSessionId,
-        receivedAt: Math.floor(Date.now() / 1000),
-        envelopeDecoded: verified.decoded,
-      };
-      // If the phone presented a device-trust token, verify it FIRST.
-      // Strict IP-pin: any failure → 401 + clear-token signal to client.
-      const requesterIp = getViewerIp(event);
-      let trustResult: DeviceTrustVerifyResult | null = null;
-      if (deviceTrustToken) {
-        trustResult = await verifyDeviceTrust(deviceTrustToken, requesterIp, att.publicKey);
-        if (!trustResult.ok) {
-          // 401 — client clears its cached token and retries with fresh
-          // WebAuthn. This is the "any failure forces re-WebAuthn" rule.
-          return jsonResp(401, {
-            error: 'device_trust_invalid',
-            reason: trustResult.reason,
-          });
-        }
-      }
-
-      // Both attestations are signature-valid + bound to the same
-      // session/nonce + cross-bound (phone signed over the desktop's keyId
-      // and argusSessionId). Now fetch the Argus scan projections and
-      // verify the WebAuthn proof-of-life in parallel.
-      //
-      // If device-trust was redeemed above, we skip WebAuthn verification
-      // (trust IS the proof of prior WebAuthn) and synthesize the
-      // attested-true annotations from the trust result.
-      // Proof-of-life selector. Precedence: device-trust redeem (silent)
-      // → OAuth (if client sent an oauth field) → WebAuthn (legacy). Only
-      // one path runs per request; the unified annotations shape lets the
-      // downstream verdict code stay homogeneous.
-      const proofPath: Promise<WebAuthnAnnotations | OAuthAnnotations> = verifyProofOfLife({
-        webauthn: webauthnInput,
-        oauth: oauthInput,
-        expectedNonce: s.nonce,
-        argusPubkey: att.publicKey,
-        rpId: WEBAUTHN_RP_ID,
-        expectedOrigin: WEBAUTHN_EXPECTED_ORIGIN,
-        allowTestAuthenticators: ALLOW_TEST_AUTHENTICATORS,
-        passkeyStore,
-        trustRedeemed: trustResult?.ok === true,
-        deviceTrustFormat: 'device_trust_redeem',
-      });
-
-      const [hostEvidence, phoneProj, webauthnResult] = await Promise.all([
-        collectHostPreflightEvidence({
-          hostArgusSessionId: s.hostAttestation?.argusSessionId ?? null,
-          iframeArgusSessionId: s.desktopAttestation.argusSessionId,
-          pairSessionId: sessionId!,
-        }),
-        fetchProjection(argusSessionId).then(projectionValue),
-        proofPath,
-      ]);
-      const desktopProj = hostEvidence.iframeProjection;
-      const desktopClass = hostEvidence.iframeScan;
-      const phoneClass = classifyScan(phoneProj, 'phone');
-      const { verdict, reason, annotations, proofOfLife } = decidePhoneVerdict({
-        proofRequired: s.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
-        proofAnnotations: webauthnResult,
-        desktopProjection: desktopProj,
-        phoneProjection: phoneProj,
-        desktopScan: desktopClass,
-        phoneScan: phoneClass,
-        hostAnnotations: hostEvidence.annotations,
-      });
-
-      // Always log the verdict reason + the proof-of-life sub-error so
-      // a fail-pattern is debuggable from CloudWatch without reading
-      // the WS-pushed annotations off the desktop screen. The webauthn
-      // result already ships to the client; logging it server-side is
-      // pure operational visibility.
-      if (verdict !== 'paired') {
-        const wa = webauthnResult as WebAuthnAnnotations & {
-          phone_webauthn_error?: string;
-        };
-        const oa = webauthnResult as OAuthAnnotations & {
-          phone_oauth_error?: string;
-        };
-        console.warn(
-          `[pair] verdict=${verdict} reason=${reason} ` +
-            `proofOfLife=${proofOfLife} ` +
-            `phone_webauthn_attested=${(webauthnResult as WebAuthnAnnotations).phone_webauthn_attested} ` +
-            `phone_webauthn_error=${wa.phone_webauthn_error ?? 'none'} ` +
-            `phone_oauth_error=${oa.phone_oauth_error ?? 'none'} ` +
-            `trust_redeemed=${!!trustResult?.ok}`
-        );
-      }
-
-      // Mint a fresh device-trust token if this phone just passed fresh
-      // WebAuthn (not a redeem). The next pairing within 12h from the
-      // same IP can skip the biometric prompt.
-      let nextDeviceTrust: string | null = null;
-      if (
-        verdict === 'paired' &&
-        !trustResult?.ok &&
-        (webauthnResult as WebAuthnAnnotations).phone_webauthn_attested
-      ) {
-        nextDeviceTrust = await mintDeviceTrust(att.publicKey, att.keyId, requesterIp);
-      }
-      if (trustResult?.ok) {
-        annotations.phone_device_trust_redeemed = true;
-        if (trustResult.ipChanged) annotations.phone_device_trust_ip_changed = true;
-      }
-
-      {
-        const wa = webauthnResult as WebAuthnAnnotations & {
-          phone_webauthn_error?: string;
-        };
-        const oa = webauthnResult as OAuthAnnotations & {
-          phone_oauth_error?: string;
-        };
-        const proofMode = proofModeForLog({
-          trustRedeemed: trustResult?.ok === true,
-          oauthInput,
-          webauthnInput,
-          annotations: webauthnResult,
-        });
-        console.info(
-          `[pair] proof verdict=${verdict} reason=${reason} ` +
-            `proofOfLife=${proofOfLife} ` +
-            `proof_mode=${proofMode} ` +
-            `proof_format=${wa.phone_webauthn_format ?? 'none'} ` +
-            `phone_webauthn_attested=${wa.phone_webauthn_attested} ` +
-            `phone_webauthn_error=${wa.phone_webauthn_error ?? 'none'} ` +
-            `phone_oauth_error=${oa.phone_oauth_error ?? 'none'} ` +
-            `trust_redeemed=${!!trustResult?.ok} ` +
-            `trust_ip_changed=${!!trustResult?.ipChanged} ` +
-            `device_trust_minted=${!!nextDeviceTrust}`
-        );
-      }
-
-      if (isValkeySessionsEnabled()) {
-        // Single atomic SET NX commits phone att + verdict + reason +
-        // annotations in one shot — no separate "set then update verdict"
-        // step, no Lua, no race window between the claim and the
-        // verdict-record.
-        const bundle: PhoneBundle = {
-          att: stored as unknown as Record<string, unknown>,
-          verdict,
-          reason,
-          annotations,
-        };
-        const r = await recordPhoneAttestationValkey(sessionId!, bundle);
-        if (!r.ok) {
-          // Lost the race. Idempotency mirror of the DDB catch path
-          // below: same-device retry → return winning verdict, other-
-          // device scanner → 409 session_paired_with_other_device.
-          const winningAttPub = (r.existing?.att as { publicKey?: string } | undefined)?.publicKey;
-          const sameDevice = winningAttPub === att.publicKey;
-          if (r.existing && sameDevice && r.existing.verdict && r.existing.verdict !== 'pending') {
-            return jsonResp(200, {
-              verdict: 'complete',
-              reason: null,
-              annotations: {},
-              concurrent_loser: true,
-            });
-          }
-          if (r.existing?.att && !sameDevice) {
-            return jsonResp(409, {
-              error: 'session_paired_with_other_device',
-              reason: 'This QR code is already paired with a different device.',
-            });
-          }
-          return jsonResp(409, { error: 'write_conflict' });
-        }
-      } else {
-        try {
-          await ddb.send(
-            new UpdateCommand({
-              TableName: TABLE,
-              Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-              UpdateExpression:
-                'SET phoneAttestation = :p, verdict = :v, verdictReason = :r, annotations = :a',
-              ConditionExpression:
-                'attribute_exists(PK) AND attribute_exists(desktopAttestation) AND attribute_not_exists(phoneAttestation)',
-              ExpressionAttributeValues: {
-                ':p': stored,
-                ':v': verdict,
-                ':r': reason,
-                ':a': annotations,
-              },
-            })
-          );
-        } catch (writeErr: unknown) {
-          // Two concurrent phone-attest POSTs can race past the read-time
-          // `s.phoneAttestation` check (both read pre-write state, both
-          // proceed). The loser's conditional write throws
-          // ConditionalCheckFailedException. Make this endpoint idempotent
-          // by reading the winner's stored verdict and returning that —
-          // semantically the device DID pair, the only question is which
-          // of two identical attempts gets credit.
-          const isConflict =
-            (writeErr as { name?: string })?.name === 'ConditionalCheckFailedException';
-          if (!isConflict) throw writeErr;
-          const existing = await loadSession(sessionId!);
-          // Same-device retry (same pubkey) → idempotent success: return
-          // the winner's verdict. Different-device second scanner → tell
-          // them the session is paired with someone else so their UI
-          // doesn't falsely claim success.
-          const sameDevice = existing?.phoneAttestation?.publicKey === att.publicKey;
-          if (existing && sameDevice && existing.verdict && existing.verdict !== 'pending') {
-            return jsonResp(200, {
-              verdict: 'complete',
-              reason: null,
-              annotations: {},
-              concurrent_loser: true,
-            });
-          }
-          if (existing?.phoneAttestation && !sameDevice) {
-            return jsonResp(409, {
-              error: 'session_paired_with_other_device',
-              reason: 'This QR code is already paired with a different device.',
-            });
-          }
-          return jsonResp(409, { error: 'write_conflict' });
-        }
-      }
-      // The verdict is ready, but neither browser receives plaintext yet.
-      // Push a fixed-size AES-GCM envelope to the desktop and return a separate
-      // sealed continuation state to the phone. The authenticated phone-done
-      // WS message releases their shared session key. This removes pass/fail
-      // timing and response-shape oracles while preserving pre-DONE latency.
-      const phoneCompletion = await deliverSealedVerdict(
-        { ddb, tableName: TABLE },
-        {
-          desktopEnv,
-          sessionId: sessionId!,
-          verdict,
-          reason,
-          annotations,
-          nextDeviceTrust,
-          decidedAt: stored.receivedAt,
-          now: Math.floor(Date.now() / 1000),
-        }
-      );
-      return jsonResp(200, phoneCompletion);
+      return attestPhone(body, sessionId!, getViewerIp(event));
     }
 
     case 'GET /api/session/{id}/result': {

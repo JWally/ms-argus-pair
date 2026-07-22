@@ -6,7 +6,10 @@ const root = process.cwd();
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 const pairFailure = fs.readFileSync(path.join(root, 'src/lib/phone-pair-failure.ts'), 'utf8');
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
-const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
+const phoneAttestationRequest = fs.readFileSync(
+  path.join(root, 'cdk/lib/pair-api/phone-attestation-request.ts'),
+  'utf8'
+);
 
 function assert(condition, message) {
   if (!condition) {
@@ -25,7 +28,7 @@ assert(
 assert(
   phoneEntry.includes('state.info.freshProofRequired') &&
     pairLib.includes('info.freshProofRequired ? null : await loadTrustToken()') &&
-    pairApi.includes('s.freshProofRequired && deviceTrustToken'),
+    phoneAttestationRequest.includes('session.freshProofRequired && deviceTrustToken'),
   'forceauth should bypass cached trust in the phone UI and reject it on the server'
 );
 

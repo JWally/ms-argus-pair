@@ -14,6 +14,10 @@ const resultPoll = fs.readFileSync(path.join(root, 'src/lib/desktop-result-poll.
 const verdictGate = fs.readFileSync(path.join(root, 'src/lib/desktop-verdict-gate.ts'), 'utf8');
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 const pairApi = fs.readFileSync(path.join(root, 'cdk/lib/pair-api.ts'), 'utf8');
+const phoneAttestationRoute = fs.readFileSync(
+  path.join(root, 'cdk/lib/pair-api/phone-attestation-route.ts'),
+  'utf8'
+);
 const verdictPush = fs.readFileSync(path.join(root, 'cdk/lib/pair-api/verdict-push.ts'), 'utf8');
 const verdictDisclosure = fs.readFileSync(
   path.join(root, 'cdk/lib/pair-api/verdict-disclosure.ts'),
@@ -86,11 +90,14 @@ assert(
 );
 
 assert(
-  pairApi.includes("verdict: 'complete'") &&
+  phoneAttestationRoute.includes("verdict: 'complete'") &&
     verdictDisclosure.includes('phoneState: sealed.phoneEnvelope') &&
     verdictDisclosure.includes("status: 'sealed'") &&
     verdictDisclosure.includes('shouldReleaseVerdict(sealed.revealState') &&
-    !pairApi.includes('return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust })'),
+    !pairApi.includes('return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust })') &&
+    !phoneAttestationRoute.includes(
+      'return jsonResp(200, { verdict, reason, annotations, nextDeviceTrust })'
+    ),
   'phone-attest, result, and verdict-token endpoints must not expose plaintext before release'
 );
 
