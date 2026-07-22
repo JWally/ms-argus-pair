@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { MerchantWordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
-import { defaultSsoCpi, redeemSsoApproval, startSsoSession } from '../lib/pair';
+import { defaultSsoCpi, redeemSsoApproval, startSsoSession } from '../lib/sso-client';
 import { failureReturnUrlFrom, rememberSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 const CAPTCHA_DEMO_URL = 'https://www-dev-jw.argus.pw/captcha';

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SsoStatusShell } from '../components/SsoStatusShell';
-import { startSsoSession } from '../lib/pair';
+import { startSsoSession } from '../lib/sso-client';
 import { failureReturnUrlFrom, rememberSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 export function MobileSso() {

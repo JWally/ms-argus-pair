@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const argusClient = fs.readFileSync(path.join(root, 'src/lib/argus-client.ts'), 'utf8');
 const phoneSessionRuntime = fs.readFileSync(
   path.join(root, 'src/lib/phone-session-runtime.ts'),
   'utf8'
@@ -17,7 +18,7 @@ function assert(condition, message) {
   }
 }
 
-const waitForArgusBody = pairLib.match(/async function waitForArgus[\s\S]*?\n}/)?.[0] ?? '';
+const waitForArgusBody = argusClient.match(/async function waitForArgus[\s\S]*?\n}/)?.[0] ?? '';
 const startPhoneScanBody =
   pairLib.match(/async function startPhoneIntegrityScan[\s\S]*?\n}\n\n\/\*\*/)?.[0] ?? '';
 const scanStart = phoneSessionRuntime.indexOf('deps.startScan(sessionId, binding.nonce)');
@@ -34,7 +35,7 @@ assert(
 assert(
   waitForArgusBody.includes('await awaitWithDeadline(') &&
     waitForArgusBody.includes('window.argusBootstrapReady') &&
-    startPhoneScanBody.includes('await waitForArgus()'),
+    startPhoneScanBody.includes('runArgusScan({'),
   'eager scanning must wait for the signed SDK bootstrap instead of racing window.argus'
 );
 assert(
