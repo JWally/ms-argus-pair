@@ -96,17 +96,13 @@ import { sealPairTokenQr } from './pair-api/sealed-qr';
 import { createServerQrRendererPrimer } from './pair-api/qr-renderer-primer';
 import { createPairApiWarmupMiddleware } from './pair-api/warmup';
 import { verifyWorkerIntegrity } from './pair-api/worker-integrity';
-import type { StoredHostPreflight } from './pair-api/host-preflight';
 import { collectHostPreflightEvidence } from './pair-api/host-preflight-evidence';
 import { prepareAndStoreStartedSession } from './pair-api/session-start-store';
 import { startPairSession } from './pair-api/session-start';
 import { startSsoSession } from './pair-api/sso-start';
 import type { SsoSessionItem } from './pair-api/sso-session';
-import {
-  prepareDesktopAttestation,
-  type StoredDesktopAttestation,
-  type StoredPairAttestation,
-} from './pair-api/desktop-attest';
+import { prepareDesktopAttestation } from './pair-api/desktop-attest';
+import { createPairSessionRepository } from './pair-api/pair-session-repository';
 // Isomorphic ECIES seal shared with the client QR worker (src/lib) — same
 // crypto.subtle code both sides so the contract can't drift.
 import { getValkey } from './valkey-client';
@@ -178,6 +174,15 @@ async function claimArgusSessionId(
 // "clean scan on both sides."
 const REQUIRE_PROOF_OF_LIFE = process.env.PAIR_REQUIRE_PROOF_OF_LIFE === 'true';
 
+const { loadSession, storeDesktopAttestation } = createPairSessionRepository({
+  ddb,
+  tableName: TABLE,
+  proofRequiredByDefault: REQUIRE_PROOF_OF_LIFE,
+  useValkey: isValkeySessionsEnabled,
+  loadValkeySession: mgetSession,
+  storeDesktopValkey: recordDesktopAttestationValkey,
+});
+
 // Rate-limit backend selection.
 /**
  * USE_VALKEY_RATE_LIMITS=true switches rate limits from DDB to Valkey. The
@@ -246,26 +251,6 @@ function startPairSessionRequest(body: Record<string, unknown>, viewerIp: string
   });
 }
 
-type Verdict = 'pending' | 'paired' | 'failed';
-
-interface SessionItem {
-  PK: string;
-  SK: string;
-  nonce: string;
-  expiresAt: number;
-  cpi?: string | null;
-  challengeId?: string;
-  proofRequired?: boolean;
-  freshProofRequired?: boolean;
-  hostPreflightRequired?: boolean;
-  hostOrigin?: string;
-  hostAttestation?: StoredHostPreflight;
-  desktopAttestation?: StoredDesktopAttestation;
-  phoneAttestation?: StoredPairAttestation;
-  verdict: Verdict;
-  verdictReason?: string;
-}
-
 async function authenticateSessionParticipant(
   event: {
     queryStringParameters?: Record<string, string | undefined>;
@@ -297,64 +282,6 @@ async function authenticateSessionParticipant(
 // isolate the desktop-score gate). Known-AAGUID list + check in
 // ./pair-api/virtual-authenticator.ts (unit-tested).
 const ALLOW_TEST_AUTHENTICATORS = process.env.PAIR_ALLOW_TEST_AUTHENTICATORS === 'true';
-
-async function loadSession(sessionId: string): Promise<SessionItem | null> {
-  if (isValkeySessionsEnabled()) {
-    const { meta, desktop, phone } = await mgetSession(sessionId);
-    if (!meta) return null;
-    // Reassemble into the SessionItem shape so downstream callers see
-    // the same fields regardless of backend. Optional fields stay
-    // undefined when their key wasn't present.
-    return {
-      PK: `SESSION#${sessionId}`,
-      SK: 'META',
-      nonce: meta.nonce,
-      expiresAt: meta.expiresAt,
-      cpi: meta.cpi ?? null,
-      challengeId: meta.challengeId,
-      proofRequired: meta.proofRequired ?? REQUIRE_PROOF_OF_LIFE,
-      freshProofRequired: meta.freshProofRequired ?? false,
-      hostPreflightRequired: meta.hostPreflightRequired ?? false,
-      hostOrigin: meta.hostOrigin,
-      hostAttestation:
-        (desktop as unknown as StoredDesktopAttestation | null)?.hostAttestation ??
-        (meta.hostAttestation as unknown as StoredHostPreflight | undefined),
-      verdict: phone?.verdict ?? 'pending',
-      verdictReason: phone?.reason ?? undefined,
-      desktopAttestation: desktop as unknown as StoredDesktopAttestation | undefined,
-      phoneAttestation: phone?.att as unknown as StoredPairAttestation | undefined,
-      // annotations live on the row in the DDB shape too.
-      ...(phone?.annotations ? { annotations: phone.annotations } : {}),
-    } as unknown as SessionItem;
-  }
-  const res = await ddb.send(
-    new GetCommand({ TableName: TABLE, Key: { PK: `SESSION#${sessionId}`, SK: 'META' } })
-  );
-  const item = (res.Item as SessionItem | undefined) ?? null;
-  if (item && !item.hostAttestation) {
-    item.hostAttestation = item.desktopAttestation?.hostAttestation;
-  }
-  return item;
-}
-
-async function storeDesktopAttestation(
-  sessionId: string,
-  stored: StoredDesktopAttestation
-): Promise<boolean> {
-  if (isValkeySessionsEnabled()) {
-    return recordDesktopAttestationValkey(sessionId, stored as unknown as Record<string, unknown>);
-  }
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { PK: `SESSION#${sessionId}`, SK: 'META' },
-      UpdateExpression: 'SET desktopAttestation = :d',
-      ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(desktopAttestation)',
-      ExpressionAttributeValues: { ':d': stored },
-    })
-  );
-  return true;
-}
 
 async function loadSsoSession(sessionId: string): Promise<SsoSessionItem | null> {
   const res = await ddb.send(

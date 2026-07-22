@@ -14,11 +14,11 @@ interface ExistingPhoneDecision {
   verdict?: 'pending' | 'paired' | 'failed';
 }
 
-type ValkeyCommitResult = { ok: true } | { ok: false; existing: PhoneBundle | null };
-
+type StoredPhoneBundle = PhoneBundle<StoredPairAttestation>;
+type ValkeyCommitResult = { ok: true } | { ok: false; existing: StoredPhoneBundle | null };
 export interface PhoneAttestationCommitDependencies {
   useValkey(): boolean;
-  recordValkey(sessionId: string, bundle: PhoneBundle): Promise<ValkeyCommitResult>;
+  recordValkey(sessionId: string, bundle: StoredPhoneBundle): Promise<ValkeyCommitResult>;
   updateDdb(input: PhoneAttestationCommitInput): Promise<void>;
   loadSession(sessionId: string): Promise<ExistingPhoneDecision | null>;
 }
@@ -43,9 +43,9 @@ function raceOutcome(
   return { outcome: 'write_conflict' };
 }
 
-function phoneBundle(input: PhoneAttestationCommitInput): PhoneBundle {
+function phoneBundle(input: PhoneAttestationCommitInput): StoredPhoneBundle {
   return {
-    att: input.stored as unknown as Record<string, unknown>,
+    att: input.stored,
     verdict: input.verdict,
     reason: input.reason,
     annotations: input.annotations,
@@ -61,7 +61,7 @@ export function createPhoneAttestationCommitter(deps: PhoneAttestationCommitDepe
       const existing = result.existing;
       return raceOutcome(
         !!existing?.att,
-        (existing?.att as { publicKey?: string } | undefined)?.publicKey,
+        existing?.att.publicKey,
         existing?.verdict,
         input.stored.publicKey
       );

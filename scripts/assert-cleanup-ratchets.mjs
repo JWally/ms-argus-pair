@@ -28,8 +28,18 @@ const ratchets = [
   },
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 588,
+    maxLines: 515,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
+  },
+  {
+    file: 'cdk/lib/pair-api/pair-session-repository.ts',
+    maxLines: 121,
+    why: 'keep DDB and Valkey session normalization behind one tested storage boundary',
+  },
+  {
+    file: 'cdk/lib/session-store.ts',
+    maxLines: 211,
+    why: 'keep Valkey key and transport mechanics independent from Pair session policy',
   },
   {
     file: 'cdk/lib/pair-api/router.ts',

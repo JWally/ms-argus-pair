@@ -254,6 +254,7 @@ ms-argus-pair/
 │   ├── lib/pair-api.ts               # API Lambda AWS/Valkey/Dynamo composition root
 │   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
 │   │   ├── router.ts                    # injectable HTTP validation and route dispatch
+│   │   ├── pair-session-repository.ts   # DDB/Valkey session shape + desktop-slot adapter
 │   │   ├── phone-attestation-request.ts # signed request + desktop binding boundary
 │   │   ├── phone-attestation-route.ts   # proof/projection/verdict orchestration
 │   │   └── phone-attestation-commit.ts  # Valkey/DDB single-writer policy
@@ -276,7 +277,9 @@ it (everything else keeps DENY). There is deliberately no React phone fallback:
 The Pair API's HTTP trust boundary lives in `cdk/lib/pair-api/router.ts` and is
 integration-tested with injected route handlers. `cdk/lib/pair-api.ts` owns the
 runtime composition only: environment policy, AWS/Valkey adapters, secrets,
-and construction of the tested application slices.
+and construction of the tested application slices. Pair session reads and
+desktop-slot claims cross `cdk/lib/pair-api/pair-session-repository.ts`, which
+normalizes the DDB row and split Valkey fields behind one tested contract.
 
 The WebSocket trust boundary follows the same shape. `cdk/lib/ws-handler/router.ts`
 owns connection identity, origin and replay checks, peer relay, and verdict-release
