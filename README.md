@@ -251,6 +251,7 @@ ms-argus-pair/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # infrastructure composition root
 │   ├── lib/pair-http-api.ts          # HTTP route inventory, CORS, throttling, access logs
+│   ├── lib/pair-response-headers.ts   # framed/iframable CloudFront security policy
 │   ├── lib/pair-api.ts               # API Lambda AWS/Valkey/Dynamo composition root
 │   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
 │   │   ├── router.ts                    # injectable HTTP validation and route dispatch
@@ -291,6 +292,9 @@ cross-session, same-role, and expired-envelope failures without live AWS.
 The API Gateway boundary lives in `cdk/lib/pair-http-api.ts`. Synth-level tests
 pin all 17 public route keys plus CORS, throttling, and structured access logs;
 `pair-stack.ts` supplies the Lambda alias and keeps resource scope/IDs stable.
+`cdk/lib/pair-response-headers.ts` similarly owns the shared HSTS, nosniff, and
+referrer policy while making the site's frame denial and `/embed` exception
+explicit in focused synth tests.
 
 Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection

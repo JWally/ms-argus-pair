@@ -3,8 +3,13 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-stack.ts',
-    maxLines: 532,
+    maxLines: 492,
     why: 'keep the stack as infrastructure composition while tested resource factories own service policy',
+  },
+  {
+    file: 'cdk/lib/pair-response-headers.ts',
+    maxLines: 44,
+    why: 'keep framed and iframable CloudFront security policy in one synth-tested boundary',
   },
   {
     file: 'cdk/lib/pair-http-api.ts',
