@@ -4,6 +4,10 @@ import path from 'node:path';
 
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const phoneSessionRuntime = fs.readFileSync(
+  path.join(root, 'src/lib/phone-session-runtime.ts'),
+  'utf8'
+);
 const phoneMain = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
 
 function assert(condition, message) {
@@ -13,20 +17,18 @@ function assert(condition, message) {
   }
 }
 
-const awaitDesktopReadyBody =
-  pairLib.match(/export async function awaitDesktopReady[\s\S]*?\n}\n\n\/\*\*/)?.[0] ?? '';
 const waitForArgusBody = pairLib.match(/async function waitForArgus[\s\S]*?\n}/)?.[0] ?? '';
 const startPhoneScanBody =
   pairLib.match(/async function startPhoneIntegrityScan[\s\S]*?\n}\n\n\/\*\*/)?.[0] ?? '';
-const scanStart = awaitDesktopReadyBody.indexOf('startPhoneIntegrityScan(sessionId, nonce)');
-const desktopConnect = awaitDesktopReadyBody.indexOf('connectAndWhoami');
+const scanStart = phoneSessionRuntime.indexOf('deps.startScan(sessionId, binding.nonce)');
+const desktopConnect = phoneSessionRuntime.indexOf('await deps.connect');
 
 assert(
   scanStart >= 0 && desktopConnect >= 0 && scanStart < desktopConnect,
   'phone integrity must start before waiting for the desktop connection'
 );
 assert(
-  awaitDesktopReadyBody.includes('LATENCY CONTRACT: DO NOT move this scan'),
+  phoneSessionRuntime.includes('LATENCY CONTRACT: do not move this scan'),
   'the eager-scan latency contract should remain documented at its call site'
 );
 assert(
@@ -36,7 +38,7 @@ assert(
   'eager scanning must wait for the signed SDK bootstrap instead of racing window.argus'
 );
 assert(
-  awaitDesktopReadyBody.includes('const getScanPromise = () => scanPromise'),
+  phoneSessionRuntime.includes('getScanPromise: () => scanPromise'),
   'all proof paths should share the eager scan promise'
 );
 assert(

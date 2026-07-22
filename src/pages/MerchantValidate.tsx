@@ -3,15 +3,10 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { MerchantWordmark } from '../components/Brand';
 import { IconCheck, IconShield, IconX } from '../components/Icons';
 import { SsoStatusShell } from '../components/SsoStatusShell';
-import {
-  clearPasskeyHint,
-  hasPasskeyHint,
-  HttpError,
-  validateSsoReturn,
-  type SsoValidateResult,
-} from '../lib/pair';
+import { HttpError, validateSsoReturn, type SsoValidateResult } from '../lib/pair';
 import { clearTrustToken, loadTrustToken } from '../lib/device-trust';
 import { isOAuthError, PROVIDERS_CONFIGURED, runGoogleProofOfLife } from '../lib/oauth';
+import { clearPasskeyHint, hasPasskeyHint } from '../lib/passkey-client';
 import { loadSsoFailureReturnUrl } from '../lib/sso-failure-return';
 
 export function MerchantValidate() {

@@ -30,25 +30,34 @@
  * nonce so the proofs stay tied to this specific session.
  */
 
-import { connectAndWhoami, openWs, type WsConnection } from './ws';
+import { connectAndWhoami, openWs } from './ws';
 import { bootstrapDesktopSession } from './desktop-session-bootstrap';
 import { mintDesktopQr } from './desktop-qr';
-import {
-  buildProofAttestationBody,
-  buildTrustRedeemAttestationBody,
-  createdCredentialIdFromProof,
-} from './phone-attestation-body';
 import type { SecureQrImage } from './qr-keyholder';
-import {
-  decodeVerdictRevealKey,
-  openFixedVerdictEnvelope,
-  type PhoneStatePayload,
-  type SealedVerdictEnvelope,
-} from './verdict-envelope';
+import { decodeVerdictRevealKey, openFixedVerdictEnvelope } from './verdict-envelope';
 import { awaitWithDeadline } from './client-deadline';
 import { createDesktopSessionRuntime } from './desktop-session-runtime';
 import { HttpError, jsonFetch } from './json-http';
+import {
+  authenticateExistingPasskey,
+  createNewPasskey,
+  rememberPasskeyCredential,
+} from './passkey-client';
+import {
+  runPhoneAttestation,
+  type PhoneAttestationResponse,
+  type SubmitPhoneAttestationOptions,
+} from './phone-attestation';
+import {
+  awaitPhoneSessionReady,
+  signalPhoneChallengeDone,
+  type PhoneSessionInfo,
+  type PhoneSessionOptions,
+} from './phone-session-runtime';
 import { withSsoClientStage } from './sso-observability';
+
+export type { PhoneSessionInfo } from './phone-session-runtime';
+export type { SubmitPhoneAttestationOptions } from './phone-attestation';
 
 const API = '/api';
 const ATTEST_PURPOSE = 'argus-pair-v1';
@@ -540,7 +549,9 @@ export async function validateSsoReturn({
     const { saveTrustToken } = await import('./device-trust');
     await saveTrustToken(result.nextDeviceTrust);
   }
-  if (result.verdict === 'approved' && createdCredentialId) writePasskeyHint(createdCredentialId);
+  if (result.verdict === 'approved' && createdCredentialId) {
+    rememberPasskeyCredential(createdCredentialId);
+  }
   return result;
 }
 
@@ -559,73 +570,6 @@ export async function redeemSsoApproval(
 }
 
 // ── CLIENT (phone) ───────────────────────────────────────────────────────
-
-export interface PhoneSessionInfo {
-  nonce: string;
-  /** Server-resolved CPI policy delivered through the single-use QR token. */
-  proofRequired: boolean;
-  /** True when cached device trust cannot satisfy this session. */
-  freshProofRequired: boolean;
-  expiresAt: number;
-  desktopArgusSessionId: string;
-  desktopKeyId: string;
-  /**
-   * Sealed envelope addressing the desktop's WebSocket connection.
-   * The phone forwards it to /phone-attest so the server can PostToConnection
-   * the verdict straight back to the desktop instead of having the desktop
-   * poll /result.
-   */
-  desktopEnvelope: string;
-  /**
-   * The phone's WS bootstrap token (from the QR hash). Used to authenticate
-   * the GET /result fallback (#10) — /result now requires a valid session
-   * token for either role.
-   */
-  phoneToken: string;
-  /** Live WS connection the phone opened to receive `desktop-ready`. */
-  conn: WsConnection;
-  /** Resolves only after the server authenticates this phone's DONE message. */
-  getVerdictRevealKey: () => Promise<string>;
-  /**
-   * Returns the phone integrity scan started as soon as the QR bootstrap is
-   * parsed. Silent trust and proof-of-life paths share the same scan. The
-   * signed payload only binds {sessionId, nonce, role: phone}; desktop
-   * bindings travel as top-level fields and are validated server-side.
-   */
-  getScanPromise: () => Promise<ArgusRunResult>;
-}
-
-interface PairHashParams {
-  wsUrl: string;
-  desktopEnvelope: string;
-  phoneToken: string;
-  nonce: string;
-  proofRequired: boolean;
-  freshProofRequired: boolean;
-}
-
-function parsePairHash(): PairHashParams {
-  const raw = window.location.hash.replace(/^#/, '');
-  const params = new URLSearchParams(raw);
-  const wsUrl = params.get('wsUrl');
-  const e = params.get('e');
-  const pt = params.get('pt');
-  const n = params.get('n');
-  // Missing means strict for compatibility with QR tokens minted before this field existed.
-  const proofRequired = params.get('pr') !== '0';
-  const freshProofRequired = params.get('fr') === '1';
-  if (!wsUrl || !e || !pt || !n) {
-    throw new Error('pair URL is missing WebSocket routing material in the fragment — open via QR');
-  }
-  return {
-    wsUrl,
-    desktopEnvelope: e,
-    phoneToken: pt,
-    nonce: n,
-    proofRequired,
-    freshProofRequired,
-  };
-}
 
 async function startPhoneIntegrityScan(sessionId: string, nonce: string): Promise<ArgusRunResult> {
   const argus = await waitForArgus();
@@ -652,106 +596,17 @@ async function startPhoneIntegrityScan(sessionId: string, nonce: string): Promis
   return scanPromise;
 }
 
-/**
- * WebSocket handshake replacing the old /info polling loop. Phone arrives
- * via QR, parses the hash fragment for {wsUrl, desktopEnvelope, phoneToken},
- * opens its own WS connection, announces itself to the desktop with a
- * `phone-here` peer message, and blocks until the desktop relays back
- * `desktop-ready` (which carries the same fields /info used to return).
- *
- * The desktop's envelope arrives in `fromEnvelope` on EVERY peer message
- * the desktop sends — but we capture it once up front from the QR so the
- * phone can address /phone-attest's server-side push before the first
- * peer message round-trips.
- */
 export async function awaitDesktopReady(
   sessionId: string,
   signal?: AbortSignal,
-  opts: {
-    /**
-     * Phone is showing an interactive challenge (bio-draw). Rides on the
-     * `phone-here` announcement so the desktop holds the reveal of a
-     * `paired` verdict until `phone-done` (see signalChallengeDone).
-     */
-    challenge?: boolean;
-    onScanStart?: () => void;
-    onScanDone?: (result: ArgusRunResult) => void;
-    onScanError?: (error: unknown) => void;
-  } = {}
+  options: PhoneSessionOptions = {}
 ): Promise<PhoneSessionInfo> {
-  if (signal?.aborted) throw new Error('aborted');
-  const { wsUrl, desktopEnvelope, phoneToken, nonce, proofRequired, freshProofRequired } =
-    parsePairHash();
-
-  // LATENCY CONTRACT: DO NOT move this scan behind desktop-ready or a user tap.
-  // The nonce arrives in the QR, so no later desktop field is needed to start.
-  // A previous lazy-on-tap change exposed 3.3-5.5 seconds of scan latency after
-  // SEND. Starting here hides that work behind the connection handshake and
-  // challenge UI; the server still withholds the verdict until every binding
-  // and assurance requirement is verified.
-  opts.onScanStart?.();
-  const scanPromise = startPhoneIntegrityScan(sessionId, nonce);
-  void scanPromise.then(opts.onScanDone, opts.onScanError);
-  const getScanPromise = () => scanPromise;
-
-  const conn = await connectAndWhoami({
-    url: wsUrl,
-    token: phoneToken,
-    origin: window.location.origin,
+  return awaitPhoneSessionReady(sessionId, signal, options, {
+    readHash: () => window.location.hash,
+    getOrigin: () => window.location.origin,
+    startScan: startPhoneIntegrityScan,
+    connect: connectAndWhoami,
   });
-
-  const verdictRevealKey = new Promise<string>((resolve) => {
-    const unsubscribe = conn.onMessage((message) => {
-      const data = message.data as { kind?: unknown; revealKey?: unknown } | null;
-      if (
-        message.from === 'server' &&
-        data?.kind === 'verdict-release' &&
-        typeof data.revealKey === 'string'
-      ) {
-        unsubscribe();
-        resolve(data.revealKey);
-      }
-    });
-  });
-
-  if (signal?.aborted) {
-    conn.close();
-    throw new Error('aborted');
-  }
-  const onAbort = () => conn.close();
-  signal?.addEventListener('abort', onAbort);
-  try {
-    // Tell the desktop we're here. Server auto-includes our envelope on
-    // the relayed message so the desktop can address us back.
-    conn.sendPeer(desktopEnvelope, { kind: 'phone-here', challenge: opts.challenge === true });
-
-    const msg = await conn.waitForMessage((m) => {
-      const d = m.data as { kind?: string } | null;
-      return d?.kind === 'desktop-ready';
-    }, 60_000);
-
-    const data = msg.data as {
-      nonce: string;
-      expiresAt: number;
-      desktopArgusSessionId: string;
-      desktopKeyId: string;
-    };
-    return {
-      nonce: data.nonce,
-      proofRequired,
-      freshProofRequired,
-      expiresAt: data.expiresAt,
-      desktopArgusSessionId: data.desktopArgusSessionId,
-      desktopKeyId: data.desktopKeyId,
-      desktopEnvelope,
-      phoneToken,
-      conn,
-      getVerdictRevealKey: () => verdictRevealKey,
-      getScanPromise,
-    };
-  } finally {
-    signal?.removeEventListener('abort', onAbort);
-  }
 }
 
 /**
@@ -765,261 +620,7 @@ export async function awaitDesktopReady(
  * reveal the verdict anyway if this message never lands.
  */
 export function signalChallengeDone(info: PhoneSessionInfo): void {
-  try {
-    info.conn.sendPeer(info.desktopEnvelope, { kind: 'phone-done' });
-  } catch {
-    /* best effort — desktop hold cap covers the loss */
-  }
-}
-
-/**
- * localStorage hint flag — set after a successful registration so the
- * next visit knows whether to call get() (authentication) or create()
- * (registration). There's no client-side WebAuthn API to ask "does this
- * RP own any of my passkeys?" — privacy-driven omission — so we trade
- * server-side certainty for a single-source-of-truth client flag.
- *
- * Mismatches (flag set but the passkey was deleted from keychain, or
- * flag absent but the credential is still synced) self-heal: the
- * authentication path catches the iOS rejection and immediately falls
- * through to registration. Worst case is one extra dialog on the rare
- * recovery path.
- */
-/**
- * localStorage records: have we successfully registered before, and
- * which credentialId? Used to (a) decide which button to show on the
- * phone (CREATE vs USE), and (b) pass an explicit `allowCredentials`
- * on the authentication path so iOS pre-selects the right passkey
- * instead of showing the generic "No passkeys for this site" sheet
- * when something's off.
- *
- * There's no client-side WebAuthn API to ask "does this RP own any of
- * my passkeys?" — privacy-driven omission — so the localStorage flag
- * is the best signal we have. Mismatches (flag set but the passkey
- * was deleted, or flag absent but the credential is still synced)
- * are recoverable: the user picks the wrong button, the OS errors out
- * clearly, they pick the other one.
- */
-const PASSKEY_HINT_KEY = 'argus-pair:passkey-registered';
-const PASSKEY_CRED_ID_KEY = 'argus-pair:passkey-credential-id';
-
-/** @public — passkey-hint UI helper used by the canonical phone entry and SSO. */
-export function hasPasskeyHint(): boolean {
-  try {
-    return window.localStorage.getItem(PASSKEY_HINT_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Clear the passkey hint so the next button screen offers CREATE
- * PASSKEY instead of USE PASSKEY. Called from phone-main.tsx when the
- * server reports the stored credential isn't recognized server-side
- * (the classic stuck-hint failure mode after a registration-time
- * rpId mismatch).
- *
- * @public — shared by phone pairing and mobile SSO.
- */
-export function clearPasskeyHint(): void {
-  writePasskeyHint(null);
-}
-
-function readCredentialId(): string | null {
-  try {
-    return window.localStorage.getItem(PASSKEY_CRED_ID_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writePasskeyHint(credentialId: string | null): void {
-  try {
-    if (credentialId) {
-      window.localStorage.setItem(PASSKEY_HINT_KEY, '1');
-      window.localStorage.setItem(PASSKEY_CRED_ID_KEY, credentialId);
-    } else {
-      window.localStorage.removeItem(PASSKEY_HINT_KEY);
-      window.localStorage.removeItem(PASSKEY_CRED_ID_KEY);
-    }
-  } catch {
-    /* private mode / disabled storage — silent */
-  }
-}
-
-function webauthnError(value: unknown): string | null {
-  if (!value || typeof value !== 'object') return null;
-  const error = (value as { error?: unknown }).error;
-  return typeof error === 'string' && error.length > 0 ? error : null;
-}
-
-/**
- * Authenticate using the previously-saved passkey. Looks up the
- * credentialId in localStorage and passes it via `allowCredentials`
- * so iOS knows exactly which passkey to surface — bypasses the
- * confusing "No passkeys available" generic sheet when something's
- * gone wrong.
- */
-async function authenticateExistingPasskey(
-  nonceB64Url: string
-): Promise<unknown | { error: string }> {
-  const { startAuthentication } = await import('@simplewebauthn/browser');
-  const rpId = window.location.hostname;
-  const credentialId = readCredentialId();
-  try {
-    return await startAuthentication({
-      optionsJSON: {
-        challenge: nonceB64Url,
-        rpId,
-        userVerification: 'required',
-        timeout: 60_000,
-        allowCredentials: credentialId ? [{ id: credentialId, type: 'public-key' }] : undefined,
-      },
-    });
-  } catch (e) {
-    // Hint was wrong (deleted from keychain, never actually synced,
-    // user cancelled). Clear localStorage so next attempt offers
-    // CREATE PASSKEY instead of USE.
-    writePasskeyHint(null);
-    return { error: (e as Error).message };
-  }
-}
-
-/**
- * Create a fresh resident passkey. iOS/Android writes it to iCloud
- * Keychain / Google Password Manager so subsequent visits can
- * authenticate without re-registering.
- */
-async function createNewPasskey(nonceB64Url: string): Promise<unknown | { error: string }> {
-  const { startRegistration } = await import('@simplewebauthn/browser');
-  const rpId = window.location.hostname;
-  try {
-    // user.id must be valid base64url after SimpleWebAuthn decodes it
-    // (iOS Safari rejects non-base64url strings with "invalid characters").
-    // Encoding the rpId gives us a value that is:
-    //   - valid base64url (no dots, no slashes, no padding)
-    //   - stable per host (so repeat registrations on the same device
-    //     dedupe in the OS-managed passkey store)
-    //   - distinct per host (no privacy leak across hosts)
-    const userIdB64Url = btoa(rpId).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const result = await startRegistration({
-      optionsJSON: {
-        challenge: nonceB64Url,
-        rp: { id: rpId, name: 'Argus Pair' },
-        user: {
-          id: userIdB64Url,
-          name: 'pair',
-          displayName: 'Argus Pair',
-        },
-        pubKeyCredParams: [
-          { type: 'public-key', alg: -7 },
-          { type: 'public-key', alg: -257 },
-        ],
-        authenticatorSelection: {
-          authenticatorAttachment: 'platform',
-          // 'preferred' so iOS/Android persists the credential.
-          residentKey: 'preferred',
-          requireResidentKey: false,
-          userVerification: 'required',
-        },
-        // 'none' — Apple/Google strip attestation on platform passkeys
-        // anyway, so 'direct' just adds latency without buying trust.
-        attestation: 'none',
-        timeout: 60_000,
-      },
-    });
-    // We DELIBERATELY do not write the passkey hint here. Earlier
-    // versions optimistically wrote it the moment WebAuthn.create()
-    // returned a credential, before the server confirmed it stored
-    // the registration. When server-side registration failed (rpId
-    // mismatch from a mis-deployed QR origin), the hint stuck and
-    // every future visit hit USE PASSKEY against a credential the
-    // server never stored → permanent credential_not_registered loop.
-    //
-    // Now the hint is written by the caller AFTER a paired verdict —
-    // see submitPhoneAttestation's post-response branch.
-    return result;
-  } catch (e) {
-    return { error: (e as Error).message };
-  }
-}
-
-interface AttestResponse {
-  verdict: string;
-  reason: string | null;
-  annotations?: Record<string, unknown>;
-  nextDeviceTrust?: string | null;
-  phoneState?: SealedVerdictEnvelope;
-  revealKey?: string;
-  /** Persist released phone-only state after DONE without exposing it earlier. */
-  finalizeAfterDone?: () => Promise<'paired' | 'failed' | null>;
-}
-
-function attachPhoneStateFinalizer(
-  response: AttestResponse,
-  info: PhoneSessionInfo,
-  createdCredentialId: string | null = null
-): AttestResponse {
-  if (response.verdict !== 'complete' || !response.phoneState) return response;
-  let finalization: Promise<'paired' | 'failed' | null> | null = null;
-  return {
-    ...response,
-    finalizeAfterDone: () => {
-      finalization ??= (async () => {
-        const revealKey = response.revealKey ?? (await info.getVerdictRevealKey());
-        const payload = await openFixedVerdictEnvelope(
-          decodeVerdictRevealKey(revealKey),
-          info.conn.sessionId,
-          response.phoneState!
-        );
-        if (payload.kind !== 'phone-state') throw new Error('unexpected phone state payload kind');
-        const phoneState = payload as PhoneStatePayload;
-        if (phoneState.nextDeviceTrust) {
-          const { saveTrustToken } = await import('./device-trust');
-          await saveTrustToken(phoneState.nextDeviceTrust);
-        }
-        if (phoneState.verdict === 'paired' && createdCredentialId) {
-          writePasskeyHint(createdCredentialId);
-        }
-        return phoneState.verdict;
-      })();
-      return finalization;
-    },
-  };
-}
-
-/**
- * Run the phone's side of the attestation. Two paths:
- *
- *   - If a valid device-trust token is in IndexedDB, attempt the silent
- *     path: Argus scan only, no WebAuthn ceremony. Server verifies the
- *     token (strict IP-pin) and waves WebAuthn. Token rejection (any
- *     reason — expired / IP changed / bad HMAC) → server returns 401,
- *     we clear the token and fall through to fresh WebAuthn.
- *
- *   - Otherwise (or after a failed redeem): WebAuthn + Argus in
- *     parallel, original Promise.allSettled flow. On success, server
- *     returns nextDeviceTrust which we persist for the next visit.
- */
-export interface SubmitPhoneAttestationOptions {
-  /**
-   * Proof-of-life mode.
-   *   - `"passkey-create"`  → registration ceremony (CREATE button)
-   *   - `"passkey-auth"`    → authentication ceremony (USE button)
-   *   - `"oauth"`           → caller already ran OAuth, pass `oauthResult`
-   * Server-side verification handles all three identically as
-   * proof-of-life signals.
-   */
-  mode?: 'integrity' | 'passkey-create' | 'passkey-auth' | 'oauth';
-  /** When `mode === "oauth"`, the result from one of the
-   *  `runGoogleProofOfLife(...)` in `src/lib/oauth.ts`. */
-  oauthResult?: { provider: 'google'; token: string };
-  /**
-   * Try only the IndexedDB device-trust token path. Used by the phone's
-   * background fast-pass flow so an expired token never opens WebAuthn
-   * without an explicit user tap.
-   */
-  trustOnly?: boolean;
+  signalPhoneChallengeDone(info);
 }
 
 export async function submitPhoneAttestation(
@@ -1027,155 +628,26 @@ export async function submitPhoneAttestation(
   info: PhoneSessionInfo,
   events: PairEvents = {},
   options: SubmitPhoneAttestationOptions = {}
-): Promise<AttestResponse> {
-  // ── Silent redeem path ─────────────────────────────────────────
+): Promise<PhoneAttestationResponse> {
   const { loadTrustToken, saveTrustToken, clearTrustToken } = await import('./device-trust');
-  const trustToken = info.freshProofRequired ? null : await loadTrustToken();
-  if (!trustToken && options.trustOnly) {
-    throw new Error('device_trust_unavailable');
-  }
-  if (trustToken) {
-    events.onStatus?.('welcome back — verifying');
-    try {
-      const run = await info.getScanPromise();
-      if (run.attestation) {
-        try {
-          const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
-            method: 'POST',
-            body: JSON.stringify(
-              buildTrustRedeemAttestationBody(
-                { argusSessionId: run.argusSessionId, attestation: run.attestation },
-                info,
-                trustToken
-              )
-            ),
-          });
-          if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-          return attachPhoneStateFinalizer(r, info);
-        } catch (postErr) {
-          if (postErr instanceof HttpError) {
-            // 409 already_attested: this device already paired in this
-            // session (likely a retried request whose first response was
-            // lost). Treat as success — fetch the existing verdict.
-            if (postErr.status === 409 && postErr.bodyJson?.error === 'already_attested') {
-              // The winner already delivered the sealed desktop verdict. Do
-              // not fetch /result here: it is desktop-only ciphertext and the
-              // phone must remain decision-blind.
-              return { verdict: 'complete', reason: null, annotations: {} };
-            }
-            if (postErr.status === 401) {
-              await clearTrustToken();
-              events.onStatus?.('trust expired — re-verifying');
-              if (options.trustOnly) throw postErr;
-            } else {
-              await clearTrustToken();
-              events.onStatus?.('falling back to webauthn');
-              if (options.trustOnly) throw postErr;
-            }
-          } else {
-            throw postErr;
-          }
-        }
-      }
-    } catch (e) {
-      events.onError?.(e);
-      await clearTrustToken();
-      events.onStatus?.('falling back to webauthn');
-      if (options.trustOnly) throw e;
+  return runPhoneAttestation(
+    { sessionId, info, events, options },
+    {
+      loadTrustToken,
+      saveTrustToken,
+      clearTrustToken,
+      authenticatePasskey: authenticateExistingPasskey,
+      createPasskey: createNewPasskey,
+      rememberPasskeyCredential,
+      postAttestation: (boundSessionId, body) =>
+        jsonFetch(`${API}/session/${boundSessionId}/phone-attest`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }),
+      openPhoneState: (revealKey, boundSessionId, envelope) =>
+        openFixedVerdictEnvelope(decodeVerdictRevealKey(revealKey), boundSessionId, envelope),
     }
-  }
-
-  // ── Fresh proof-of-life + Argus parallel path ───────────────────
-  // Proof-of-life slot is filled either by WebAuthn (default — runs in
-  // parallel with the Argus scan) or by an OAuth result the caller
-  // already obtained. OAuth flows can't run in parallel with the Argus
-  // scan because the OAuth UI takes user focus, so OAuth runs FIRST
-  // (caller's responsibility), THEN we do the Argus scan.
-  events.onStatus?.('proof of life + integrity scan');
-  const useOAuth = options.mode === 'oauth';
-  const integrityOnly = options.mode === 'integrity';
-  // Default to register if the caller didn't pick — first-time visitors
-  // hitting older code paths get the cleaner CREATE flow rather than
-  // the iOS "no passkeys for this site" dialog.
-  const passkeyMode: 'passkey-create' | 'passkey-auth' =
-    options.mode === 'passkey-auth' ? 'passkey-auth' : 'passkey-create';
-
-  const webauthnPromise: Promise<unknown | { error: string }> = integrityOnly
-    ? Promise.resolve({ error: 'mode_integrity_only' })
-    : useOAuth
-      ? Promise.resolve({ error: 'mode_oauth_skipped' })
-      : passkeyMode === 'passkey-auth'
-        ? authenticateExistingPasskey(info.nonce)
-        : createNewPasskey(info.nonce);
-
-  // The Argus scan started during QR bootstrap and has been running behind
-  // the challenge UI. WebAuthn still runs in parallel when interactive proof
-  // is required.
-  const [webauthnSettled, runSettled] = await Promise.allSettled([
-    webauthnPromise,
-    info.getScanPromise(),
-  ]);
-
-  if (runSettled.status !== 'fulfilled') {
-    throw runSettled.reason;
-  }
-  const run = runSettled.value;
-  if (!run.attestation) {
-    throw new Error(`argus attestation failed: ${run.attestError ?? 'no attestation'}`);
-  }
-  const webauthn =
-    webauthnSettled.status === 'fulfilled'
-      ? webauthnSettled.value
-      : { error: (webauthnSettled.reason as Error).message };
-  const proofError = useOAuth || integrityOnly ? null : webauthnError(webauthn);
-  if (proofError) {
-    throw new Error(proofError);
-  }
-
-  events.onStatus?.('submitting');
-  // Credential id from this fresh registration, if any. We persist it as
-  // the USE-PASSKEY hint once the server confirms a paired verdict (see
-  // rememberPasskey). Captured BEFORE the request so both the normal
-  // response and the 409 already_attested fallback can record it: on
-  // mobile the winning request frequently lands on the fallback (double-
-  // tap / lost first response), and skipping the hint there was making
-  // every visit re-mint a brand-new passkey. We only track the create
-  // path — passkey-auth reuses an existing hint, OAuth manages none.
-  const createdCredentialId = createdCredentialIdFromProof(passkeyMode, webauthnSettled);
-  const rememberPasskey = (verdict: string): void => {
-    if (verdict === 'paired' && createdCredentialId) writePasskeyHint(createdCredentialId);
-  };
-  try {
-    const r = await jsonFetch<AttestResponse>(`${API}/session/${sessionId}/phone-attest`, {
-      method: 'POST',
-      body: JSON.stringify(
-        buildProofAttestationBody({
-          run: { argusSessionId: run.argusSessionId, attestation: run.attestation },
-          bindings: info,
-          webauthn,
-          oauth: useOAuth ? options.oauthResult : undefined,
-        })
-      ),
-    });
-    if (r.nextDeviceTrust) await saveTrustToken(r.nextDeviceTrust);
-    // Legacy plaintext responses are finalized immediately. Sealed responses
-    // defer trust persistence and the passkey hint until authenticated DONE.
-    rememberPasskey(r.verdict);
-    return attachPhoneStateFinalizer(r, info, createdCredentialId);
-  } catch (e) {
-    // Session is already paired (a prior request from this device succeeded
-    // server-side even if the response was lost or retried). Treat as
-    // success: fetch the existing verdict from /result instead of bubbling
-    // the error up. Without this, transient network retries or double-fire
-    // touch events on mobile make the phone show "Something went wrong"
-    // even though the desktop sees the pairing succeed.
-    if (e instanceof HttpError && e.status === 409 && e.bodyJson?.error === 'already_attested') {
-      // The first request already pushed the sealed result. Returning a
-      // neutral completion keeps retries from becoming a plaintext oracle.
-      return { verdict: 'complete', reason: null, annotations: {} };
-    }
-    throw e;
-  }
+  );
 }
 
 export { HttpError };

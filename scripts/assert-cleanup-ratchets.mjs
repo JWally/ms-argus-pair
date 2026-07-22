@@ -88,8 +88,23 @@ const ratchets = [
   },
   {
     file: 'src/lib/pair.ts',
-    maxLines: 1181,
+    maxLines: 653,
     why: 'keep desktop workflow state moving into named, tested client modules',
+  },
+  {
+    file: 'src/lib/passkey-client.ts',
+    maxLines: 185,
+    why: 'keep host-bound WebAuthn and optional browser hints independent from Pair and SSO orchestration',
+  },
+  {
+    file: 'src/lib/phone-session-runtime.ts',
+    maxLines: 202,
+    why: 'keep the QR-bound phone handshake independent from proof and attestation submission',
+  },
+  {
+    file: 'src/lib/phone-attestation.ts',
+    maxLines: 245,
+    why: 'keep trusted and fresh phone proof transitions directly testable and below the new-file limit',
   },
   {
     file: 'src/lib/desktop-session-runtime.ts',
