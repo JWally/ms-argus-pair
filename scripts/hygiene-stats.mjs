@@ -70,7 +70,8 @@ function functionName(node) {
   const parent = node.parent;
   if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
   if (ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
-  if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) return node.name.text;
+  if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name))
+    return node.name.text;
   return '<anonymous>';
 }
 
@@ -84,13 +85,7 @@ function functionStats(files) {
       : file.endsWith('.ts') || file.endsWith('.mts')
         ? ts.ScriptKind.TS
         : ts.ScriptKind.JS;
-    const source = ts.createSourceFile(
-      fullPath,
-      text,
-      ts.ScriptTarget.Latest,
-      true,
-      scriptKind
-    );
+    const source = ts.createSourceFile(fullPath, text, ts.ScriptTarget.Latest, true, scriptKind);
     const lineStarts = source.getLineStarts();
     const lineFor = (pos) => {
       if (!Number.isFinite(pos)) return 1;
@@ -171,7 +166,7 @@ async function boundaryStats() {
   let summary;
   try {
     const config = require('../dependency-cruiser.config.cjs');
-    const result = await cruise(['cdk', 'src', 'tests'], {
+    const result = await cruise(['cdk', 'loader', 'src', 'tests'], {
       ...config.options,
       ruleSet: { forbidden: config.forbidden },
     });
@@ -191,9 +186,19 @@ async function boundaryStats() {
 function duplicationStats() {
   const outDir = mkdtempSync(path.join(tmpdir(), 'argus-hygiene-jscpd-'));
   try {
-    const result = run('npx', ['jscpd', 'src', 'cdk', 'loader', '--reporters', 'json', '--output', outDir]);
+    const result = run('npx', [
+      'jscpd',
+      'src',
+      'cdk',
+      'loader',
+      '--reporters',
+      'json',
+      '--output',
+      outDir,
+    ]);
     const reportPath = path.join(outDir, 'jscpd-report.json');
-    if (!existsSync(reportPath)) return { unavailable: result.stderr.trim() || result.stdout.trim() };
+    if (!existsSync(reportPath))
+      return { unavailable: result.stderr.trim() || result.stdout.trim() };
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     const stat = report.statistics?.total ?? {};
     const percentage = Number(stat.percentage ?? 0);

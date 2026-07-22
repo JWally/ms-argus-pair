@@ -106,7 +106,7 @@
     "vitest": "^4.1.9"
   },
   "jscpd": {
-    "threshold": 0.45,
+    "threshold": 0.35,
     "gitignore": true
   }
 }

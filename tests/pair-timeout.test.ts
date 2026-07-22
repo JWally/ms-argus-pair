@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { getEmbedPresentation } from '../src/lib/embed-presentation.ts';
 import { isPairSessionTimeout } from '../src/lib/pair-timeout';
 
 describe('isPairSessionTimeout', () => {
@@ -15,11 +15,13 @@ describe('isPairSessionTimeout', () => {
   });
 });
 
-it('gives the captcha embed a dedicated timeout presentation', async () => {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename -- fixed repository fixture.
-  const embed = await readFile(new URL('../src/pages/Embed.tsx', import.meta.url), 'utf8');
-
-  expect(embed).toContain('timeout: { title: "Didn\'t connect in time"');
-  expect(embed).toContain('const SealTimeout');
-  expect(embed).toMatch(/phase === 'timeout'\s*\?\s*\(\s*<SealTimeout \/>/);
+it('gives the captcha embed a dedicated timeout presentation', () => {
+  expect(
+    getEmbedPresentation({ connected: false, completion: 'timeout', showScanHint: false })
+  ).toEqual({
+    phase: 'timeout',
+    title: "Didn't connect in time",
+    instruction: 'Refresh to try again',
+    trackStatus: 'CONNECTION TIMED OUT',
+  });
 });
