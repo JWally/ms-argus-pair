@@ -214,6 +214,9 @@ ms-argus-pair/
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
 │   ├── lib/pair-api.ts               # API Lambda composition root and HTTP router
 │   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
+│   │   ├── phone-attestation-request.ts # signed request + desktop binding boundary
+│   │   ├── phone-attestation-route.ts   # proof/projection/verdict orchestration
+│   │   └── phone-attestation-commit.ts  # Valkey/DDB single-writer policy
 │   ├── lib/ws-handler.ts             # WS Lambda (whoami / message relay)
 │   ├── lib/session-store.ts, valkey-client.ts, sso-continuity.ts, oauth-providers.ts
 │   ├── lib/captcha-cdn/              # loader CDN stack (S3+CloudFront)
