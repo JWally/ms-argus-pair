@@ -233,8 +233,23 @@ const ratchets = [
   },
   {
     file: 'src/pages/Embed.tsx',
-    maxLines: 269,
-    why: 'keep embed session orchestration separate from presentation policy and icon markup',
+    maxLines: 96,
+    why: 'keep the embed route focused on iframe effects and React state wiring',
+  },
+  {
+    file: 'src/pages/EmbedView.tsx',
+    maxLines: 82,
+    why: 'keep captcha markup independent from iframe effects and session resources',
+  },
+  {
+    file: 'src/lib/embed-config.ts',
+    maxLines: 43,
+    why: 'keep URL and parent-message validation pure and directly testable',
+  },
+  {
+    file: 'src/lib/embed-session.ts',
+    maxLines: 178,
+    why: 'keep QR resources and embed completion independent from React and iframe sizing',
   },
   {
     file: 'src/lib/embed-presentation.ts',
