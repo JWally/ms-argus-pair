@@ -153,8 +153,13 @@ const ratchets = [
   },
   {
     file: 'src/phone-main.tsx',
-    maxLines: 599,
-    why: 'keep the single phone entry focused while drawing and proof logic move into tested modules',
+    maxLines: 508,
+    why: 'keep the single phone entry focused on browser lifecycle and rendering',
+  },
+  {
+    file: 'src/lib/phone-proof-flow.ts',
+    maxLines: 198,
+    why: 'keep phone proof selection, submission, and result policy directly testable and below the new-file limit',
   },
   {
     file: 'src/lib/phone-drawing-board.ts',

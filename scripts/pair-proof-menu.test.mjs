@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const root = process.cwd();
 const phoneEntry = fs.readFileSync(path.join(root, 'src/phone-main.tsx'), 'utf8');
+const phoneProofFlow = fs.readFileSync(path.join(root, 'src/lib/phone-proof-flow.ts'), 'utf8');
 const pairFailure = fs.readFileSync(path.join(root, 'src/lib/phone-pair-failure.ts'), 'utf8');
 const phoneAttestation = fs.readFileSync(path.join(root, 'src/lib/phone-attestation.ts'), 'utf8');
 const phoneAttestationRequest = fs.readFileSync(
@@ -35,27 +36,33 @@ assert(
 );
 
 assert(
-  phoneEntry.includes('clearPasskeyHint'),
-  'the phone entry should clear stale passkey hints when the server rejects a credential'
+  phoneEntry.includes('runPhoneProofFlow') &&
+    phoneProofFlow.includes('export async function runPhoneProofFlow'),
+  'the canonical phone entry should delegate proof policy to the tested phone-proof-flow boundary'
 );
 
 assert(
-  phoneEntry.includes('type ProofChoice = PhoneProofMode') &&
+  phoneProofFlow.includes('pairOperations.clearPasskeyHint()'),
+  'the proof flow should clear stale passkey hints when the server rejects a credential'
+);
+
+assert(
+  phoneProofFlow.includes('proofMode?: PhoneProofMode') &&
     pairFailure.includes("'integrity' | 'passkey' | 'passkey-create' | 'google'"),
-  'the phone entry should model integrity-only, passkey use, passkey create, and Google'
+  'the proof flow should model integrity-only, passkey use, passkey create, and Google'
 );
 
 assert(
-  phoneEntry.includes(
+  phoneProofFlow.includes(
     "const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth'"
   ) &&
-    phoneEntry.includes("proofMode === 'integrity'") &&
+    phoneProofFlow.includes("proofMode === 'integrity'") &&
     phoneEntry.includes("void pair('integrity', { keepDrawingBoard: true })"),
   'integrity-only sessions should submit without opening a passkey or OAuth ceremony'
 );
 
 assert(
-  phoneEntry.includes('runGoogleProofOfLife(state.info.nonce)'),
+  phoneProofFlow.includes('deps.runGoogleProof(info.nonce)'),
   'Google menu action should bind OAuth proof to the pair nonce'
 );
 
