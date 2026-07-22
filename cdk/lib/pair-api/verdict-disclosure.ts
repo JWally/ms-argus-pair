@@ -6,7 +6,8 @@ import {
   type PhoneStatePayload,
   type SealedVerdictEnvelope,
 } from '../../../src/lib/verdict-envelope';
-import { deriveVerdictRevealKey, type Envelope } from '../ws-handler';
+import { deriveVerdictRevealKey } from '../ws-handler';
+import type { Envelope } from '../ws-handler/router';
 import { pushVerdictToDesktop } from './verdict-push';
 import {
   loadVerdictRevealState,

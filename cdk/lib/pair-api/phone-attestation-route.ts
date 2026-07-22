@@ -1,4 +1,4 @@
-import type { Envelope } from '../ws-handler';
+import type { Envelope } from '../ws-handler/router';
 import type { DeviceTrustVerifyResult } from './attestation/trust';
 import type {
   PhoneAttestationCommitInput,

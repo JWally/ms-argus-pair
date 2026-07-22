@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const root = process.cwd();
 const wsHandler = fs.readFileSync(path.join(root, 'cdk/lib/ws-handler.ts'), 'utf8');
+const wsRouter = fs.readFileSync(path.join(root, 'cdk/lib/ws-handler/router.ts'), 'utf8');
 const pairStack = fs.readFileSync(path.join(root, 'cdk/lib/pair-stack.ts'), 'utf8');
 
 function assert(condition, message) {
@@ -22,9 +23,11 @@ assert(
 );
 
 assert(
-  wsHandler.includes('role_already_connected') &&
-    wsHandler.includes('releaseRoleConnection') &&
-    wsHandler.includes("route === '$disconnect'"),
+  wsRouter.includes('role_already_connected') &&
+    wsRouter.includes('deps.releaseRoleConnection(connectionId)') &&
+    wsRouter.includes("route === '$disconnect'") &&
+    wsHandler.includes('claimRoleConnection,') &&
+    wsHandler.includes('releaseRoleConnection,'),
   'duplicate role connections should fail and disconnects should release their claim'
 );
 

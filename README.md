@@ -257,7 +257,9 @@ ms-argus-pair/
 │   │   ├── phone-attestation-request.ts # signed request + desktop binding boundary
 │   │   ├── phone-attestation-route.ts   # proof/projection/verdict orchestration
 │   │   └── phone-attestation-commit.ts  # Valkey/DDB single-writer policy
-│   ├── lib/ws-handler.ts             # WS Lambda (whoami / message relay)
+│   ├── lib/ws-handler.ts             # WS Lambda AWS/secret/crypto composition root
+│   ├── lib/ws-handler/router.ts      # injectable identity, relay, replay, and release policy
+│   ├── lib/ws-handler/publisher.ts   # API Gateway publisher + stale-peer handling
 │   ├── lib/session-store.ts, valkey-client.ts, sso-continuity.ts, oauth-providers.ts
 │   ├── lib/captcha-cdn/              # loader CDN stack (S3+CloudFront)
 │   └── cloudfront/spa-router.js      # CFF: /pair/*,/p/* → phone.html; SPA fallback
@@ -275,6 +277,13 @@ The Pair API's HTTP trust boundary lives in `cdk/lib/pair-api/router.ts` and is
 integration-tested with injected route handlers. `cdk/lib/pair-api.ts` owns the
 runtime composition only: environment policy, AWS/Valkey adapters, secrets,
 and construction of the tested application slices.
+
+The WebSocket trust boundary follows the same shape. `cdk/lib/ws-handler/router.ts`
+owns connection identity, origin and replay checks, peer relay, and verdict-release
+policy behind injected connection-store, crypto, persistence, clock, and publisher
+ports. `cdk/lib/ws-handler.ts` supplies the AWS and secret-backed adapters. Integration
+tests cover both valid relay directions and the copied-token, forged-envelope,
+cross-session, same-role, and expired-envelope failures without live AWS.
 
 The API Gateway boundary lives in `cdk/lib/pair-http-api.ts`. Synth-level tests
 pin all 17 public route keys plus CORS, throttling, and structured access logs;

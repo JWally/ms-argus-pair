@@ -12,6 +12,21 @@ const ratchets = [
     why: 'keep the HTTP route inventory, CORS, throttling, and access logs in one synth-tested boundary',
   },
   {
+    file: 'cdk/lib/ws-handler.ts',
+    maxLines: 326,
+    why: 'keep the WebSocket Lambda focused on AWS, secret, crypto, and transport composition',
+  },
+  {
+    file: 'cdk/lib/ws-handler/router.ts',
+    maxLines: 240,
+    why: 'keep WebSocket identity, relay, replay, and verdict-release policy directly testable',
+  },
+  {
+    file: 'cdk/lib/ws-handler/publisher.ts',
+    maxLines: 56,
+    why: 'keep API Gateway publication and stale-connection handling in a tested transport adapter',
+  },
+  {
     file: 'cdk/lib/pair-api.ts',
     maxLines: 588,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',

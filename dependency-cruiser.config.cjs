@@ -23,6 +23,13 @@ module.exports = {
       to: { path: '^src/pages/' },
     },
     {
+      name: 'application-routers-do-not-own-aws',
+      severity: 'error',
+      comment: 'Inject AWS adapters into application routers so trust-boundary tests stay local.',
+      from: { path: '^cdk/lib/(pair-api|ws-handler)/router\\.ts$' },
+      to: { path: '^@aws-sdk/' },
+    },
+    {
       name: 'no-tests-in-production',
       severity: 'error',
       comment: 'Production code must not import tests or test helpers.',

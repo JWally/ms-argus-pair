@@ -31,6 +31,7 @@ const verdictDisclosure = fs.readFileSync(
   'utf8'
 );
 const wsHandler = fs.readFileSync(path.join(root, 'cdk/lib/ws-handler.ts'), 'utf8');
+const wsRouter = fs.readFileSync(path.join(root, 'cdk/lib/ws-handler/router.ts'), 'utf8');
 
 function assert(condition, message) {
   if (!condition) {
@@ -110,10 +111,12 @@ assert(
 );
 
 assert(
-  wsHandler.includes("me.role !== 'phone'") &&
-    wsHandler.includes("dataKind !== 'phone-done'") &&
-    wsHandler.includes('await markPhoneDone') &&
-    wsHandler.includes("kind: 'verdict-release'"),
+  wsRouter.includes("sender.role !== 'phone'") &&
+    wsRouter.includes("dataKind !== 'phone-done'") &&
+    wsRouter.includes('await deps.markPhoneDone') &&
+    wsRouter.includes("kind: 'verdict-release'") &&
+    wsHandler.includes('markPhoneDone: async') &&
+    wsHandler.includes('getVerdictRevealKey:'),
   'only the authenticated phone-done relay should trigger the live reveal-key message'
 );
 
