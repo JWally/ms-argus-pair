@@ -6,8 +6,8 @@
  * verification already happened — until the phone relays `phone-done` (the
  * user tapped DONE / dismissed the challenge). Non-challenge phones settle
  * immediately, and the hold cap releases a wedged gate. The WS layer and QR
- * mint are mocked; the gate logic under test is the real startDesktopSession
- * closure.
+ * mint are mocked; the gate logic under test is the real extracted desktop
+ * session runtime composed by startDesktopSession.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startDesktopSession } from '../src/lib/pair';

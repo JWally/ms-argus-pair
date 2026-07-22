@@ -146,7 +146,9 @@ Key mechanics:
   redeem (12h IndexedDB token) → WebAuthn → Google OAuth.
 - **Desktop trusts only the server.** The verdict must arrive `from:'server'`
   (WS push or authenticated `/result` poll) — a phone-side forgery via the
-  relay is ignored.
+  relay is ignored. Polling waits 20 seconds while the socket is healthy; a
+  disconnect cancels that delay and starts the authenticated fallback
+  immediately.
 - **Deferred verdict disclosure.** The verdict is calculated behind the drawing
   challenge, but pass and fail travel as the same fixed-size AES-GCM envelope.
   `/phone-attest` returns only neutral completion. The authenticated phone role
@@ -205,6 +207,7 @@ ms-argus-pair/
 │   ├── lib/phone-drawing-board.ts # sole phone challenge UI: letter drawing
 │   ├── lib/phone-view.ts       # pure proof-menu and status presentation
 │   ├── lib/pair.ts             # session orchestration (desktop + phone)
+│   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)

@@ -8,6 +8,10 @@ import path from 'node:path';
 // phone-here websocket message.
 const root = process.cwd();
 const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const desktopRuntime = fs.readFileSync(
+  path.join(root, 'src/lib/desktop-session-runtime.ts'),
+  'utf8'
+);
 
 function assert(condition, message) {
   if (!condition) {
@@ -22,7 +26,8 @@ assert(
 );
 
 assert(
-  pairLib.includes("data.kind === 'phone-here'") && pairLib.includes('events.onPhoneConnected?.()'),
+  desktopRuntime.includes("case 'phone-here'") &&
+    desktopRuntime.includes('this.options.onPhoneConnected?.()'),
   'desktop flow should notify when the phone-here websocket message arrives'
 );
 
