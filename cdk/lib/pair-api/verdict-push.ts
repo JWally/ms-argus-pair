@@ -1,4 +1,5 @@
-import { postToPeer, type Envelope } from '../ws-handler';
+import { postToPeer } from '../ws-handler/publisher';
+import type { Envelope } from '../ws-handler/router';
 import type { SealedVerdictEnvelope } from '../../../src/lib/verdict-envelope';
 
 export async function pushVerdictToDesktop(args: {

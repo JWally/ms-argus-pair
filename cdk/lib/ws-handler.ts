@@ -40,11 +40,6 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import {
-  ApiGatewayManagementApiClient,
-  PostToConnectionCommand,
-  GoneException,
-} from '@aws-sdk/client-apigatewaymanagementapi';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
@@ -53,11 +48,20 @@ import {
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { markPhoneChallenge, markPhoneDone } from './pair-api/verdict-reveal-store';
+import { createWsEventPublisher } from './ws-handler/publisher';
+import {
+  createWsRouter,
+  type BootstrapClaims,
+  type Envelope,
+  type WsEvent,
+  type WsResponse,
+} from './ws-handler/router';
+
+export type { Envelope } from './ws-handler/router';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
 const TOKEN_TTL_SECONDS = 5 * 60; // bootstrap token TTL
-const ENVELOPE_MAX_AGE_SEC = 60 * 60; // 1 hour — peer messages allowed within
 const ALLOWED_ROLES = new Set(['desktop', 'phone']);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
 const TABLE = process.env.TABLE_NAME;
@@ -202,14 +206,6 @@ export async function deriveVerdictRevealKey(sessionId: string): Promise<Buffer>
 
 // ── Bootstrap token (HMAC-signed JSON, base64url) ──────────────────────
 
-interface BootstrapClaims {
-  v: 1;
-  sessionId: string;
-  role: 'desktop' | 'phone';
-  iat: number;
-  exp: number;
-}
-
 function b64urlBytes(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -261,45 +257,6 @@ export async function verifyBootstrapToken(token: string): Promise<BootstrapClai
 
 // ── Connection-identity envelope (AES-256-GCM sealed) ──────────────────
 
-export interface Envelope {
-  v: 1;
-  connectionId: string;
-  sessionId: string;
-  role: 'desktop' | 'phone';
-  ip: string;
-  origin: string;
-  iat: number;
-  publicKey?: string;
-}
-
-/**
- * Server-side helper: PostToConnection a JSON payload to a peer that we
- * have an opened envelope for. Used by /phone-attest to push the verdict
- * straight to the desktop's WS connection (avoids /result polling).
- *
- * `endpoint` is the management-API HTTPS URL (NOT the wss:// form);
- * callers pass `process.env.WS_MGMT_ENDPOINT`.
- */
-export async function postToPeer(
-  endpoint: string,
-  connectionId: string,
-  data: unknown
-): Promise<{ ok: true } | { ok: false; reason: 'gone' | string }> {
-  const client = new ApiGatewayManagementApiClient({ endpoint });
-  try {
-    await client.send(
-      new PostToConnectionCommand({
-        ConnectionId: connectionId,
-        Data: JSON.stringify(data),
-      })
-    );
-    return { ok: true };
-  } catch (e) {
-    if (e instanceof GoneException) return { ok: false, reason: 'gone' };
-    return { ok: false, reason: (e as Error).message };
-  }
-}
-
 async function sealEnvelope(env: Envelope): Promise<string> {
   const { aesKey } = await loadSecretMaterial();
   const iv = randomBytes(12);
@@ -330,222 +287,40 @@ export async function openEnvelope(blob: string): Promise<Envelope | null> {
   }
 }
 
-// ── Lambda handler ─────────────────────────────────────────────────────
-
-interface WsEvent {
-  requestContext: {
-    routeKey: string;
-    connectionId: string;
-    domainName: string;
-    stage: string;
-    identity?: { sourceIp?: string };
-  };
-  queryStringParameters?: Record<string, string | undefined>;
-  headers?: Record<string, string | undefined>;
-  body?: string;
-}
-
-interface WsResp {
-  statusCode: number;
-  body?: string;
-}
-
 function isWarmingUp(event: unknown): boolean {
   const maybeWarmup = event as { source?: unknown; warmup?: unknown };
   return maybeWarmup.source === 'serverless-plugin-warmup' || maybeWarmup.warmup === true;
 }
 
-function ok(): WsResp {
-  return { statusCode: 200 };
-}
-
-function bad(body: string): WsResp {
-  console.log(`[ws] bad: ${body}`);
-  return { statusCode: 400, body };
-}
-
-function originOk(origin: string | undefined): boolean {
-  if (!origin) return false;
-  return ALLOWED_ORIGINS.includes(origin);
-}
-
-async function sendToConnection(
-  event: WsEvent,
-  connectionId: string,
-  data: unknown
-): Promise<void> {
-  const endpoint = `https://${event.requestContext.domainName}/${event.requestContext.stage}`;
-  const client = new ApiGatewayManagementApiClient({ endpoint });
-  try {
-    await client.send(
-      new PostToConnectionCommand({
-        ConnectionId: connectionId,
-        Data: JSON.stringify(data),
-      })
-    );
-  } catch (e) {
-    if (e instanceof GoneException) {
-      // peer disconnected — silent drop; sender's reply UX handles
-      return;
-    }
-    throw e;
-  }
-}
-
-async function handleWhoami(
-  event: WsEvent,
-  body: { token?: unknown; publicKey?: unknown; origin?: unknown }
-): Promise<WsResp> {
-  if (typeof body.token !== 'string') return bad('missing_token');
-  const claims = await verifyBootstrapToken(body.token);
-  if (!claims) return bad('invalid_token');
-  const origin = typeof body.origin === 'string' ? body.origin : '';
-  if (!originOk(origin)) return bad('origin_not_allowed');
-  const ip = event.requestContext.identity?.sourceIp ?? '';
-  if (!(await claimRoleConnection(claims, event.requestContext.connectionId))) {
-    return bad('role_already_connected');
-  }
-  const env: Envelope = {
-    v: 1,
-    connectionId: event.requestContext.connectionId,
-    sessionId: claims.sessionId,
-    role: claims.role,
-    ip,
-    origin,
-    iat: Math.floor(Date.now() / 1000),
-    publicKey: typeof body.publicKey === 'string' ? body.publicKey : undefined,
-  };
-  const envelope = await sealEnvelope(env);
-  await sendToConnection(event, event.requestContext.connectionId, {
-    action: 'whoami',
-    envelope,
-    sessionId: claims.sessionId,
-    role: claims.role,
-  });
-  return ok();
-}
-
-async function recordVerdictRevealSignal(
-  me: Envelope,
-  dataKind: unknown,
-  data: unknown,
-  now: number
-): Promise<boolean> {
-  if (!TABLE || me.role !== 'phone') return false;
-  const markerExpiresAt = now + TOKEN_TTL_SECONDS + 60;
-  if (dataKind === 'phone-here') {
-    const challenge = (data as { challenge?: unknown }).challenge === true;
-    // Persist before relaying phone-here: desktop-ready and phone-attest can
-    // only follow after this write, so verdict calculation cannot race past the gate.
-    await markPhoneChallenge(ddb, TABLE, me.sessionId, challenge, markerExpiresAt);
-    return false;
-  }
-  if (dataKind !== 'phone-done') return false;
-  await markPhoneDone(ddb, TABLE, me.sessionId, markerExpiresAt);
-  return true;
-}
-
-async function sendVerdictRelease(
-  event: WsEvent,
-  phone: Envelope,
-  desktop: Envelope
-): Promise<void> {
-  const revealKey = b64urlBytes(await deriveVerdictRevealKey(phone.sessionId));
-  const release = {
-    action: 'message',
-    from: 'server',
-    sessionId: phone.sessionId,
-    data: { kind: 'verdict-release', revealKey },
-  };
-  // Desktop unlocks the merchant verdict; phone unlocks only its private
-  // continuation state (device trust/passkey hint). Same fixed key, separate
-  // AES-GCM IVs and payloads.
-  await Promise.all([
-    sendToConnection(event, desktop.connectionId, release),
-    sendToConnection(event, phone.connectionId, release),
-  ]);
-}
-
-async function handleMessage(
-  event: WsEvent,
-  body: { me?: unknown; peer?: unknown; data?: unknown }
-): Promise<WsResp> {
+function requireMessageState(): void {
   if (!TABLE) throw new Error('TABLE_NAME not configured');
-  if (typeof body.me !== 'string' || typeof body.peer !== 'string') return bad('missing_envelopes');
-  const me = await openEnvelope(body.me);
-  const peer = await openEnvelope(body.peer);
-  if (!me || !peer) return bad('invalid_envelope');
-  // Server-of-record identity check: the connection sending this message
-  // MUST own the `me` envelope. Stops a third party with leaked envelopes
-  // from impersonating a peer.
-  if (me.connectionId !== event.requestContext.connectionId) {
-    return bad('envelope_connection_mismatch');
-  }
-  // Pair session must match — peers from different sessions can't talk.
-  if (me.sessionId !== peer.sessionId) return bad('cross_session');
-  // NOTE: both origins were already validated against ALLOWED_ORIGINS in
-  // their respective whoami. We deliberately do NOT require me.origin ===
-  // peer.origin here: the desktop can load from an alias (qr.arcades.click)
-  // while the QR points the phone at the canonical host (captcha-…/argus.pw)
-  // so the WebAuthn rpId stays stable. That's by design. sessionId is the
-  // pairing boundary, not origin.
-  // Roles must be distinct (desktop talks to phone, not desktop to desktop).
-  if (me.role === peer.role) return bad('same_role');
-  // Replay window.
-  const now = Math.floor(Date.now() / 1000);
-  if (now - me.iat > ENVELOPE_MAX_AGE_SEC || now - peer.iat > ENVELOPE_MAX_AGE_SEC) {
-    return bad('envelope_expired');
-  }
-  const dataKind =
-    body.data && typeof body.data === 'object' && 'kind' in (body.data as object)
-      ? (body.data as { kind?: unknown }).kind
-      : null;
-  const shouldSendVerdictRelease = await recordVerdictRevealSignal(me, dataKind, body.data, now);
-  console.log(
-    `[ws] relay from=${me.role} to=${peer.role} session=${me.sessionId} kind=${String(dataKind)} peerCid=${peer.connectionId}`
-  );
-  await sendToConnection(event, peer.connectionId, {
-    action: 'message',
-    from: me.role,
-    // Include the sender's envelope so the recipient can reply without
-    // a separate handshake. The recipient doesn't get to forge this —
-    // we hand them the same sealed blob the sender presented to us,
-    // which decrypts only if AES auth-tag verifies.
-    fromEnvelope: body.me,
-    sessionId: me.sessionId,
-    data: body.data ?? null,
-  });
-  if (shouldSendVerdictRelease) await sendVerdictRelease(event, me, peer);
-  return ok();
 }
 
-export const handler = async (event: WsEvent | unknown): Promise<WsResp> => {
+const sendToConnection = createWsEventPublisher();
+
+const wsRouter = createWsRouter({
+  allowedOrigins: new Set(ALLOWED_ORIGINS),
+  verifyBootstrapToken,
+  claimRoleConnection,
+  releaseRoleConnection,
+  sealEnvelope,
+  openEnvelope,
+  ensureMessageStateAvailable: requireMessageState,
+  markPhoneChallenge: async (sessionId, challenge, expiresAt) => {
+    requireMessageState();
+    await markPhoneChallenge(ddb, TABLE!, sessionId, challenge, expiresAt);
+  },
+  markPhoneDone: async (sessionId, expiresAt) => {
+    requireMessageState();
+    await markPhoneDone(ddb, TABLE!, sessionId, expiresAt);
+  },
+  getVerdictRevealKey: async (sessionId) => b64urlBytes(await deriveVerdictRevealKey(sessionId)),
+  sendToConnection,
+  nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+  logInfo: (message) => console.log(message),
+});
+
+export const handler = async (event: WsEvent | unknown): Promise<WsResponse> => {
   if (isWarmingUp(event)) return { statusCode: 200, body: JSON.stringify({ warmed: true }) };
-  const wsEvent = event as WsEvent;
-  const route = wsEvent.requestContext.routeKey;
-  const cid = wsEvent.requestContext.connectionId;
-  if (route === '$connect') {
-    console.log(`[ws] connect cid=${cid}`);
-    return ok();
-  }
-  if (route === '$disconnect') {
-    console.log(`[ws] disconnect cid=${cid}`);
-    await releaseRoleConnection(cid);
-    return ok();
-  }
-  let body: { action?: string } & Record<string, unknown> = {};
-  try {
-    if (wsEvent.body) body = JSON.parse(wsEvent.body) as typeof body;
-  } catch {
-    return bad('invalid_json');
-  }
-  console.log(`[ws] action=${body.action} cid=${cid}`);
-  switch (body.action) {
-    case 'whoami':
-      return handleWhoami(wsEvent, body as Record<string, unknown>);
-    case 'message':
-      return handleMessage(wsEvent, body as Record<string, unknown>);
-    default:
-      return bad('unknown_action');
-  }
+  return wsRouter(event as WsEvent);
 };
