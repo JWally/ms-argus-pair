@@ -9,7 +9,10 @@ import path from 'node:path';
 // live in different files and silently break apart — keep the message kinds
 // and the release paths coupled.
 const root = process.cwd();
-const pairLib = fs.readFileSync(path.join(root, 'src/lib/pair.ts'), 'utf8');
+const phoneSessionRuntime = fs.readFileSync(
+  path.join(root, 'src/lib/phone-session-runtime.ts'),
+  'utf8'
+);
 const desktopRuntime = fs.readFileSync(
   path.join(root, 'src/lib/desktop-session-runtime.ts'),
   'utf8'
@@ -37,7 +40,7 @@ function assert(condition, message) {
 }
 
 assert(
-  pairLib.includes("{ kind: 'phone-here', challenge: opts.challenge === true }"),
+  phoneSessionRuntime.includes('challenge: options.challenge === true'),
   'phone-here should carry the challenge flag that arms the desktop reveal gate'
 );
 
@@ -60,7 +63,7 @@ assert(
 );
 
 assert(
-  pairLib.includes("{ kind: 'phone-done' }"),
+  phoneSessionRuntime.includes("{ kind: 'phone-done' }"),
   'signalChallengeDone should send the phone-done peer message the desktop listens for'
 );
 

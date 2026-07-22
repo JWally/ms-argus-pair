@@ -77,9 +77,9 @@ server-owned meaning onto the session, sends the resolved requirement to the
 phone through the single-use QR token, and binds the exact scoped CPI into the
 signed verdict. A sensitive merchant endpoint must verify against the exact
 expected scoped CPI; a result for the base CPI is not interchangeable. Unknown
-suffixes fail session creation instead of silently downgrading. The CPI field is
-and challenge fields are required on `POST /api/verify`; token validity is
-never returned without the merchant making both exact assertions.
+suffixes fail session creation instead of silently downgrading. The CPI and
+challenge fields are required on `POST /api/verify`; token validity is never
+returned without the merchant making both exact assertions.
 
 The loader (`loader/loader.ts`) injects a cross-origin iframe at
 `{EMBED_ORIGIN}/embed` and relays origin-checked postMessages up. The browser
@@ -149,6 +149,15 @@ Key mechanics:
   relay is ignored. Polling waits 20 seconds while the socket is healthy; a
   disconnect cancels that delay and starts the authenticated fallback
   immediately.
+- **Phone trusts only its bound desktop.** A `desktop-ready` relay is accepted
+  only when the WS server stamps the desktop role, current session, and the
+  exact desktop envelope delivered through the single-use QR. Incomplete or
+  cross-session readiness payloads are ignored. Abort closes the socket and
+  rejects the pending handshake immediately.
+- **Passkey persistence follows server confirmation.** Pair and mobile SSO use
+  one host-bound passkey client. Authentication supplies the stored credential
+  through `allowCredentials` for iOS, rejected authentication clears stale
+  hints, and registration never writes a hint until Pair confirms success.
 - **Deferred verdict disclosure.** The verdict is calculated behind the drawing
   challenge, but pass and fail travel as the same fixed-size AES-GCM envelope.
   `/phone-attest` returns only neutral completion. The authenticated phone role
@@ -206,8 +215,11 @@ ms-argus-pair/
 │   ├── phone-main.tsx          # phone orchestration entry (phone.html): /pair/*, /p/*
 │   ├── lib/phone-drawing-board.ts # sole phone challenge UI: letter drawing
 │   ├── lib/phone-view.ts       # pure proof-menu and status presentation
-│   ├── lib/pair.ts             # session orchestration (desktop + phone)
+│   ├── lib/pair.ts             # browser composition root and public adapters
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
+│   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
+│   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow
+│   ├── lib/passkey-client.ts   # shared Pair/SSO WebAuthn and hint boundary
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open
 │   ├── lib/device-trust.ts     # silent re-auth token (IndexedDB)

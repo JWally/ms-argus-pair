@@ -7,6 +7,9 @@ individual-test boundary to absorb transient API/AWS reads without rerunning the
 ## Coverage
 
 - `stolen-token.e2e.ts` exercises the public QR/token/phone-attestation boundary over HTTP.
+- `phone-handshake.e2e.ts` opens both deployed WebSocket roles and proves the relay stamps
+  `phone-here` and `desktop-ready` with the current session, authenticated role, and exact sender
+  envelope used by the browser trust boundary.
 - `sso-infra.e2e.ts` exercises API Gateway, the Pair Lambda, and the real Pair DynamoDB table. It
   seeds short-lived SSO fixtures directly in DynamoDB, calls only deployed HTTP routes, verifies
   atomic approval consumption, and removes every fixture after each test.
