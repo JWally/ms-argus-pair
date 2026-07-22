@@ -241,6 +241,7 @@ ms-argus-pair/
 │   ├── lib/desktop-session-runtime.ts # authenticated peer/poll/expiry state machine
 │   ├── lib/phone-session-runtime.ts # QR-bound phone handshake and server release
 │   ├── lib/phone-attestation.ts # trust, proof, retry, and sealed-state workflow
+│   ├── lib/phone-proof-flow.ts # proof selection, submission, and decision-blind UI policy
 │   ├── lib/passkey-client.ts   # shared Pair/SSO WebAuthn and hint boundary
 │   ├── lib/ws.ts               # WS client (whoami / message)
 │   ├── lib/qr-keyholder.ts     # worker ECDH + sealed QR image open

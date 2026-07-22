@@ -1,20 +1,22 @@
 import './index.css';
-import type { PairEvents, PhoneSessionInfo, SubmitPhoneAttestationOptions } from './lib/pair';
+import type { PhoneSessionInfo } from './lib/pair';
 import { mountPhoneDrawingBoard, type PhoneDrawingBoard } from './lib/phone-drawing-board';
-import { decidePhonePairFailure, type PhoneProofMode } from './lib/phone-pair-failure';
+import type { PhoneProofMode } from './lib/phone-pair-failure';
+import {
+  runPhoneProofFlow,
+  type PhoneProofFlowState,
+  type PhoneProofUpdateMode,
+} from './lib/phone-proof-flow';
 import { isPairSessionTimeout } from './lib/pair-timeout';
 import { createPhonePerfReporter, type PhonePerfBatch } from './lib/phone-perf';
 import { renderPhonePanelView, renderPhoneReadyView, type PhonePhase } from './lib/phone-view';
 
 // Tiny DOM phone entry. It paints the cheap phone challenge from the QR hash first,
 // then imports the heavier pair/auth modules while the user is occupied.
-type ProofChoice = PhoneProofMode;
 type PhonePair = (typeof import('./lib/phone-pair'))['phonePair'];
-type OAuthModule = typeof import('./lib/oauth');
 
 interface Runtime {
   pairMod?: PhonePair;
-  oauthMod?: OAuthModule;
   info: PhoneSessionInfo | null;
   phase: PhonePhase;
   status: string;
@@ -335,138 +337,45 @@ async function finalizePhoneStateAndClose(): Promise<void> {
 }
 
 async function pair(
-  proofMode: ProofChoice = 'passkey',
+  proofMode: PhoneProofMode = 'passkey',
   opts: { keepDrawingBoard?: boolean; trustOnly?: boolean } = {}
 ): Promise<void> {
-  if (!sessionId || !state.info || !state.pairMod || state.inflight) return;
-  const keepDrawingBoard = opts.keepDrawingBoard === true;
-  recordPhonePerf('pair_start', { proofMode, trustOnly: opts.trustOnly === true });
-  state.inflight = true;
-  startPairUi(keepDrawingBoard);
-  try {
-    const passkeyMode = proofMode === 'passkey-create' ? 'passkey-create' : 'passkey-auth';
-    const options: SubmitPhoneAttestationOptions = {
-      mode:
-        proofMode === 'integrity' ? 'integrity' : proofMode === 'google' ? 'oauth' : passkeyMode,
-    };
-    if (proofMode === 'google') {
-      const oauthMod = await loadOAuthModule();
-      const oauthResult = await oauthMod.runGoogleProofOfLife(state.info.nonce);
-      if (oauthMod.isOAuthError(oauthResult)) {
-        setState({ phase: 'ready', errorMsg: oauthResult.error });
-        return;
-      }
-      options.oauthResult = oauthResult;
-    }
-
-    const result = await state.pairMod.submitPhoneAttestation(
+  await runPhoneProofFlow(
+    {
       sessionId,
-      state.info,
-      createPairEvents(keepDrawingBoard),
-      {
-        ...options,
-        trustOnly: opts.trustOnly,
-      }
-    );
-    applyPairResult(result, {
       proofMode,
-      passkeyMode,
-      keepDrawingBoard,
-      trustOnly: opts.trustOnly === true,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const failure = decidePhonePairFailure(error, {
-      proofMode,
-      keepDrawingBoard,
-    });
-    recordPhonePerf('pair_error', {
-      trustOnly: opts.trustOnly === true,
-      error: message.slice(0, 80),
-    });
-    if (failure.resetTrust) state.hasTrust = false;
-    setState({
-      phase: failure.phase,
-      ...(failure.clearStatus ? { status: '' } : {}),
-      errorMsg: failure.errorMessage,
-    });
-  } finally {
-    state.inflight = false;
-  }
-}
-
-function startPairUi(keepDrawingBoard: boolean): void {
-  if (keepDrawingBoard) {
-    state.status = 'starting';
-    state.errorMsg = null;
-    updateBioDrawActionLabel();
-    return;
-  }
-  setState({
-    phase: state.hasTrust && !state.info?.freshProofRequired ? 'returning' : 'pairing',
-    status: 'starting',
-    errorMsg: null,
-  });
-}
-
-function createPairEvents(keepDrawingBoard: boolean): PairEvents {
-  return {
-    onStatus: (status) => {
-      if (keepDrawingBoard) {
-        state.status = status;
-        updateBioDrawActionLabel();
-        return;
-      }
-      setState({ status });
+      keepDrawingBoard: opts.keepDrawingBoard,
+      trustOnly: opts.trustOnly,
     },
-  };
+    {
+      getState: () => state,
+      getPairOperations: () => state.pairMod,
+      runGoogleProof: runGoogleProof,
+      updateState: updatePhoneProofState,
+      recordPerf: recordPhonePerf,
+      flushPerf: flushPhonePerf,
+      scheduleFinalize: (delayMs) => {
+        window.setTimeout(() => void finalizePhoneStateAndClose(), delayMs);
+      },
+    }
+  );
 }
 
-type PhoneAttestationResult = Awaited<ReturnType<PhonePair['submitPhoneAttestation']>>;
+async function runGoogleProof(nonce: string) {
+  const oauth = await import('./lib/oauth');
+  const outcome = await oauth.runGoogleProofOfLife(nonce);
+  return oauth.isOAuthError(outcome)
+    ? { ok: false as const, errorMessage: outcome.error }
+    : { ok: true as const, proof: outcome };
+}
 
-function applyPairResult(
-  result: PhoneAttestationResult,
-  options: {
-    proofMode: ProofChoice;
-    passkeyMode: 'passkey-create' | 'passkey-auth';
-    keepDrawingBoard: boolean;
-    trustOnly: boolean;
-  }
+function updatePhoneProofState(
+  patch: Partial<PhoneProofFlowState>,
+  mode: PhoneProofUpdateMode
 ): void {
-  recordPhonePerf('attest_done', {
-    verdict: result.verdict,
-    trustOnly: options.trustOnly,
-  });
-  flushPhonePerf('attest_done');
-  state.finalizeAfterDone = result.finalizeAfterDone;
-  if (
-    options.proofMode !== 'integrity' &&
-    options.passkeyMode === 'passkey-auth' &&
-    result.annotations?.phone_webauthn_error === 'credential_not_registered'
-  ) {
-    state.pairMod?.clearPasskeyHint();
-  }
-  if (options.keepDrawingBoard) {
-    // Background verdict calculation must not interrupt the drawing challenge or
-    // disclose its result on the phone. Store it only to unlock DONE; the
-    // desktop receives and enforces the unmodified server verdict.
-    state.verdict = result.verdict;
-    state.status = 'done';
-    state.phase = 'challenge';
-    updateBioDrawActionLabel();
-    return;
-  }
-  setState({
-    verdict: result.verdict,
-    status: 'done',
-    phase: 'paired',
-  });
-  window.setTimeout(() => void finalizePhoneStateAndClose(), 1500);
-}
-
-async function loadOAuthModule(): Promise<OAuthModule> {
-  state.oauthMod ??= await import('./lib/oauth');
-  return state.oauthMod;
+  Object.assign(state, patch);
+  if (mode === 'render') render();
+  if (mode === 'drawing') updateBioDrawActionLabel();
 }
 
 function render(): void {
@@ -581,7 +490,7 @@ async function renderReady(): Promise<void> {
 
 async function isGoogleConfigured(): Promise<boolean> {
   try {
-    const mod = await loadOAuthModule();
+    const mod = await import('./lib/oauth');
     return mod.PROVIDERS_CONFIGURED.google;
   } catch {
     return false;

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src/phone-main.tsx'), 'utf8');
+const proofFlow = fs.readFileSync(path.join(process.cwd(), 'src/lib/phone-proof-flow.ts'), 'utf8');
 const drawingBoard = fs.readFileSync(
   path.join(process.cwd(), 'src/lib/phone-drawing-board.ts'),
   'utf8'
@@ -21,8 +22,6 @@ const bootstrap =
   source.match(/async function bootstrap[\s\S]*?\n}\n\nfunction maybeStartFastPass/)?.[0] ?? '';
 const advanceChallenge =
   source.match(/function advanceChallenge[\s\S]*?\n}\n\nasync function pair/)?.[0] ?? '';
-const pair =
-  source.match(/async function pair[\s\S]*?\n}\n\nasync function loadOAuthModule/)?.[0] ?? '';
 const updateActionLabel = source.match(/function updateBioDrawActionLabel[\s\S]*?\n}/)?.[0] ?? '';
 const finalizePhoneState =
   source.match(/async function finalizePhoneStateAndClose[\s\S]*?\n}/)?.[0] ?? '';
@@ -56,10 +55,11 @@ assert(
   'DONE must finish the phone flow for either server verdict without revealing the decision'
 );
 assert(
-  /if \(options\.keepDrawingBoard\) \{\s*\/\/ Background verdict calculation[\s\S]*?state\.verdict = result\.verdict;[\s\S]*?state\.phase = 'challenge';[\s\S]*?updateBioDrawActionLabel\(\);[\s\S]*?return;\s*}/s.test(
-    pair
-  ),
-  'a background verdict must stay behind the drawing challenge until DONE'
+  source.includes('runPhoneProofFlow') &&
+    proofFlow.includes('if (request.keepDrawingBoard)') &&
+    proofFlow.includes("phase: 'challenge'") &&
+    proofFlow.includes("}, 'drawing')"),
+  'the tested proof-flow boundary must keep background verdicts behind the drawing challenge'
 );
 assert(
   updateActionLabel.includes('drawingBoard?.setDone(Boolean(state.verdict))') &&
