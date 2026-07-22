@@ -2,6 +2,16 @@ import { readFileSync } from 'node:fs';
 
 const ratchets = [
   {
+    file: 'cdk/lib/pair-stack.ts',
+    maxLines: 532,
+    why: 'keep the stack as infrastructure composition while tested resource factories own service policy',
+  },
+  {
+    file: 'cdk/lib/pair-http-api.ts',
+    maxLines: 87,
+    why: 'keep the HTTP route inventory, CORS, throttling, and access logs in one synth-tested boundary',
+  },
+  {
     file: 'cdk/lib/pair-api.ts',
     maxLines: 588,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',

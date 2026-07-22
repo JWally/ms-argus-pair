@@ -36,6 +36,7 @@ import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { LiveE2eRole } from './live-e2e-role';
+import { createPairHttpApi } from './pair-http-api';
 import { RecurringAliasHeater } from './recurring-alias-heater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -249,129 +250,12 @@ export class PairStack extends cdk.Stack {
     // provisioned concurrency.
     const pairFnAlias = pairFn.addAlias('live');
 
-    // ── HTTP API ───────────────────────────────────────────────────────
-    const api = new apigatewayv2.HttpApi(this, 'PairApi', {
-      corsPreflight: {
-        allowOrigins: allOrigins,
-        allowMethods: [apigatewayv2.CorsHttpMethod.GET, apigatewayv2.CorsHttpMethod.POST],
-        allowHeaders: ['content-type'],
-      },
+    // Keep route inventory, CORS, throttling, and access-log policy behind a
+    // synth-tested boundary while retaining this stack as the resource scope.
+    const api = createPairHttpApi(this, {
+      allowOrigins: allOrigins,
+      handler: pairFnAlias,
     });
-    const integration = new integrations.HttpLambdaIntegration('PairInt', pairFnAlias);
-
-    api.addRoutes({
-      path: '/api/session/start',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/start',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/{id}/challenge',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/{id}/validate',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/approval/redeem',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/approval/exchange',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/session/{id}/info',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    // Embeddable widget: mint a signed verdict token (desktop participant),
-    // and server-to-server verify it (the host's backend).
-    api.addRoutes({
-      path: '/api/session/{id}/verdict-token',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/verify',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    // Short pairing token: desktop mints (per-session), phone redeems (single-use).
-    api.addRoutes({
-      path: '/api/session/{id}/pair-token',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/pair-token/redeem',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/phone-perf',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/sso/telemetry',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/session/{id}/desktop-attest',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/session/{id}/phone-attest',
-      methods: [apigatewayv2.HttpMethod.POST],
-      integration,
-    });
-    api.addRoutes({
-      path: '/api/session/{id}/result',
-      methods: [apigatewayv2.HttpMethod.GET],
-      integration,
-    });
-    // Catch-all so any drift in client URL construction returns JSON, not
-    // CloudFront-rewritten SPA HTML. Kept the lesson from the WebRTC era.
-    api.addRoutes({
-      path: '/api/{proxy+}',
-      methods: [apigatewayv2.HttpMethod.ANY],
-      integration,
-    });
-
-    const pairApiAccessLogs = new logs.LogGroup(this, 'PairApiAccessLogs', {
-      retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-    const defaultStage = api.defaultStage?.node.defaultChild as apigatewayv2.CfnStage | undefined;
-    if (defaultStage) {
-      defaultStage.defaultRouteSettings = {
-        throttlingBurstLimit: 50,
-        throttlingRateLimit: 20,
-      };
-      defaultStage.accessLogSettings = {
-        destinationArn: pairApiAccessLogs.logGroupArn,
-        format: JSON.stringify({
-          requestId: '$context.requestId',
-          routeKey: '$context.routeKey',
-          status: '$context.status',
-          integrationStatus: '$context.integrationStatus',
-          integrationError: '$context.integrationErrorMessage',
-          responseLength: '$context.responseLength',
-        }),
-      };
-    }
 
     // ── WebSocket envelope secret ─────────────────────────────────────
     // Single 64-byte secret used as HKDF source for two derived keys:

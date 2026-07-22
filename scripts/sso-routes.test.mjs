@@ -15,6 +15,7 @@ function assert(condition, message) {
 const main = read('src/main.tsx');
 const ssoClient = read('src/lib/sso-client.ts');
 const stack = read('cdk/lib/pair-stack.ts');
+const httpApi = read('cdk/lib/pair-http-api.ts');
 const api = read('cdk/lib/pair-api.ts');
 const router = read('cdk/lib/pair-api/router.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
@@ -40,8 +41,13 @@ for (const endpoint of [
   '/api/sso/approval/redeem',
   '/api/sso/approval/exchange',
 ]) {
-  assert(stack.includes(`path: '${endpoint}'`), `missing CDK HTTP route ${endpoint}`);
+  assert(httpApi.includes(`path: '${endpoint}'`), `missing CDK HTTP route ${endpoint}`);
 }
+
+assert(
+  stack.includes('createPairHttpApi(this, {'),
+  'Pair stack should compose the tested HTTP API boundary'
+);
 
 for (const routeKey of [
   'POST /api/sso/start',
@@ -95,13 +101,13 @@ for (const clientFn of [
   'validateSsoReturn',
   'redeemSsoApproval',
 ]) {
-  assert(
-    ssoClient.includes(`export const ${clientFn}`),
-    `missing client function ${clientFn}`
-  );
+  assert(ssoClient.includes(`export const ${clientFn}`), `missing client function ${clientFn}`);
 }
 
-assert(!stack.includes("path: '/api/sso/{id}/claim'"), 'retired SSO claim route should be removed');
+assert(
+  !httpApi.includes("path: '/api/sso/{id}/claim'"),
+  'retired SSO claim route should be removed'
+);
 assert(
   !router.includes("'POST /api/sso/{id}/claim'"),
   'retired SSO claim handler should be removed'
