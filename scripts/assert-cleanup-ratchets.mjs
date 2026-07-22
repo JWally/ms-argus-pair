@@ -3,8 +3,13 @@ import { readFileSync } from 'node:fs';
 const ratchets = [
   {
     file: 'cdk/lib/pair-api.ts',
-    maxLines: 687,
+    maxLines: 588,
     why: 'keep the pair API route from absorbing extracted feature-slice helpers',
+  },
+  {
+    file: 'cdk/lib/pair-api/router.ts',
+    maxLines: 149,
+    why: 'keep HTTP validation and dispatch independent from runtime infrastructure adapters',
   },
   {
     file: 'cdk/lib/pair-api/phone-attestation-commit.ts',

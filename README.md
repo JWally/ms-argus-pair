@@ -212,8 +212,9 @@ ms-argus-pair/
 ├── cdk/
 │   ├── bin/app.ts, pair-config.mjs   # stacks + single-source domain config
 │   ├── lib/pair-stack.ts             # S3+CloudFront+HTTP API+WS API+DDB+secrets
-│   ├── lib/pair-api.ts               # API Lambda composition root and HTTP router
+│   ├── lib/pair-api.ts               # API Lambda AWS/Valkey/Dynamo composition root
 │   ├── lib/pair-api/                 # tested application slices, stores, tokens, attestation
+│   │   ├── router.ts                    # injectable HTTP validation and route dispatch
 │   │   ├── phone-attestation-request.ts # signed request + desktop binding boundary
 │   │   ├── phone-attestation-route.ts   # proof/projection/verdict orchestration
 │   │   └── phone-attestation-commit.ts  # Valkey/DDB single-writer policy
@@ -230,6 +231,11 @@ lightweight entry so the phone paints instantly. A CloudFront Function maps
 gets its own behavior without `X-Frame-Options: DENY` so customers can iframe
 it (everything else keeps DENY). There is deliberately no React phone fallback:
 `src/phone-main.tsx` and its letter-drawing board are the single phone UI.
+
+The Pair API's HTTP trust boundary lives in `cdk/lib/pair-api/router.ts` and is
+integration-tested with injected route handlers. `cdk/lib/pair-api.ts` owns the
+runtime composition only: environment policy, AWS/Valkey adapters, secrets,
+and construction of the tested application slices.
 
 Stores: **Valkey** (ElastiCache Serverless, shared via `ms-argus-infra` SSM)
 holds sessions, pair-tokens, and rate limits; **DynamoDB** holds WS connection

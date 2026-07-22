@@ -12,9 +12,9 @@
  *     → { sessionId, nonce, expiresAt }   (5-min TTL)
  *
  *   GET /api/session/{id}/info
- *     → { nonce, expiresAt, desktopReady, verdict }
- *     Used by the phone after QR scan to discover the nonce + check
- *     whether the desktop side already submitted.
+ *     → { expiresAt, desktopReady, verdict }
+ *     Unauthenticated readiness only. Binding material stays in the sealed QR
+ *     and authenticated WebSocket messages; this response must never expose it.
  *
  *   POST /api/session/{id}/desktop-attest
  *     body: { argusSessionId, attestation, hostPreflight? }
@@ -22,7 +22,7 @@
  *     Verifies the iframe scan and any required merchant scan, then binds both.
  *
  *   POST /api/session/{id}/phone-attest     body: { argusSessionId, attestation }
- *     → { verdict, reason }
+ *     → neutral completion (the verdict is sealed until phone-done)
  *     Final step. Verifies signature, checks payload binds to the same
  *     session+nonce as the desktop's attestation, and emits a verdict.
  *
@@ -55,12 +55,13 @@ import {
   recordPhoneAttestationValkey,
   claimArgusValkey,
 } from './session-store';
-import { getViewerIp, jsonResp, originAllowed, parseBody } from './pair-api/shared/http';
+import { jsonResp, originAllowed } from './pair-api/shared/http';
 import { validateSsoAttestation } from './pair-api/attestation/envelope';
 import { getTrustSecret, mintDeviceTrust, verifyDeviceTrust } from './pair-api/attestation/trust';
 import { createDdbPasskeyStore } from './pair-api/passkey-store';
 import { verifyProofOfLife } from './pair-api/proof-of-life';
 import { handleTelemetryRoute } from './pair-api/telemetry-routes';
+import { createPairApiRouter } from './pair-api/router';
 import { claimArgusSessionIdDdb } from './pair-api/argus-session-claim';
 import { classifyScan, summarizeDesktopScan } from './pair-api/projection-verdict';
 import { mintReturnCode } from './sso-continuity';
@@ -124,8 +125,6 @@ const pairTokenStore: KvStore = {
 const TABLE = process.env.TABLE_NAME!;
 
 const SESSION_TTL_SECONDS = 300; // 5 minutes
-const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 // WebAuthn RP identifier. Must match the rpId the phone passes to
 // startRegistration on the client (window.location.hostname).
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'captcha-dev-jw.argus.pw';
@@ -532,142 +531,44 @@ const attestPhone = createPhoneAttestationHandler({
   logWarn: (message) => console.warn(message),
 });
 
-const lambdaHandler = async (event: {
-  routeKey: string;
-  pathParameters?: Record<string, string | undefined>;
-  queryStringParameters?: Record<string, string | undefined>;
-  body?: string;
-  headers?: Record<string, string | undefined>;
-  cookies?: string[];
-}) => {
-  if (!originAllowed(event)) return jsonResp(403, { error: 'origin_not_allowed' });
-
-  const routeKey = event.routeKey;
-  const sessionId = event.pathParameters?.id?.toLowerCase();
-  // Routes that don't carry an {id} path parameter — skip the UUID check.
-  const idLessRoutes = new Set([
-    'POST /api/session/start',
-    'POST /api/sso/start',
-    'POST /api/sso/approval/redeem',
-    'POST /api/sso/approval/exchange',
-    'POST /api/verify',
-    'POST /api/pair-token/redeem',
-    'POST /api/phone-perf',
-    'POST /api/sso/telemetry',
-  ]);
-  if (!idLessRoutes.has(routeKey) && !SESSION_ID_RE.test(sessionId ?? '')) {
-    return jsonResp(400, { error: 'invalid_session_id' });
-  }
-  const body = parseBody(event.body);
-  if (body === null) return jsonResp(400, { error: 'invalid_body' });
-  const telemetryResponse = handleTelemetryRoute(routeKey, body, event);
-  if (telemetryResponse) return telemetryResponse;
-
-  switch (routeKey) {
-    case 'POST /api/session/start': {
-      const response = await startPairSessionRequest(body, getViewerIp(event));
-      return jsonResp(response.status, response.body);
-    }
-
-    case 'POST /api/sso/start': {
-      const started = await startSsoSessionRequest(body);
-      if (!started.ok) return jsonResp(started.status, started.body);
-      return ssoStartResp(started.sessionId, started.session, started.failureReturnUrl);
-    }
-
-    case 'POST /api/sso/{id}/challenge': {
-      const challenged = await challengeSsoSessionRequest(sessionId!, body);
-      if (!challenged.ok) return jsonResp(challenged.status, challenged.body);
-      return ssoChallengeResp(
-        challenged.sessionId,
-        challenged.returnCode,
-        challenged.cpi,
-        challenged.hasMerchantCallback
-      );
-    }
-
-    case 'POST /api/sso/{id}/validate': {
-      const validated = await validateSsoSessionRequest(sessionId!, body, getViewerIp(event));
-      if (!validated.ok) return jsonResp(validated.status, validated.body);
-      return ssoValidationResponse(validated);
-    }
-
-    case 'POST /api/sso/approval/redeem': {
-      return redeemSsoApprovalRequest(body, event.cookies);
-    }
-
-    case 'POST /api/sso/approval/exchange': {
-      return exchangeSsoMerchantApproval(body);
-    }
-
-    case 'GET /api/session/{id}/info': {
-      const s = await loadSession(sessionId!);
-      if (!s) return jsonResp(200, { expired: true });
-      // SECURITY (#8): this endpoint is UNAUTHENTICATED — anyone who knows
-      // the sessionId can call it. It MUST NOT leak the pairing secrets.
-      // `nonce`, `desktopArgusSessionId`, and `desktopKeyId` used to be
-      // returned here; that let a relay/farm pair against a desktop session
-      // knowing only its sessionId (verified live 2026-06-24). They are now
-      // delivered ONLY over the authenticated WebSocket `desktop-ready`
-      // message (gated by the phoneToken in the QR fragment) and via the QR
-      // hash — see src/lib/pair.ts awaitDesktopReady(). No legitimate client
-      // reads them from /info. Keep this response free of binding material.
-      return jsonResp(200, {
-        expiresAt: s.expiresAt,
-        desktopReady: !!s.desktopAttestation,
-        verdict: s.verdict,
-      });
-    }
-
-    case 'POST /api/session/{id}/desktop-attest': {
-      return attestDesktop(body, sessionId!);
-    }
-
-    case 'POST /api/session/{id}/phone-attest': {
-      return attestPhone(body, sessionId!, getViewerIp(event));
-    }
-
-    case 'GET /api/session/{id}/result': {
-      return getSessionResult(event, sessionId!);
-    }
-
-    // ── Short pairing token: the sparse QR carries /p/<token>, phone redeems ─
-    // The desktop mints once it has the envelope. The spatial-frequency poison
-    // needs a sparse QR, so we no longer pack {wsUrl,e,pt,n} into the fragment.
-    // Auth = the same bootstrap wsToken as /result (only a participant mints).
-    case 'POST /api/session/{id}/pair-token': {
-      return mintPairTokenRequest(event, sessionId!, body);
-    }
-
-    // Phone redeems the short token (single-use) for the connection blob.
-    case 'POST /api/pair-token/redeem': {
-      const rt = (body as { token?: unknown }).token;
-      if (typeof rt !== 'string') return jsonResp(400, { error: 'missing_token' });
-      const blob = await redeemPairToken(pairTokenStore, rt);
-      if (!blob) return jsonResp(410, { error: 'token_expired_or_used' });
-      return jsonResp(200, blob);
-    }
-
-    // ── Embeddable widget: mint a signed verdict token (siteverify) ──────
-    // The desktop (embed iframe) calls this after the paired verdict, then
-    // postMessages the token to the host page. Auth is the same bootstrap
-    // wsToken as /result — only a session participant can mint.
-    case 'GET /api/session/{id}/verdict-token': {
-      return mintVerdictTokenRequest(event, sessionId!);
-    }
-
-    // ── Server-to-server token verification (the host's backend calls this) ─
-    case 'POST /api/verify': {
-      return verifyVerdictRequest(body);
-    }
-
-    default:
-      // Catch-all returns 200 + error body so CloudFront's errorResponses[404]
-      // (which rewrites to the SPA HTML) doesn't turn an unknown API path into
-      // unparseable HTML. See the long road that led here in commit history.
-      return jsonResp(200, { error: 'no_matching_route', routeKey });
-  }
-};
+const lambdaHandler = createPairApiRouter({
+  allowOrigin: originAllowed,
+  handleTelemetry: handleTelemetryRoute,
+  startPairSession: async (body, viewerIp) => {
+    const response = await startPairSessionRequest(body, viewerIp);
+    return jsonResp(response.status, response.body);
+  },
+  startSsoSession: async (body) => {
+    const started = await startSsoSessionRequest(body);
+    if (!started.ok) return jsonResp(started.status, started.body);
+    return ssoStartResp(started.sessionId, started.session, started.failureReturnUrl);
+  },
+  challengeSsoSession: async (sessionId, body) => {
+    const challenged = await challengeSsoSessionRequest(sessionId, body);
+    if (!challenged.ok) return jsonResp(challenged.status, challenged.body);
+    return ssoChallengeResp(
+      challenged.sessionId,
+      challenged.returnCode,
+      challenged.cpi,
+      challenged.hasMerchantCallback
+    );
+  },
+  validateSsoSession: async (sessionId, body, viewerIp) => {
+    const validated = await validateSsoSessionRequest(sessionId, body, viewerIp);
+    if (!validated.ok) return jsonResp(validated.status, validated.body);
+    return ssoValidationResponse(validated);
+  },
+  redeemSsoApproval: redeemSsoApprovalRequest,
+  exchangeSsoApproval: exchangeSsoMerchantApproval,
+  loadSession,
+  attestDesktop,
+  attestPhone,
+  getSessionResult,
+  mintPairToken: mintPairTokenRequest,
+  redeemPairToken: (token) => redeemPairToken(pairTokenStore, token),
+  mintVerdictToken: mintVerdictTokenRequest,
+  verifyVerdict: verifyVerdictRequest,
+});
 
 // ── Warmer wiring ──────────────────────────────────────────────────────
 // The alias heater sends {source:'serverless-plugin-warmup'} every 10 seconds.
