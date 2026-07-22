@@ -131,6 +131,21 @@ const ratchets = [
     maxLines: 62,
     why: 'keep the cross-window message trust boundary small and directly testable',
   },
+  {
+    file: 'src/pages/Embed.tsx',
+    maxLines: 269,
+    why: 'keep embed session orchestration separate from presentation policy and icon markup',
+  },
+  {
+    file: 'src/lib/embed-presentation.ts',
+    maxLines: 64,
+    why: 'keep captcha presentation policy pure, compact, and directly testable',
+  },
+  {
+    file: 'src/components/EmbedIcons.tsx',
+    maxLines: 48,
+    why: 'keep embed-only SVG presentation separate from session orchestration',
+  },
 ];
 
 function lineCount(file) {

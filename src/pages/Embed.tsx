@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { EmbedSeal, EyeMark, MonitorIcon, PhoneIcon } from '../components/EmbedIcons';
+import {
+  getEmbedPresentation,
+  SCAN_HINT_DELAY_MS,
+  type EmbedCompletion,
+} from '../lib/embed-presentation';
 import { startDesktopSession, type DesktopSession } from '../lib/pair';
 import { isPairSessionTimeout } from '../lib/pair-timeout';
 import './embed.css';
@@ -36,76 +42,6 @@ type UpMsg =
 
 const CPI_FORMAT = /^argus_cpi_(test|live)_[A-Za-z0-9]{10,40}(?:\.(?:fastpass|stepup|forceauth))?$/;
 const CHALLENGE_FORMAT = /^[A-Za-z0-9_-]{16,128}$/;
-const SCAN_HINT_DELAY_MS = 7_000;
-
-type Phase = 'scanning' | 'pairing' | 'verified' | 'timeout' | 'failed';
-
-const COPY: Record<Phase, { title: string; sub: string }> = {
-  scanning: {
-    title: 'Scan with your phone',
-    sub: "Open your phone's camera and point it at the code.",
-  },
-  pairing: { title: 'Phone connected', sub: 'Finishing check...' },
-  verified: { title: 'Verified', sub: "You're all set" },
-  timeout: { title: "Didn't connect in time", sub: 'Refresh to try again' },
-  failed: { title: "Couldn't verify", sub: 'Try again on a trusted network' },
-};
-
-const TRACK_STATUS: Record<Phase, string> = {
-  scanning: 'WAITING FOR PHONE',
-  pairing: 'PHONE CONNECTED',
-  verified: 'CHECK COMPLETE',
-  timeout: 'CONNECTION TIMED OUT',
-  failed: 'CHECK ENDED',
-};
-
-const svg = { fill: 'none', stroke: 'currentColor' } as const;
-
-const EyeMark = () => (
-  <svg className="ax-eye" viewBox="0 0 24 24" strokeWidth={2} {...svg}>
-    <circle cx="12" cy="12" r="10" />
-    <circle cx="12" cy="12" r="5.5" />
-    <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
-  </svg>
-);
-const MonitorIcon = () => (
-  <svg viewBox="0 0 24 24" strokeWidth={1.8} {...svg}>
-    <rect x="3" y="4" width="18" height="12" rx="1.5" />
-    <path d="M9 20h6M12 16v4" />
-  </svg>
-);
-const PhoneIcon = () => (
-  <svg viewBox="0 0 24 24" strokeWidth={1.8} {...svg}>
-    <rect x="7" y="2.5" width="10" height="19" rx="2.5" />
-    <path d="M11 18.5h2" />
-  </svg>
-);
-const SealCheck = () => (
-  <svg className="ax-ring" viewBox="0 0 48 48" strokeWidth={2.4} {...svg}>
-    <circle cx="24" cy="24" r="21" opacity="0.28" />
-    <circle cx="24" cy="24" r="14" />
-    <path
-      d="M17.5 24.5l4.5 4.5 9-10"
-      strokeWidth={3.2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-const SealCross = () => (
-  <svg className="ax-ring" viewBox="0 0 48 48" strokeWidth={2.4} {...svg}>
-    <circle cx="24" cy="24" r="21" opacity="0.28" />
-    <circle cx="24" cy="24" r="14" />
-    <path d="M19 19l10 10M29 19l-10 10" strokeWidth={3.2} strokeLinecap="round" />
-  </svg>
-);
-const SealTimeout = () => (
-  <svg className="ax-ring" viewBox="0 0 48 48" strokeWidth={2.4} {...svg}>
-    <circle cx="24" cy="24" r="21" opacity="0.28" />
-    <circle cx="24" cy="24" r="14" />
-    <path d="M24 16.5v8l5 3" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
 
 /** Read the loader-provided config from the iframe URL (host origin + merchant CPI). */
 function useEmbedConfig(): {
@@ -131,7 +67,7 @@ export function Embed() {
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [showScanHint, setShowScanHint] = useState(false);
-  const [done, setDone] = useState<null | 'paired' | 'timeout' | 'failed'>(null);
+  const [done, setDone] = useState<EmbedCompletion>(null);
   const sessionRef = useRef<DesktopSession | null>(null);
   const moduleRef = useRef<HTMLDivElement | null>(null);
   const qrImageUrlsRef = useRef<string[]>([]);
@@ -259,24 +195,11 @@ export function Embed() {
     };
   }, [hostOrigin, cpi, challengeId]);
 
-  const phase: Phase =
-    done === 'paired'
-      ? 'verified'
-      : done === 'timeout'
-        ? 'timeout'
-        : done === 'failed'
-          ? 'failed'
-          : connected
-            ? 'pairing'
-            : 'scanning';
-  // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
-  const copy = COPY[phase];
-  const instruction =
-    phase === 'scanning' && showScanHint
-      ? 'Having trouble? Move your phone slightly farther away.'
-      : copy.sub;
-  // eslint-disable-next-line security/detect-object-injection -- phase is a closed union key.
-  const trackStatus = TRACK_STATUS[phase];
+  const { phase, title, instruction, trackStatus } = getEmbedPresentation({
+    connected,
+    completion: done,
+    showScanHint,
+  });
 
   return (
     <div className="aegis-stage">
@@ -305,13 +228,7 @@ export function Embed() {
             {!qrReady && <span className="ax-tile-load" />}
           </div>
           <div className="ax-seal">
-            {phase === 'verified' ? (
-              <SealCheck />
-            ) : phase === 'timeout' ? (
-              <SealTimeout />
-            ) : phase === 'failed' ? (
-              <SealCross />
-            ) : null}
+            <EmbedSeal phase={phase} />
           </div>
           <span className="ax-tick tl" />
           <span className="ax-tick tr" />
@@ -320,7 +237,7 @@ export function Embed() {
         </div>
 
         <p className="ax-label" aria-live="polite">
-          {copy.title}
+          {title}
           <span className="ax-sub">{instruction}</span>
         </p>
 
