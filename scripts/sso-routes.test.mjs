@@ -16,6 +16,7 @@ const main = read('src/main.tsx');
 const pairLib = read('src/lib/pair.ts');
 const stack = read('cdk/lib/pair-stack.ts');
 const api = read('cdk/lib/pair-api.ts');
+const router = read('cdk/lib/pair-api/router.ts');
 const ssoScan = read('cdk/lib/pair-api/sso-scan.ts');
 const ssoStart = read('cdk/lib/pair-api/sso-start.ts');
 const ssoChallenge = read('cdk/lib/pair-api/sso-challenge.ts');
@@ -49,7 +50,7 @@ for (const routeKey of [
   'POST /api/sso/approval/redeem',
   'POST /api/sso/approval/exchange',
 ]) {
-  assert(api.includes(`case '${routeKey}'`), `missing Lambda handler for ${routeKey}`);
+  assert(router.includes(`'${routeKey}'`), `missing Lambda handler for ${routeKey}`);
 }
 
 assert(ssoScan.includes('sso_requires_phone'), 'SSO API must reject non-phone scans');
@@ -102,7 +103,7 @@ for (const clientFn of [
 
 assert(!stack.includes("path: '/api/sso/{id}/claim'"), 'retired SSO claim route should be removed');
 assert(
-  !api.includes("case 'POST /api/sso/{id}/claim'"),
+  !router.includes("'POST /api/sso/{id}/claim'"),
   'retired SSO claim handler should be removed'
 );
 assert(!pairLib.includes('submitSsoClaim'), 'retired SSO claim client should be removed');
