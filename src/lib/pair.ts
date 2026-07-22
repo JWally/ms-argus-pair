@@ -35,6 +35,7 @@
  */
 
 import { connectAndWhoami, openWs, type WsConnection } from './ws';
+import { bootstrapDesktopSession } from './desktop-session-bootstrap';
 import { mintDesktopQr } from './desktop-qr';
 import {
   buildProofAttestationBody,
@@ -197,17 +198,6 @@ export interface SsoValidateResult {
   nextDeviceTrust?: string | null;
 }
 
-interface SessionStartResp {
-  sessionId: string;
-  nonce: string;
-  expiresAt: number;
-  ws: {
-    url: string;
-    desktopToken: string;
-    phoneToken: string;
-  };
-}
-
 export interface StartDesktopOptions {
   /**
    * Merchant CPI to attribute this pairing's attestation + usage to. Defaults
@@ -247,33 +237,23 @@ export async function startDesktopSession(
   //
   // When VITE_PAIR_WS_URL is unset (local dev, legacy deploy), we fall
   // back to the serial path: wait for /session/start, then open WS.
-  const staticWsUrl = import.meta.env.VITE_PAIR_WS_URL as string | undefined;
-  const eagerWsPromise = staticWsUrl
-    ? openWs(staticWsUrl).catch((e) => {
-        // If the eager open fails (network blip, bad URL), fall back
-        // to the post-HTTP open inside connectAndWhoami.
-        console.warn('[argus-pair] eager ws open failed, falling back', e);
-        return null;
-      })
-    : Promise.resolve(null);
-
-  const [session, eagerWs] = await Promise.all([
-    jsonFetch<SessionStartResp>(`${API}/session/start`, {
-      method: 'POST',
-      body: JSON.stringify({
-        challengeId,
-        ...(opts.cpi ? { cpi: opts.cpi } : {}),
-        ...(opts.hostPreflightRequired
-          ? { hostPreflightRequired: true, hostOrigin: opts.hostOrigin }
-          : {}),
-      }),
-    }),
-    eagerWsPromise,
-  ]);
-  if (!session.ws?.url || !session.ws.desktopToken || !session.ws.phoneToken) {
-    if (eagerWs) eagerWs.close();
-    throw new Error('session/start did not return WebSocket bootstrap material');
-  }
+  const { session, desktopConn } = await bootstrapDesktopSession(
+    {
+      challengeId,
+      cpi: opts.cpi,
+      hostPreflightRequired: opts.hostPreflightRequired,
+      hostOrigin: opts.hostOrigin,
+      staticWsUrl: import.meta.env.VITE_PAIR_WS_URL as string | undefined,
+      origin: window.location.origin,
+    },
+    {
+      startSession: (body) =>
+        jsonFetch(`${API}/session/start`, { method: 'POST', body: JSON.stringify(body) }),
+      openSocket: openWs,
+      connect: connectAndWhoami,
+      warn: (message, error) => console.warn(message, error),
+    }
+  );
 
   // Evidence starts as soon as the server-issued session binding exists. The
   // settled wrapper prevents an early rejection from becoming unhandled while
@@ -302,20 +282,6 @@ export async function startDesktopSession(
     ([run, hostScan]) => ({ ok: true as const, run, hostScan }),
     (error: unknown) => ({ ok: false as const, error })
   );
-
-  // The WS URL in session.ws.url is what the server says. If our eager
-  // socket is on a DIFFERENT URL (stale build env), discard the eager
-  // socket and let connectAndWhoami open a fresh one against the
-  // server-authoritative URL.
-  const reuseEagerWs = eagerWs && eagerWs.url.startsWith(session.ws.url);
-  if (eagerWs && !reuseEagerWs) eagerWs.close();
-
-  const desktopConn = await connectAndWhoami({
-    url: session.ws.url,
-    token: session.ws.desktopToken,
-    origin: window.location.origin,
-    existingWs: reuseEagerWs ? eagerWs : undefined,
-  });
 
   // Keep the canonical-host build canary. The server now owns QR rendering via
   // PAIR_PUBLIC_ORIGIN, but this still catches the broken deploy class where
